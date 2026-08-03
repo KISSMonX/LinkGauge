@@ -83,6 +83,7 @@ The application uses Tauri's two-process model:
 │   │   ├── runner.rs            # Async process execution, parsing, cancellation, logs
 │   │   ├── runtime.rs           # Bundled runtime discovery and verification
 │   │   ├── report.rs            # HTML/PDF report generation
+│   │   ├── settings.rs          # Settings file read and persistence
 │   │   └── system.rs            # Local network information
 │   ├── Cargo.toml               # Rust dependencies
 │   └── tauri.conf.json          # Desktop window, resources, and bundle configuration
@@ -142,8 +143,8 @@ Then install Node.js 20+ and Rust stable. Building the static Linux iperf3 runti
 Clone the repository and install JavaScript dependencies:
 
 ```bash
-git clone <repository-url>
-cd iperf3-gui
+git clone git@github.com:KISSMonX/LinkGauge.git
+cd LinkGauge
 npm ci
 ```
 
@@ -279,6 +280,25 @@ ESnet officially supports Linux, macOS, and FreeBSD; the bundled Windows binary 
 | Linux application does not start | Verify WebKitGTK 4.1 and distribution runtime dependencies |
 | Windows build cannot replace the EXE | Close any running `iperf3-gui.exe` instance and rebuild |
 | SmartScreen warning | Code-sign release installers with a trusted certificate |
+
+## TODO
+
+### Test engine evolution (planned)
+
+- [ ] Evaluate and implement a Rust-native test engine to replace the bundled iperf3 binary:
+  - Research pure-Rust implementations such as the `iperf` crate, or build a custom tokio-based TCP/UDP throughput and latency tester
+  - Keep the protocol aligned with iperf3 so it remains interoperable with standard iperf3 servers
+  - Goal: eliminate cross-platform binary distribution and supply-chain risk, unify behavior across platforms
+
+### Backlog
+
+- [ ] Investigate the root cause of the "test process exited, status code -1" error on queue recovery (using the enhanced logs)
+- [ ] Code-sign release installers to remove the Windows SmartScreen warning
+- [ ] Verify Linux AppImage / DEB builds and runtime on the oldest supported base distribution
+- [ ] Add a project-level LICENSE file and package metadata
+- [ ] Set up CI/CD (e.g. GitHub Actions) for automated builds and releases
+- [ ] Test result history and multi-run comparison
+- [ ] Unit tests for key frontend logic
 
 ## Contributing
 

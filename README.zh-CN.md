@@ -1,4 +1,4 @@
-# iperf3 GUI
+# LinkGauge: iperf3 GUI
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
@@ -18,6 +18,9 @@
 - 串行测试队列及等待、运行、成功、失败、停止状态
 - 实时带宽曲线和汇总统计
 - 本机及对端网络信息展示
+- 多网卡检测与接口选择弹窗（默认选中第一个接口）并显示链路速率
+- 带宽预设（100 / 1000 Mbps、不限），默认跟随当前网卡链路速率
+- 报文长度预设（128 字节至 64 KB），自定义长度持久化到配置文件
 - INFO、WARN、ERROR 实时日志与等级筛选
 - 按测试任务保存日志，文件名区分完成和未完成状态
 - 测试安全中止及未完成队列恢复
@@ -55,7 +58,10 @@ flowchart LR
 | --- | --- |
 | `start_test` | 校验配置并启动 Ping 或 iperf3 任务 |
 | `stop_test` | 发出取消信号并终止当前子进程 |
-| `get_network_info` | 读取本机 IP、MAC 地址和主机名 |
+| `get_network_info` | 读取本机 IP、MAC 地址、主机名和链路速率 |
+| `get_network_interfaces` | 枚举所有 up 状态的 IPv4 接口（含 MAC 地址和链路速率） |
+| `get_custom_packet_length` | 从设置文件读取持久化的自定义报文长度 |
+| `save_custom_packet_length` | 校验并持久化自定义报文长度到设置文件 |
 | `get_iperf_runtime_info` | 查找并验证内置或外部 iperf3 运行时 |
 | `generate_report` | 在应用数据目录中生成 HTML 或 PDF 报告 |
 
@@ -77,6 +83,7 @@ flowchart LR
 │   │   ├── runner.rs            # 异步执行、解析、中止和日志
 │   │   ├── runtime.rs           # 内置运行时查找与验证
 │   │   ├── report.rs            # HTML/PDF 报告生成
+│   │   ├── settings.rs          # 设置文件的读取与持久化
 │   │   └── system.rs            # 本机网络信息
 │   ├── Cargo.toml               # Rust 依赖
 │   └── tauri.conf.json          # 窗口、资源和安装包配置
@@ -136,8 +143,8 @@ sudo apt install -y \
 克隆仓库并安装 JavaScript 依赖：
 
 ```bash
-git clone <repository-url>
-cd iperf3-gui
+git clone git@github.com:KISSMonX/LinkGauge.git
+cd LinkGauge
 npm ci
 ```
 
@@ -244,6 +251,7 @@ Linux 产物应在计划支持的最旧基础发行版上构建，以避免引�
 - 中断恢复状态保存在本地；全部队列成功后自动清除。
 - 测试日志保存在 Tauri 对应操作系统的应用日志目录下的 `tests/`。
 - 报告保存在 Tauri 对应操作系统的应用数据目录下的 `reports/`。
+- 自定义报文长度持久化到 Tauri 应用配置目录下的 `settings.json`。
 
 日志文件名格式：
 
@@ -272,6 +280,25 @@ ESnet 官方支持 Linux、macOS 和 FreeBSD；内置 Windows 二进制属于社
 | Linux 应用无法启动 | 检查 WebKitGTK 4.1 和发行版运行依赖 |
 | Windows 构建无法替换 EXE | 关闭正在运行的 `iperf3-gui.exe` 后重新构建 |
 | SmartScreen 告警 | 使用可信代码签名证书签署正式安装包 |
+
+## TODO
+
+### 测试引擎演进（规划中）
+
+- [ ] 评估并实现 Rust 原生测试引擎，替代内置 iperf3 二进制：
+  - 调研 `iperf` crate 等纯 Rust 实现，或基于 tokio 自研 TCP/UDP 吞吐与延迟测试
+  - 协议对齐 iperf3，保持与标准 iperf3 服务端互通
+  - 目标：消除跨平台二进制分发与供应链风险，统一各平台行为
+
+### 待办事项
+
+- [ ] 排查恢复测试时「测试进程退出，状态码 -1」的根因（依据增强后的完整日志定位）
+- [ ] 对正式安装包进行代码签名，消除 Windows SmartScreen 告警
+- [ ] 在受支持的最旧基础发行版上验证 Linux AppImage / DEB 的构建与运行
+- [ ] 补充项目级 LICENSE 文件及包元数据
+- [ ] 建立 CI/CD（如 GitHub Actions）自动构建与发布
+- [ ] 测试结果历史记录与多轮对比功能
+- [ ] 前端关键逻辑单元测试
 
 ## 参与贡献
 
