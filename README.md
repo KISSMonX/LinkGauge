@@ -1,6 +1,6 @@
 # iperf3 GUI
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md) | [Chinese](README.zh-CN.md)
 
 A desktop network performance testing application built with Rust, Tauri 2, Vue 3, and TypeScript. It provides a structured GUI workflow for Ping, TCP, and UDP testing while keeping test execution, process control, and log persistence in the Rust backend.
 
@@ -18,6 +18,9 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Sequential test queue with waiting, running, successful, failed, and stopped states
 - Live bandwidth chart and aggregate statistics
 - Local and peer network information
+- Multi-NIC detection with an interface picker (the first interface is the default) and link-speed reporting
+- Bandwidth presets (100 / 1000 Mbps, unlimited) that default to the current NIC link speed
+- Packet-length presets from 128 bytes to 64 KB, with a custom length persisted to the config file
 - Real-time INFO, WARN, and ERROR logs with filtering
 - Per-test log files with completed/incomplete status in the filename
 - Graceful test cancellation and unfinished queue recovery
@@ -55,7 +58,10 @@ The application uses Tauri's two-process model:
 | --- | --- |
 | `start_test` | Validate configuration and launch a Ping or iperf3 task |
 | `stop_test` | Signal cancellation and terminate the active child process |
-| `get_network_info` | Read the local IP address, MAC address, and hostname |
+| `get_network_info` | Read the local IP address, MAC address, hostname, and link speed |
+| `get_network_interfaces` | Enumerate all up IPv4 interfaces with MAC address and link speed |
+| `get_custom_packet_length` | Read the persisted custom packet length from the settings file |
+| `save_custom_packet_length` | Validate and persist a custom packet length to the settings file |
 | `get_iperf_runtime_info` | Resolve and verify the bundled or external iperf3 runtime |
 | `generate_report` | Generate an HTML or PDF report in the application data directory |
 
@@ -177,7 +183,7 @@ npm run tauri build
 The installer is written to:
 
 ```text
-src-tauri/target/release/bundle/nsis/iperf3 GUI 测试工具_<version>_x64-setup.exe
+src-tauri/target/release/bundle/nsis/iperf3 GUI Test Tool_<version>_x64-setup.exe
 ```
 
 The installer contains `iperf3.exe`, `cygwin1.dll`, and the required third-party license files. End users do not need to install iperf3 separately.
@@ -206,7 +212,7 @@ Build Linux artifacts on the oldest supported base distribution to avoid introdu
 1. Download the generated `*_x64-setup.exe` from the project release artifacts.
 2. Verify its checksum when one is published with the release.
 3. Run the installer and follow the NSIS wizard.
-4. Start **iperf3 GUI 测试工具** from the Start menu.
+4. Start **iperf3 GUI Test Tool** from the Start menu.
 
 The current installer is not code-signed, so Windows SmartScreen may display a warning for locally built or unpublished packages.
 
@@ -244,11 +250,12 @@ The peer must be reachable, its firewall must allow the configured TCP/UDP port,
 - Recovery state is stored locally and removed after the complete queue succeeds.
 - Test logs are written under the OS-specific Tauri application log directory in `tests/`.
 - Reports are written under the OS-specific Tauri application data directory in `reports/`.
+- The custom packet length is persisted to `settings.json` in the OS-specific Tauri application config directory.
 
 Log filenames follow this pattern:
 
 ```text
-<local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<完成|未完成>.log
+<local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<completed|incomplete>.log
 ```
 
 ## Bundled iperf3 and Supply Chain

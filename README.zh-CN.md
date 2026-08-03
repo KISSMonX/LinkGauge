@@ -177,7 +177,7 @@ npm run tauri build
 安装包输出到：
 
 ```text
-src-tauri/target/release/bundle/nsis/iperf3 GUI 测试工具_<version>_x64-setup.exe
+src-tauri/target/release/bundle/nsis/iperf3 GUI Test Tool_<version>_x64-setup.exe
 ```
 
 安装包包含 `iperf3.exe`、`cygwin1.dll` 和所需第三方许可证，最终用户无需单独安装 iperf3。
@@ -206,7 +206,7 @@ Linux 产物应在计划支持的最旧基础发行版上构建，以避免引�
 1. 从项目发布产物中下载 `*_x64-setup.exe`。
 2. 如果发布页提供校验值，请先验证文件哈希。
 3. 运行安装程序并完成 NSIS 安装向导。
-4. 从开始菜单启动 **iperf3 GUI 测试工具**。
+4. 从开始菜单启动 **iperf3 GUI Test Tool**。
 
 当前安装包尚未进行代码签名，本地构建或未正式发布的安装包可能触发 Windows SmartScreen 提示。
 

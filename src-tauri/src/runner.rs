@@ -79,9 +79,13 @@ async fn run_process(
 ) {
     let task_name = task_label(&request.task_id);
     let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
-    let local_ip = local_ip_address::local_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| "127.0.0.1".into());
+    let local_ip = if request.local_ip.trim().is_empty() {
+        local_ip_address::local_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|_| "127.0.0.1".into())
+    } else {
+        request.local_ip.clone()
+    };
     let base_name = format!(
         "{}-{}-{}-{}",
         safe_name(&local_ip),
@@ -291,14 +295,23 @@ fn command_for(request: &TestRequest, resolved_iperf: &str) -> (String, Vec<Stri
             args.push(request.parallel.to_string());
         }
         "tcp-reverse" => args.push("-R".into()),
-        "udp-bandwidth" | "udp-loss" => {
-            args.push("-u".into());
+        "udp-bandwidth" | "udp-loss" => args.push("-u".into()),
+        _ => {}
+    }
+    // 带宽限制与报文长度为通用参数，TCP/UDP 客户端测试均生效（服务端模式不传）
+    if request.mode != "server" && request.task_id != "server" {
+        if request.bandwidth > 0 {
             args.push("-b".into());
             args.push(format!("{}M", request.bandwidth));
+        } else if request.task_id == "udp-bandwidth" || request.task_id == "udp-loss" {
+            // UDP 不传 -b 默认只有 1 Mbps，显式传 -b 0 表示不限制
+            args.push("-b".into());
+            args.push("0".into());
+        }
+        if request.packet_length > 0 {
             args.push("-l".into());
             args.push(request.packet_length.to_string());
         }
-        _ => {}
     }
     (resolved_iperf.to_string(), args)
 }
@@ -367,7 +380,7 @@ async fn finish_log(working: &std::path::Path, base: &str, success: bool) -> Str
     let path = parent.join(format!(
         "{}-{}.log",
         base,
-        if success { "完成" } else { "未完成" }
+        if success { "completed" } else { "incomplete" }
     ));
     let _ = fs::rename(working, &path).await;
     path.to_string_lossy().to_string()
@@ -435,7 +448,66 @@ fn emit_error(app: &AppHandle, session: &str, task: &str, message: String, path:
 
 #[cfg(test)]
 mod tests {
-    use super::parse_metric;
+    use super::{command_for, parse_metric};
+    use crate::models::TestRequest;
+
+    fn request(task_id: &str, mode: &str, protocol: &str) -> TestRequest {
+        TestRequest {
+            task_id: task_id.into(),
+            mode: mode.into(),
+            protocol: protocol.into(),
+            server_ip: "192.168.1.100".into(),
+            local_ip: "192.168.1.50".into(),
+            port: 5201,
+            duration: 10,
+            parallel: 1,
+            bandwidth: 0,
+            packet_length: 1024,
+            interval: 1,
+            iperf_path: "bundled".into(),
+        }
+    }
+
+    /// 检查参数列表中 flag 后紧跟的取值是否为 value
+    fn has_flag(args: &[String], flag: &str, value: &str) -> bool {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1))
+            .is_some_and(|next| next == value)
+    }
+
+    #[test]
+    fn tcp_bandwidth_limit_is_applied() {
+        let mut req = request("tcp-single", "client", "tcp");
+        req.bandwidth = 100;
+        let (_, args) = command_for(&req, "iperf3");
+        assert!(has_flag(&args, "-b", "100M"));
+        assert!(has_flag(&args, "-l", "1024"));
+    }
+
+    #[test]
+    fn tcp_unlimited_omits_bandwidth_flag() {
+        let req = request("tcp-single", "client", "tcp");
+        let (_, args) = command_for(&req, "iperf3");
+        assert!(!args.iter().any(|arg| arg == "-b"));
+        assert!(has_flag(&args, "-l", "1024"));
+    }
+
+    #[test]
+    fn udp_unlimited_uses_b_zero() {
+        let req = request("udp-bandwidth", "client", "udp");
+        let (_, args) = command_for(&req, "iperf3");
+        assert!(args.iter().any(|arg| arg == "-u"));
+        assert!(has_flag(&args, "-b", "0"));
+        assert!(has_flag(&args, "-l", "1024"));
+    }
+
+    #[test]
+    fn server_mode_has_no_bandwidth_or_length() {
+        let req = request("server", "server", "tcp");
+        let (_, args) = command_for(&req, "iperf3");
+        assert!(!args.iter().any(|arg| arg == "-b" || arg == "-l"));
+    }
 
     #[test]
     fn parses_tcp_interval() {

@@ -29,6 +29,14 @@ export interface NetworkInfo {
   mac: string
   hostname: string
   interfaceName: string
+  speedMbps: number
+}
+
+export interface InterfaceInfo {
+  ip: string
+  mac: string
+  interfaceName: string
+  speedMbps: number
 }
 
 export interface IperfRuntimeInfo {

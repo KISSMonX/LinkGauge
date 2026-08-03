@@ -7,6 +7,8 @@ pub struct TestRequest {
     pub mode: String,
     pub protocol: String,
     pub server_ip: String,
+    #[serde(default)]
+    pub local_ip: String,
     pub port: u16,
     pub duration: u64,
     pub parallel: u16,
@@ -53,6 +55,17 @@ pub struct NetworkInfo {
     pub mac: String,
     pub hostname: String,
     pub interface_name: String,
+    pub speed_mbps: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterfaceInfo {
+    pub ip: String,
+    pub mac: String,
+    pub interface_name: String,
+    /// 网卡链路速率（Mbps），0 表示未知
+    pub speed_mbps: u64,
 }
 
 #[derive(Debug, Serialize)]

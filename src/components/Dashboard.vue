@@ -13,7 +13,7 @@ const formatTime = (s: number) => `00:${String(Math.floor(s / 60)).padStart(2, '
   <main class="panel dashboard">
     <h2 class="panel-title">当前测试概览</h2>
     <div class="network-grid">
-      <section><h3>本机网络信息</h3><dl><dt>IP 地址</dt><dd>{{ local.ip }}</dd><dt>网卡名称</dt><dd>{{ local.interfaceName }}</dd><dt>MAC 地址</dt><dd>{{ local.mac }}</dd><dt>主机名</dt><dd>{{ local.hostname }}</dd></dl></section>
+      <section><h3>本机网络信息</h3><dl><dt>IP 地址</dt><dd>{{ local.ip }}</dd><dt>网卡名称</dt><dd>{{ local.interfaceName }}</dd><dt>网卡带宽</dt><dd>{{ local.speedMbps ? local.speedMbps + ' Mbps' : '未知' }}</dd><dt>MAC 地址</dt><dd>{{ local.mac }}</dd><dt>主机名</dt><dd>{{ local.hostname }}</dd></dl></section>
       <section><h3>对端网络信息</h3><dl><dt>IP 地址</dt><dd>{{ config.serverIp }}</dd><dt>端口</dt><dd>{{ config.port }}</dd><dt>MAC 地址</dt><dd>自动探测</dd><dt>角色</dt><dd>{{ config.mode === 'client' ? '服务端' : '客户端' }}</dd></dl></section>
       <section class="connection"><div class="section-title"><h3>连接状态</h3><span :class="['status-pill', connected ? 'ok' : 'idle']">{{ connected ? '已连接' : '未连接' }}</span></div><dl><dt>RTT</dt><dd>{{ summary.pingAverage ? summary.pingAverage.toFixed(2) : '--' }} ms</dd><dt>丢包率</dt><dd>{{ summary.lossPercent.toFixed(2) }}%</dd><dt>连接时间</dt><dd>{{ formatTime(elapsed) }}</dd></dl></section>
     </div>
