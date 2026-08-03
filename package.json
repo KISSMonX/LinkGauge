@@ -1,16 +1,16 @@
 {
-  "name": "iperf3-gui",
+  "name": "linkgauge",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "tauri": "tauri",
-    "vendor:iperf3:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/vendor-iperf3-windows.ps1"
+    "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.7.0",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "chart.js": "^4.5.0",
     "vue": "^3.5.18",
     "vue-chartjs": "^5.3.2"

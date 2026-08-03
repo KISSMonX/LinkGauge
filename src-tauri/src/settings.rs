@@ -12,7 +12,7 @@ struct AppSettings {
 fn settings_path(app: &AppHandle) -> PathBuf {
     app.path()
         .app_config_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("iperf3-gui"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("linkgauge"))
         .join("settings.json")
 }
 

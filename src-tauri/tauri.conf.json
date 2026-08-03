@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "iperf3 GUI Test Tool",
+  "productName": "LinkGauge",
   "version": "0.1.0",
-  "identifier": "com.networktools.iperf3gui",
+  "identifier": "com.networktools.linkgauge",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "iperf3 GUI Test Tool",
+        "title": "LinkGauge",
         "width": 1680,
         "height": 960,
         "minWidth": 1180,
@@ -25,7 +25,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "resources": { "resources/": "" }
+    "targets": ["nsis"]
   }
 }
