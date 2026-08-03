@@ -15,7 +15,11 @@ pub struct TestRequest {
     pub duration: u64,
     pub parallel: u16,
     pub bandwidth: u64,
+    /// TCP 报文长度（默认 128KB）
     pub packet_length: u32,
+    /// UDP 报文长度（默认 8KB，最大 64KB）
+    #[serde(default)]
+    pub udp_packet_length: u64,
     pub interval: u64,
 }
 

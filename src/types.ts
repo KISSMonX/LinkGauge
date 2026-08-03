@@ -18,7 +18,10 @@ export interface TestConfig {
   duration: number
   parallel: number
   bandwidth: number
+  /** TCP 报文长度（默认 128KB，最大 1MB） */
   packetLength: number
+  /** UDP 报文长度（默认 8KB，最大 64KB） */
+  udpPacketLength: number
   interval: number
 }
 

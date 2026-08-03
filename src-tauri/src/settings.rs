@@ -6,7 +6,10 @@ use tauri::{AppHandle, Manager};
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
+    /// TCP 自定义报文长度（默认 128KB，上限 1MB）
     custom_packet_length: Option<u32>,
+    /// UDP 自定义报文长度（默认 8KB，上限 64KB）
+    custom_udp_packet_length: Option<u32>,
 }
 
 fn settings_path(app: &AppHandle) -> PathBuf {
@@ -33,17 +36,28 @@ fn save_settings(app: &AppHandle, settings: &AppSettings) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub fn get_custom_packet_length(app: AppHandle) -> u32 {
-    load_settings(&app).custom_packet_length.unwrap_or(0)
+pub fn get_custom_packet_length(app: AppHandle, protocol: String) -> u32 {
+    let settings = load_settings(&app);
+    if protocol == "udp" {
+        settings.custom_udp_packet_length.unwrap_or(0)
+    } else {
+        settings.custom_packet_length.unwrap_or(0)
+    }
 }
 
 #[tauri::command]
-pub fn save_custom_packet_length(app: AppHandle, length: u32) -> Result<(), String> {
-    if length == 0 || length > 262_144 {
-        return Err("自定义报文长度应在 1 ~ 262144 bytes 之间".into());
+pub fn save_custom_packet_length(app: AppHandle, protocol: String, length: u32) -> Result<(), String> {
+    // TCP 报文长度上限 1MB，UDP 上限 64KB
+    let limit = if protocol == "udp" { 65_536 } else { 1_048_576 };
+    if length == 0 || length > limit {
+        return Err(format!("自定义报文长度应在 1 ~ {limit} bytes 之间"));
     }
     let mut settings = load_settings(&app);
-    settings.custom_packet_length = Some(length);
+    if protocol == "udp" {
+        settings.custom_udp_packet_length = Some(length);
+    } else {
+        settings.custom_packet_length = Some(length);
+    }
     save_settings(&app, &settings)
 }
 

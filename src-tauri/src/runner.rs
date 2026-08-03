@@ -185,7 +185,16 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
         protocol,
         duration: request.duration as u32,
         num_streams: 1,
-        blksize: (request.packet_length > 0).then_some(request.packet_length as usize),
+        // TCP/UDP 报文长度分开设置：UDP 取 udp_packet_length（默认 8KB，上限 64KB），
+        // TCP 取 packet_length（默认 128KB，上限 1MB）
+        blksize: {
+            let length = if protocol == TransportProtocol::Udp {
+                request.udp_packet_length
+            } else {
+                request.packet_length as u64
+            };
+            (length > 0).then_some(length as usize)
+        },
         reverse: false,
         bidir: false,
         bandwidth_bps: (request.bandwidth > 0).then_some(request.bandwidth * 1_000_000),
@@ -238,7 +247,11 @@ async fn run_engine_client(
         } else {
             "不限制".into()
         },
-        request.packet_length,
+        if client_params_for(&request).protocol == TransportProtocol::Udp {
+            request.udp_packet_length
+        } else {
+            request.packet_length as u64
+        },
         request.interval,
     );
     append_log(&log, &header);
@@ -944,6 +957,7 @@ mod tests {
             parallel: 4,
             bandwidth: 0,
             packet_length: 1024,
+            udp_packet_length: 8192,
             interval: 1,
         }
     }
@@ -1018,5 +1032,21 @@ mod tests {
         let mut req = request("tcp-single", "client", "tcp");
         req.packet_length = 0;
         assert_eq!(client_params_for(&req).blksize, None);
+    }
+
+    #[test]
+    fn udp_uses_udp_packet_length() {
+        let mut req = request("udp-bandwidth", "client", "udp");
+        req.packet_length = 131072;
+        req.udp_packet_length = 8192;
+        assert_eq!(client_params_for(&req).blksize, Some(8192));
+    }
+
+    #[test]
+    fn tcp_uses_packet_length() {
+        let mut req = request("tcp-single", "client", "tcp");
+        req.packet_length = 131072;
+        req.udp_packet_length = 8192;
+        assert_eq!(client_params_for(&req).blksize, Some(131072));
     }
 }

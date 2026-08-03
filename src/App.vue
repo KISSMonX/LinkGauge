@@ -10,7 +10,7 @@ import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
 import type { BackendEvent, InterfaceInfo, LogEntry, MetricPoint, NetworkInfo, ServerConfig, TestConfig, TestItem, TestSummary } from './types'
 
-const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 4096, interval: 1 }
+const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 8192, interval: 1 }
 const serverDefaults: ServerConfig = { port: 5201 }
 const config = ref<TestConfig>({ ...defaults })
 const serverConfig = ref<ServerConfig>({ ...serverDefaults })
@@ -49,7 +49,8 @@ const infoDialog = ref<{ title: string; message: string; recovery?: boolean } | 
 interface RecoveryState { config: TestConfig; queue: string[]; nextIndex: number }
 const recovery = ref<RecoveryState | null>(null)
 const interfaces = ref<InterfaceInfo[]>([])
-const savedCustomLength = ref(0)
+const savedTcpLength = ref(0)
+const savedUdpLength = ref(0)
 const nicDialog = ref(false)
 const nicSelected = ref(0)
 /** 服务端 IP 尚未被用户手动修改时，重选网卡会同步更新它 */
@@ -94,13 +95,13 @@ function openNicDialog() {
   nicSelected.value = Math.max(0, interfaces.value.findIndex((i) => i.ip === local.value.ip))
   nicDialog.value = true
 }
-async function saveCustomLength(length: number) {
-  if (!isTauri()) { savedCustomLength.value = length; config.value.packetLength = length; log('INFO', `自定义报文长度 ${length} bytes 已保存（预览模式）`); return }
+async function saveCustomLength(protocol: 'tcp' | 'udp', length: number) {
+  const isTcp = protocol === 'tcp'
+  if (!isTauri()) { if (isTcp) { savedTcpLength.value = length; config.value.packetLength = length } else { savedUdpLength.value = length; config.value.udpPacketLength = length } log('INFO', `自定义${isTcp ? 'TCP' : 'UDP'}报文长度 ${length} bytes 已保存（预览模式）`); return }
   try {
-    await invoke('save_custom_packet_length', { length })
-    savedCustomLength.value = length
-    config.value.packetLength = length
-    log('INFO', `自定义报文长度 ${length} bytes 已保存到配置文件`)
+    await invoke('save_custom_packet_length', { protocol, length })
+    if (isTcp) { savedTcpLength.value = length; config.value.packetLength = length } else { savedUdpLength.value = length; config.value.udpPacketLength = length }
+    log('INFO', `自定义${isTcp ? 'TCP' : 'UDP'}报文长度 ${length} bytes 已保存到配置文件`)
   } catch (error) { errorDialog.value = { title: '保存失败', message: String(error) } }
 }
 
@@ -278,18 +279,20 @@ async function exportConfig() {
 function importConfig() { const input = document.createElement('input'); input.type = 'file'; input.accept = '.json'; input.onchange = async () => { const file = input.files?.[0]; if (!file) return; try { config.value = { ...defaults, ...JSON.parse(await file.text()) }; log('INFO', '配置导入成功') } catch { errorDialog.value = { title: '导入失败', message: '配置文件不是有效的 JSON。' } } }; input.click() }
 
 onMounted(async () => {
-  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024) parsed.packetLength = 4096 /* 旧默认值迁移为新默认 4KB */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
+  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
   const unfinished = localStorage.getItem('linkgauge-recovery'); if (unfinished) try { recovery.value = JSON.parse(unfinished); config.value = { ...defaults, ...recovery.value!.config }; const remaining = recovery.value!.queue.slice(recovery.value!.nextIndex); items.value.forEach((item) => { item.enabled = remaining.includes(item.id); item.status = 'waiting' }); infoDialog.value = { title: '发现未完成测试', message: '上次测试未正常完成，是否继续上次的测试队列？', recovery: true } } catch { localStorage.removeItem('linkgauge-recovery') }
   if (isTauri()) {
     try {
-      const [info, ifaces, customLen] = await Promise.all([
+      const [info, ifaces, customTcpLen, customUdpLen] = await Promise.all([
         invoke<NetworkInfo>('get_network_info'),
         invoke<InterfaceInfo[]>('get_network_interfaces'),
-        invoke<number>('get_custom_packet_length'),
+        invoke<number>('get_custom_packet_length', { protocol: 'tcp' }),
+        invoke<number>('get_custom_packet_length', { protocol: 'udp' }),
       ])
       local.value = info
-      savedCustomLength.value = customLen
+      savedTcpLength.value = customTcpLen
+      savedUdpLength.value = customUdpLen
       interfaces.value = ifaces.length ? ifaces : [{ ip: info.ip, mac: info.mac, interfaceName: info.interfaceName, speedMbps: info.speedMbps }]
       // 服务端 IP 为空（或仍是旧版本内置默认值）时视为未手动设置，跟随所选网卡
       autoServerIp.value = !config.value.serverIp || config.value.serverIp === '192.168.1.100'
@@ -312,7 +315,7 @@ onUnmounted(() => { unlisten?.(); if (ticker) clearInterval(ticker) })
 <template>
   <div class="app-shell">
     <div class="titlebar"><div class="brand-icon">⌁</div><h1>LinkGauge</h1><nav class="toolbar-actions"><button @click="importConfig"><Icon name="download" />导入配置</button><button @click="exportConfig"><Icon name="upload" />导出配置</button><button @click="infoDialog = { title: '引擎信息', message: '内置 riperf3 引擎（纯 Rust 实现 iperf3 协议，与官方 iperf3 互通）\n无需安装 iperf3，无外部依赖' }"><Icon name="settings" />设置</button><button @click="infoDialog = { title: '关于', message: 'LinkGauge v0.1.0\nRust + Tauri + Vue 3\n测试引擎：riperf3（MIT OR Apache-2.0）' }"><Icon name="info" />关于</button></nav></div>
-    <div class="workspace"><ConfigPanel :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedCustomLength" @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength" /><Dashboard :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" /><StatusPanel :items="items" :logs="logs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" /></div>
+    <div class="workspace"><ConfigPanel :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength" @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength" /><Dashboard :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" /><StatusPanel :items="items" :logs="logs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" /></div>
     <ReportSummary :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
     <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">重试</button><template v-if="infoDialog?.recovery"><button class="primary" @click="infoDialog = null; start()">恢复测试</button><button class="danger" @click="infoDialog = null; discardRecovery()">停止并重新开始</button></template><button v-if="!infoDialog?.recovery" @click="errorDialog = null; infoDialog = null">确定</button></div></div></div>
     <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>选择本机网卡</h2><p class="nic-hint">检测到多个网卡，请选择测试使用的本机网卡：</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : '速率未知' }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected)">确定</button><button @click="nicDialog = false; applyNic(0)">取消（默认第一个）</button></div></div></div>
