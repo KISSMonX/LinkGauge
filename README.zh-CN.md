@@ -34,14 +34,22 @@
 
 ```mermaid
 flowchart LR
-    UI[Vue 3 界面] -->|Tauri invoke| API[Tauri 命令]
+    subgraph UI["前端 Vue 3（多窗口）"]
+        HUB["主窗口 hub<br/>客户端/服务端标签页容器"]
+        CW["客户端分离窗口"]
+        SW["服务端分离窗口"]
+        HUB <-->|"标签拖拽分离 / 关闭收回"| CW
+        HUB <-->|"标签拖拽分离 / 关闭收回"| SW
+        CW <-->|"side-sync 状态同步"| SW
+    end
+    UI -->|Tauri invoke| API[Tauri 命令]
     API --> RUNNER[Rust 异步任务执行器]
     RUNNER --> PING[系统 Ping]
     RUNNER --> ENGINE[riperf3 进程内引擎]
     PING --> NETWORK[(网络对端)]
     ENGINE --> NETWORK
     ENGINE -->|on_interval 回调| RUNNER
-    RUNNER -->|test-event| UI
+    RUNNER -->|"test-event 广播（指标 / 日志 / 服务端状态）"| UI
     RUNNER --> LOGS[测试日志文件]
     UI --> REPORT[报告命令]
     REPORT --> OUTPUT[HTML / PDF 报告]
@@ -50,6 +58,7 @@ flowchart LR
 软件采用 Tauri 双进程模型：
 
 - **前端：** Vue 组件负责参数配置、数据面板、任务队列、日志、曲线、弹窗和报告概览。`src/App.vue` 负责任务编排和可恢复状态持久化。
+- **多窗口：** 客户端与服务端为可拖拽分离的标签页，分离成独立窗口后支持双屏 / 分屏观察。窗口间通过 `side-sync` 事件同步参数与运行状态，后端 `test-event` 广播到所有窗口；服务端窗口展示服务端自身独立的概览、实时曲线与日志，与客户端数据互不影响。
 - **后端：** Rust 负责校验请求、驱动进程内 riperf3 引擎、通过 `on_interval` 回调逐秒推送指标、发送事件、保存日志和生成报告。
 - **进程通信：** 前端仅调用有限的 Tauri 命令，并接收 `test-event` 更新。测试执行与结果聚合完全保留在 Rust 侧。
 - **引擎：** [riperf3](https://github.com/therealevanhenry/riperf3) 是从零实现的、与 iperf3 线协议兼容的 Rust 实现，vendor 在 `vendor/riperf3` 下并带有一个小补丁（实时 `on_interval` 回调），详见[测试引擎](#测试引擎-riperf3)。引擎在应用进程内运行，无需解析、启动或管理外部二进制，逐秒指标通过类型化回调到达，不再解析文本输出。
@@ -275,6 +284,7 @@ Client-<本机IP>-<服务端IP>-<测试名称>-<yyyyMMddHHmmss>-<完成|未完�
 
 ### 待办事项
 
+- [ ] SSH 支持（通过 SSH 在远程主机启动/部署对端服务端）
 - [ ] 对正式安装包进行代码签名，消除 Windows SmartScreen 告警
 - [ ] 在受支持的最旧基础发行版上验证 Linux AppImage / DEB 的构建与运行
 - [ ] 补充项目级 LICENSE 文件及包元数据

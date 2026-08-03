@@ -34,14 +34,22 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 
 ```mermaid
 flowchart LR
-    UI[Vue 3 UI] -->|Tauri invoke| API[Tauri commands]
+    subgraph UI["Vue 3 frontend (multi-window)"]
+        HUB["Main window hub<br/>client/server tab container"]
+        CW["Detached client window"]
+        SW["Detached server window"]
+        HUB <-->|"tab drag-detach / close-dock"| CW
+        HUB <-->|"tab drag-detach / close-dock"| SW
+        CW <-->|"side-sync state sync"| SW
+    end
+    UI -->|Tauri invoke| API[Tauri commands]
     API --> RUNNER[Rust async task runner]
     RUNNER --> PING[System Ping]
     RUNNER --> ENGINE[riperf3 in-process engine]
     PING --> NETWORK[(Network peer)]
     ENGINE --> NETWORK
     ENGINE -->|on_interval callback| RUNNER
-    RUNNER -->|test-event| UI
+    RUNNER -->|"test-event broadcast (metrics / logs / server status)"| UI
     RUNNER --> LOGS[Test log files]
     UI --> REPORT[Report command]
     REPORT --> OUTPUT[HTML / PDF reports]
@@ -50,6 +58,7 @@ flowchart LR
 The application uses Tauri's two-process model:
 
 - **Frontend:** Vue components render the configuration, dashboard, task queue, logs, chart, dialogs, and report summary. `src/App.vue` coordinates the test queue and persists recoverable state.
+- **Multi-window:** Client and server are tabs that can be dragged out into their own windows for dual/split-screen monitoring. Windows synchronize parameters and running state via `side-sync` events; the backend broadcasts `test-event` to every window. The server window shows its own overview, bandwidth curve, and logs, fully independent of client data.
 - **Backend:** Rust validates requests, drives the in-process riperf3 engine, streams per-interval metrics through the `on_interval` callback, emits typed events, saves logs, and creates reports.
 - **IPC:** The frontend invokes a small command surface and receives `test-event` updates. Test execution and result aggregation remain entirely in Rust.
 - **Engine:** [riperf3](https://github.com/therealevanhenry/riperf3) is a ground-up, wire-compatible Rust implementation of iperf3. It is vendored under `vendor/riperf3` with a small local patch (a live `on_interval` callback) — see [Test Engine](#test-engine-riperf3). Because the engine runs inside the application process, there is no external binary to resolve, spawn, or manage, and per-second metrics arrive through typed callbacks instead of output parsing.
@@ -275,6 +284,7 @@ Client-<local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<completed|incomplete
 
 ### Backlog
 
+- [ ] SSH support (start/deploy the peer server on a remote host over SSH)
 - [ ] Code-sign release installers to remove the Windows SmartScreen warning
 - [ ] Verify Linux AppImage / DEB builds and runtime on the oldest supported base distribution
 - [ ] Add a project-level LICENSE file and package metadata
