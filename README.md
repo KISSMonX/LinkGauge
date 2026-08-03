@@ -1,12 +1,12 @@
-# LinkGauge: iperf3 GUI
+# LinkGauge
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-A desktop network performance testing application built with Rust, Tauri 2, Vue 3, and TypeScript. It provides a structured GUI workflow for Ping, TCP, and UDP testing while keeping test execution, process control, and log persistence in the Rust backend.
+A desktop network performance testing application built with Rust, Tauri 2, Vue 3, and TypeScript. It provides a structured GUI workflow for Ping, TCP, and UDP testing. TCP/UDP tests run on a pure-Rust, in-process [riperf3](https://github.com/therealevanhenry/riperf3) engine that speaks the iperf3 wire protocol — no iperf3 binary is installed, bundled, or spawned; only Ping uses the system command.
 
-> Current release status: Windows x64 is fully packaged as an NSIS installer with iperf3 3.21 included. Linux builds are supported from source and require preparing the bundled Linux runtime on a Linux build host.
+> Current release status: Windows x64 is fully packaged as an NSIS installer. Linux builds are supported from source. The installer contains no third-party network-testing binaries.
 
-![iperf3 GUI](doc/GUI.png)
+![LinkGauge](doc/GUI.png)
 
 ## Features
 
@@ -26,7 +26,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Graceful test cancellation and unfinished queue recovery
 - JSON configuration import, export, and local persistence
 - HTML and PDF report generation
-- Bundled iperf3 runtime with system `PATH` and custom-path fallback
+- Pure-Rust riperf3 engine: interoperable with standard iperf3 servers, no runtime dependencies
 - Windows and Linux build workflows
 
 ## Architecture
@@ -36,9 +36,10 @@ flowchart LR
     UI[Vue 3 UI] -->|Tauri invoke| API[Tauri commands]
     API --> RUNNER[Rust async task runner]
     RUNNER --> PING[System Ping]
-    RUNNER --> IPERF[Bundled iperf3]
+    RUNNER --> ENGINE[riperf3 in-process engine]
     PING --> NETWORK[(Network peer)]
-    IPERF --> NETWORK
+    ENGINE --> NETWORK
+    ENGINE -->|on_interval callback| RUNNER
     RUNNER -->|test-event| UI
     RUNNER --> LOGS[Test log files]
     UI --> REPORT[Report command]
@@ -48,21 +49,20 @@ flowchart LR
 The application uses Tauri's two-process model:
 
 - **Frontend:** Vue components render the configuration, dashboard, task queue, logs, chart, dialogs, and report summary. `src/App.vue` coordinates the test queue and persists recoverable state.
-- **Backend:** Rust validates requests, resolves the iperf3 runtime, launches child processes asynchronously, parses output, emits typed events, saves logs, and creates reports.
-- **IPC:** The frontend invokes a small command surface and receives `test-event` updates. Shell command construction and process ownership remain in Rust.
-- **Runtime resolution:** A custom executable path takes priority. Otherwise, the backend selects the platform-specific bundled binary and falls back to `iperf3` from `PATH` only when the bundled resource is unavailable.
+- **Backend:** Rust validates requests, drives the in-process riperf3 engine, streams per-interval metrics through the `on_interval` callback, emits typed events, saves logs, and creates reports.
+- **IPC:** The frontend invokes a small command surface and receives `test-event` updates. Test execution and result aggregation remain entirely in Rust.
+- **Engine:** [riperf3](https://github.com/therealevanhenry/riperf3) is a ground-up, wire-compatible Rust implementation of iperf3. It is vendored under `vendor/riperf3` with a small local patch (a live `on_interval` callback) — see [Test Engine](#test-engine-riperf3). Because the engine runs inside the application process, there is no external binary to resolve, spawn, or manage, and per-second metrics arrive through typed callbacks instead of output parsing.
 
 ### Backend commands
 
 | Command | Responsibility |
 | --- | --- |
-| `start_test` | Validate configuration and launch a Ping or iperf3 task |
-| `stop_test` | Signal cancellation and terminate the active child process |
+| `start_test` | Validate configuration and run a Ping or riperf3 client/server task |
+| `stop_test` | Signal cancellation: kill the Ping process or gracefully interrupt the riperf3 run |
 | `get_network_info` | Read the local IP address, MAC address, hostname, and link speed |
 | `get_network_interfaces` | Enumerate all up IPv4 interfaces with MAC address and link speed |
 | `get_custom_packet_length` | Read the persisted custom packet length from the settings file |
 | `save_custom_packet_length` | Validate and persist a custom packet length to the settings file |
-| `get_iperf_runtime_info` | Resolve and verify the bundled or external iperf3 runtime |
 | `generate_report` | Generate an HTML or PDF report in the application data directory |
 
 ## Project Structure
@@ -70,23 +70,21 @@ The application uses Tauri's two-process model:
 ```text
 .
 ├── doc/                         # Reference UI and functional specification
-├── scripts/                     # Platform-specific iperf3 preparation scripts
 ├── src/                         # Vue 3 frontend
 │   ├── components/              # UI panels, chart, toolbar, and shared icons
 │   ├── App.vue                  # Application state and task queue orchestration
 │   ├── styles.css               # Desktop layout and visual system
 │   └── types.ts                 # Frontend data contracts
 ├── src-tauri/
-│   ├── resources/iperf3/        # Bundled runtime and third-party notices
 │   ├── src/
 │   │   ├── models.rs            # IPC and domain models
-│   │   ├── runner.rs            # Async process execution, parsing, cancellation, logs
-│   │   ├── runtime.rs           # Bundled runtime discovery and verification
+│   │   ├── runner.rs            # riperf3 client/server tasks, Ping, logs, cancellation
 │   │   ├── report.rs            # HTML/PDF report generation
 │   │   ├── settings.rs          # Settings file read and persistence
 │   │   └── system.rs            # Local network information
 │   ├── Cargo.toml               # Rust dependencies
-│   └── tauri.conf.json          # Desktop window, resources, and bundle configuration
+│   └── tauri.conf.json          # Desktop window and bundle configuration
+├── vendor/riperf3/              # Vendored riperf3 library (MIT OR Apache-2.0) + local patch
 ├── package.json                 # Frontend dependencies and npm scripts
 └── vite.config.ts               # Vite development/build configuration
 ```
@@ -97,15 +95,15 @@ The application uses Tauri's two-process model:
 
 | Layer | Main dependencies | Purpose |
 | --- | --- | --- |
-| Desktop shell | Tauri 2 | Native window, IPC, paths, resources, and installers |
+| Desktop shell | Tauri 2 | Native window, IPC, paths, and installers |
 | Frontend | Vue 3, TypeScript, Vite | UI, application state, and production bundling |
 | Charts | Chart.js, vue-chartjs | Live bandwidth visualization |
-| Async runtime | Tokio | Child processes, file I/O, cancellation, and event loops |
+| Async runtime | Tokio | Async tasks, file I/O, cancellation, and event loops |
 | Serialization | Serde, serde_json | Typed frontend/backend payloads and configuration |
-| Parsing | regex | iperf3 and Ping output parsing |
+| Parsing | regex | Ping output parsing |
 | System information | hostname, local-ip-address, mac_address | Local network identity |
 | Utility | chrono, uuid | Timestamps, filenames, and session IDs |
-| Test engine | iperf3 3.21 | TCP/UDP network performance measurement |
+| Test engine | riperf3 (vendored, pure Rust) | TCP/UDP network performance measurement |
 
 Exact JavaScript and Rust dependency constraints are recorded in `package-lock.json` and `src-tauri/Cargo.lock`.
 
@@ -136,7 +134,7 @@ sudo apt install -y \
   librsvg2-dev
 ```
 
-Then install Node.js 20+ and Rust stable. Building the static Linux iperf3 runtime may additionally require the distribution's static libc development package.
+Then install Node.js 20+ and Rust stable.
 
 ## Getting Started
 
@@ -146,12 +144,6 @@ Clone the repository and install JavaScript dependencies:
 git clone git@github.com:KISSMonX/LinkGauge.git
 cd LinkGauge
 npm ci
-```
-
-The Windows runtime is already stored under `src-tauri/resources/iperf3/windows-x86_64`. To download it again or update the vendored copy using the pinned checksum:
-
-```powershell
-npm run vendor:iperf3:windows
 ```
 
 Start the Tauri development application:
@@ -177,25 +169,18 @@ cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
 ```powershell
 npm ci
-npm run vendor:iperf3:windows
 npm run tauri build
 ```
 
 The installer is written to:
 
 ```text
-src-tauri/target/release/bundle/nsis/iperf3 GUI Test Tool_<version>_x64-setup.exe
+src-tauri/target/release/bundle/nsis/LinkGauge_<version>_x64-setup.exe
 ```
 
-The installer contains `iperf3.exe`, `cygwin1.dll`, and the required third-party license files. End users do not need to install iperf3 separately.
+The installer contains no external runtime binaries; the riperf3 engine is compiled into the application.
 
 ### Linux AppImage and DEB
-
-Prepare a static iperf3 runtime on the Linux build host:
-
-```bash
-sh scripts/vendor-iperf3-linux.sh 3.21
-```
 
 Build the packages:
 
@@ -213,7 +198,7 @@ Build Linux artifacts on the oldest supported base distribution to avoid introdu
 1. Download the generated `*_x64-setup.exe` from the project release artifacts.
 2. Verify its checksum when one is published with the release.
 3. Run the installer and follow the NSIS wizard.
-4. Start **iperf3 GUI Test Tool** from the Start menu.
+4. Start **LinkGauge** from the Start menu.
 
 The current installer is not code-signed, so Windows SmartScreen may display a warning for locally built or unpublished packages.
 
@@ -222,14 +207,14 @@ The current installer is not code-signed, so Windows SmartScreen may display a w
 - **AppImage:** mark the file executable and run it.
 
   ```bash
-  chmod +x iperf3-gui_*.AppImage
-  ./iperf3-gui_*.AppImage
+  chmod +x linkgauge_*.AppImage
+  ./linkgauge_*.AppImage
   ```
 
 - **Debian/Ubuntu:** install the DEB package.
 
   ```bash
-  sudo apt install ./iperf3-gui_*.deb
+  sudo apt install ./linkgauge_*.deb
   ```
 
 ## Usage
@@ -241,13 +226,12 @@ The current installer is not code-signed, so Windows SmartScreen may display a w
 5. Stop a test when necessary. The partial log is retained, and the remaining queue can be recovered on the next launch.
 6. Generate an HTML or PDF report after one or more tasks finish.
 
-The peer must be reachable, its firewall must allow the configured TCP/UDP port, and an iperf3 server must be running when the application is used in client mode.
+The peer must be reachable, its firewall must allow the configured TCP/UDP port, and an iperf3 server must be running when the application is used in client mode. The built-in engine is wire-compatible with standard iperf3 servers (and riperf3 servers).
 
 ## Configuration and Data
 
 - Configuration can be imported or exported as JSON.
 - **Save Configuration** stores the current settings in the local WebView storage.
-- `iperfPath` defaults to `bundled`. Set it to an absolute executable path to override the packaged runtime.
 - Recovery state is stored locally and removed after the complete queue succeeds.
 - Test logs are written under the OS-specific Tauri application log directory in `tests/`.
 - Reports are written under the OS-specific Tauri application data directory in `reports/`.
@@ -259,40 +243,28 @@ Log filenames follow this pattern:
 <local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<completed|incomplete>.log
 ```
 
-## Bundled iperf3 and Supply Chain
+## Test Engine (riperf3)
 
-- Version: iperf3 3.21
-- Windows architecture: x86_64
-- Windows binary source: [ar51an/iperf3-win-builds](https://github.com/ar51an/iperf3-win-builds)
-- Upstream source: [ESnet/iperf](https://github.com/esnet/iperf)
-- The Windows download script pins the release asset and verifies its SHA-256 before extraction.
-- Runtime binaries and license notices are included as Tauri resources.
-
-ESnet officially supports Linux, macOS, and FreeBSD; the bundled Windows binary is a community build. Review `src-tauri/resources/iperf3/THIRD-PARTY-NOTICES.md` before redistribution.
+- Engine: [riperf3](https://github.com/therealevanhenry/riperf3) — a ground-up, wire-compatible Rust implementation of the iperf3 protocol, vendored at `vendor/riperf3` (upstream HEAD, version 0.9.0-dev).
+- The engine runs **in-process**: no iperf3 executable is installed, bundled, resolved, or spawned. Per-second metrics flow through typed callbacks; tests can be interrupted gracefully via a watch channel.
+- **Local patch:** upstream exposes interval results only after a run completes, so a small `on_interval` callback was added (see `vendor/riperf3` — `IntervalReporterConfig`, `ClientBuilder::on_interval`, `ServerBuilder::on_interval`). The patch is marked with `local LinkGauge patch` comments; re-apply it after upgrading the vendored source.
+- Interop: the engine is interoperable with real iperf3 servers and clients (verified upstream against iperf 3.21).
+- Known platform difference: TCP retransmission counts depend on `TCP_INFO`, which is unavailable on Windows; the app reports 0 there.
 
 ## Troubleshooting
 
 | Symptom | Suggested action |
 | --- | --- |
-| Runtime shows unavailable | Re-run the vendor script or set `iperfPath` to a valid executable |
 | Server does not respond | Check the address, port, firewall, routing, and server mode |
-| No live samples appear | Confirm both peers use compatible iperf3 versions and the process produces interval output |
+| No live samples appear | Confirm the peer runs an iperf3-compatible server (iperf3 3.x or riperf3) and the interval is set to 1 s or more |
 | Linux application does not start | Verify WebKitGTK 4.1 and distribution runtime dependencies |
-| Windows build cannot replace the EXE | Close any running `iperf3-gui.exe` instance and rebuild |
+| Windows build cannot replace the EXE | Close any running `linkgauge.exe` instance and rebuild |
 | SmartScreen warning | Code-sign release installers with a trusted certificate |
 
 ## TODO
 
-### Test engine evolution (planned)
-
-- [ ] Evaluate and implement a Rust-native test engine to replace the bundled iperf3 binary:
-  - Research pure-Rust implementations such as the `iperf` crate, or build a custom tokio-based TCP/UDP throughput and latency tester
-  - Keep the protocol aligned with iperf3 so it remains interoperable with standard iperf3 servers
-  - Goal: eliminate cross-platform binary distribution and supply-chain risk, unify behavior across platforms
-
 ### Backlog
 
-- [ ] Investigate the root cause of the "test process exited, status code -1" error on queue recovery (using the enhanced logs)
 - [ ] Code-sign release installers to remove the Windows SmartScreen warning
 - [ ] Verify Linux AppImage / DEB builds and runtime on the oldest supported base distribution
 - [ ] Add a project-level LICENSE file and package metadata
@@ -308,7 +280,7 @@ Issues and pull requests are welcome after the repository is published.
 2. Keep UI contracts in `src/types.ts` aligned with Rust models.
 3. Run the frontend build, Rust tests, and formatting checks.
 4. Do not commit `node_modules`, `dist`, or `src-tauri/target`.
-5. Do not replace third-party binaries without updating checksums and notices.
+5. When upgrading `vendor/riperf3`, keep the `local LinkGauge patch` (`on_interval`) in sync and update the engine version notes in this README.
 
 ## License
 
@@ -316,14 +288,12 @@ This repository does not currently contain a project-wide root `LICENSE` file. B
 
 Third-party components retain their own licenses:
 
-- iperf3: BSD-3-Clause
-- Windows iperf3 build repository: Apache-2.0
+- riperf3: MIT OR Apache-2.0 (see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and the license texts in `vendor/riperf3/`)
 - JavaScript and Rust dependencies: their respective upstream licenses
-
-Complete redistribution notices for the bundled runtime are available in [`src-tauri/resources/iperf3/THIRD-PARTY-NOTICES.md`](src-tauri/resources/iperf3/THIRD-PARTY-NOTICES.md), with full license texts stored beside the binary.
 
 ## Acknowledgements
 
-- [ESnet iperf3](https://github.com/esnet/iperf) for the network measurement engine
+- [riperf3](https://github.com/therealevanhenry/riperf3) for the pure-Rust iperf3-compatible engine
+- [ESnet iperf3](https://github.com/esnet/iperf) for the wire protocol this tool interoperates with
 - [Tauri](https://tauri.app/) for the desktop application framework
 - [Vue](https://vuejs.org/) and [Chart.js](https://www.chartjs.org/) for the frontend and visualization stack
