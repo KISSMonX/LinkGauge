@@ -13,7 +13,6 @@ export interface TestItem {
 
 export interface TestConfig {
   mode: AppMode
-  protocol: Protocol
   serverIp: string
   port: number
   duration: number
@@ -21,7 +20,11 @@ export interface TestConfig {
   bandwidth: number
   packetLength: number
   interval: number
-  iperfPath: string
+}
+
+/** 服务端独立配置（与服务端标签页绑定，与客户端参数互不影响） */
+export interface ServerConfig {
+  port: number
 }
 
 export interface NetworkInfo {
@@ -37,13 +40,6 @@ export interface InterfaceInfo {
   mac: string
   interfaceName: string
   speedMbps: number
-}
-
-export interface IperfRuntimeInfo {
-  available: boolean
-  bundled: boolean
-  path: string
-  version: string
 }
 
 export interface MetricPoint {
