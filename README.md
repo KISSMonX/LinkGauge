@@ -11,6 +11,8 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 ## Features
 
 - Client and server operating modes
+- English / 中文 UI (English by default), switchable in **Settings**, synced across windows
+- Light / dark theme (light by default), switchable in **Settings**, synced across windows
 - Server can bind a specific IP and port, with a configurable log/statistics output interval (seconds)
 - Separate TCP and UDP configuration views
 - Ping connectivity checks

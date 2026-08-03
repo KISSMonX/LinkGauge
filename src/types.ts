@@ -111,6 +111,10 @@ export interface SyncState {
   savedUdpLength: number
   /** 汇总数据（由驱动窗口维护 startedAt/completed/total，指标类字段各窗口本地推导） */
   summary: TestSummary
+  /** 界面语言（默认英文） */
+  locale: 'zh' | 'en'
+  /** 主题外观（默认亮色） */
+  theme: 'light' | 'dark'
 }
 
 /** 子窗口关闭（或点击「停靠回主窗口」）时通知主窗口把标签收回 */

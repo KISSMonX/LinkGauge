@@ -11,7 +11,12 @@ import ServerDashboard from './components/ServerDashboard.vue'
 import StatusPanel from './components/StatusPanel.vue'
 import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
+import { useI18n, type Locale, type MessageKey } from './i18n'
+import { theme, setTheme, type Theme } from './theme'
 import type { BackendEvent, DockEvent, InterfaceInfo, LogEntry, MetricPoint, NetworkInfo, ServerConfig, SyncState, TestConfig, TestItem, TestSummary } from './types'
+
+const { t, locale, setLocale } = useI18n()
+const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 
 const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 8192, interval: 1 }
 const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1 }
@@ -51,6 +56,8 @@ const clientLocalPort = ref(0)
 const errorDialog = ref<{ title: string; message: string } | null>(null)
 /** recovery 为 true 表示「发现未完成测试」弹窗，提供恢复/放弃两个选项 */
 const infoDialog = ref<{ title: string; message: string; recovery?: boolean } | null>(null)
+/** 设置弹窗：语言 / 主题 */
+const settingsDialog = ref(false)
 interface RecoveryState { config: TestConfig; queue: string[]; nextIndex: number }
 const recovery = ref<RecoveryState | null>(null)
 const interfaces = ref<InterfaceInfo[]>([])
@@ -131,6 +138,8 @@ function syncBundle(): SyncState {
     savedTcpLength: savedTcpLength.value,
     savedUdpLength: savedUdpLength.value,
     summary: { ...summary },
+    locale: locale.value,
+    theme: theme.value,
   }
 }
 function emitSync() {
@@ -154,6 +163,9 @@ async function applySync(payload: SyncState) {
   savedTcpLength.value = payload.savedTcpLength
   savedUdpLength.value = payload.savedUdpLength
   Object.assign(summary, payload.summary)
+  // 语言与主题跟随主窗口设置（持久化 + 应用到 DOM）
+  setLocale(payload.locale)
+  setTheme(payload.theme)
   // 等本次 Vue 变更刷完再解除标志，避免应用远端状态触发的 watcher 再广播回去
   await nextTick()
   syncing = false
@@ -176,6 +188,8 @@ watch(local, () => emitSync())
 watch(savedTcpLength, () => emitSync())
 watch(savedUdpLength, () => emitSync())
 watch(summary, () => emitSync(), { deep: true })
+watch(locale, () => emitSync())
+watch(theme, () => emitSync())
 
 // —— 标签页分离 / 收回 ——
 /** 主窗口：标签被拖拽分离 → 创建独立窗口并从停靠列表移除 */
@@ -187,9 +201,9 @@ function detachTab(s: 'client' | 'server') {
   invoke('create_side_window', { side: s }).catch((e) => {
     // 创建失败则把标签放回
     dockedTabs.value = (['client', 'server'] as ('client' | 'server')[]).filter((x) => dockedTabs.value.includes(x) || x === s)
-    errorDialog.value = { title: '窗口创建失败', message: String(e) }
+    errorDialog.value = { title: t('err.windowFailed'), message: String(e) }
   })
-  log('INFO', `「${s === 'client' ? '客户端' : '服务端'}」标签已分离为独立窗口，关闭子窗口可收回`)
+  log('INFO', t('tab.detachedLog', { side: s === 'client' ? t('common.client') : t('common.server') }))
 }
 /** 主窗口：收到子窗口关闭通知（side-dock）后把标签加回 */
 function dockTab(s: 'client' | 'server') {
@@ -212,10 +226,10 @@ async function requestDock(s: 'client' | 'server') {
 async function dockBack() {
   try {
     await emit('side-dock', { side: side.value })
-  } catch (e) { log('WARN', `收回标签通知失败：${e}`) }
+  } catch (e) { log('WARN', t('log.dockNotifyFailed', { e: String(e) })) }
   try {
     await getCurrentWindow().destroy()
-  } catch (e) { log('ERROR', `收回标签失败：${e}`) }
+  } catch (e) { log('ERROR', t('log.dockFailed', { e: String(e) })) }
 }
 
 /** 应用指定序号的网卡：客户端模式更新本机信息与服务端 IP；服务端模式更新绑定 IP。
@@ -225,7 +239,7 @@ function applyNic(index: number, explicit = false) {
   if (!nic) return
   if (nicTarget.value === 'bindIp') {
     serverConfig.value = { ...serverConfig.value, bindIp: nic.ip }
-    log('INFO', `服务端绑定 IP 已设置为 ${nic.ip}`)
+    log('INFO', t('log.bindIpSet', { ip: nic.ip }))
     return
   }
   // 带宽限制仍是旧网卡默认值时，跟随新网卡速率（用户手动改过则保留）
@@ -234,7 +248,7 @@ function applyNic(index: number, explicit = false) {
   if (bandwidthIsNicDefault) config.value.bandwidth = nic.speedMbps > 0 ? nic.speedMbps : 0
   // 用户明确选择的网卡始终同步服务端 IP；启动/取消等默认应用仅在未手动设置过时跟随
   if (explicit || autoServerIp.value) config.value.serverIp = nic.ip
-  log('INFO', `已选择网卡：${nic.interfaceName} (${nic.ip})`)
+  log('INFO', t('log.nicSelected', { name: nic.interfaceName, ip: nic.ip }))
 }
 function openNicDialog(target: 'serverIp' | 'bindIp' = 'serverIp') {
   if (!interfaces.value.length || clientRunning.value) return
@@ -243,22 +257,22 @@ function openNicDialog(target: 'serverIp' | 'bindIp' = 'serverIp') {
   nicDialog.value = true
 }
 async function saveCustomLength(protocol: 'tcp' | 'udp', length: number) {
-  const isTcp = protocol === 'tcp'
-  if (!isTauri()) { if (isTcp) { savedTcpLength.value = length; config.value.packetLength = length } else { savedUdpLength.value = length; config.value.udpPacketLength = length } log('INFO', `自定义${isTcp ? 'TCP' : 'UDP'}报文长度 ${length} bytes 已保存（预览模式）`); return }
+  const protocolName = protocol === 'tcp' ? t('common.tcp') : t('common.udp')
+  if (!isTauri()) { if (protocol === 'tcp') { savedTcpLength.value = length; config.value.packetLength = length } else { savedUdpLength.value = length; config.value.udpPacketLength = length } log('INFO', t('log.customSaved', { protocol: protocolName, length })); return }
   try {
     await invoke('save_custom_packet_length', { protocol, length })
-    if (isTcp) { savedTcpLength.value = length; config.value.packetLength = length } else { savedUdpLength.value = length; config.value.udpPacketLength = length }
-    log('INFO', `自定义${isTcp ? 'TCP' : 'UDP'}报文长度 ${length} bytes 已保存到配置文件`)
-  } catch (error) { errorDialog.value = { title: '保存失败', message: String(error) } }
+    if (protocol === 'tcp') { savedTcpLength.value = length; config.value.packetLength = length } else { savedUdpLength.value = length; config.value.udpPacketLength = length }
+    log('INFO', t('log.customSavedFile', { protocol: protocolName, length }))
+  } catch (error) { errorDialog.value = { title: t('err.saveFailed'), message: String(error) } }
 }
 
 function toggleItem(id: string) { const item = items.value.find((i) => i.id === id); if (item) item.enabled = !item.enabled }
-function reset() { config.value = { ...defaults, mode: config.value.mode, serverIp: local.value.ip, bandwidth: local.value.speedMbps > 0 ? local.value.speedMbps : 0 }; log('INFO', '参数已恢复默认值') }
+function reset() { config.value = { ...defaults, mode: config.value.mode, serverIp: local.value.ip, bandwidth: local.value.speedMbps > 0 ? local.value.speedMbps : 0 }; log('INFO', t('log.reset')) }
 function clearLogs() { logs.value = [] }
 function validate() {
-  if (config.value.mode === 'client' && !/^([a-z\d-]+\.)*[a-z\d-]+$/i.test(config.value.serverIp) && !/^\d{1,3}(\.\d{1,3}){3}$/.test(config.value.serverIp)) return '请输入有效的服务端 IP 或主机名'
-  if (config.value.port < 1 || config.value.port > 65535) return '端口应在 1–65535 之间'
-  if (config.value.duration < 1) return '测试时间必须大于 0 秒'
+  if (config.value.mode === 'client' && !/^([a-z\d-]+\.)*[a-z\d-]+$/i.test(config.value.serverIp) && !/^\d{1,3}(\.\d{1,3}){3}$/.test(config.value.serverIp)) return t('err.serverIp')
+  if (config.value.port < 1 || config.value.port > 65535) return t('err.port')
+  if (config.value.duration < 1) return t('err.duration')
   return ''
 }
 
@@ -267,12 +281,12 @@ async function start() {
   // 恢复测试时参数以用户当前界面为准（应用启动时已从恢复状态加载过上次参数），
   // 不再用开始测试时的快照覆盖，避免用户修改的端口等参数被回退
   if (config.value.bandwidth < 0) config.value.bandwidth = local.value.speedMbps > 0 ? local.value.speedMbps : 0
-  const invalid = validate(); if (invalid) { errorDialog.value = { title: '参数错误', message: invalid }; return }
+  const invalid = validate(); if (invalid) { errorDialog.value = { title: t('err.paramError'), message: invalid }; return }
   const recoveredQueue = savedRecovery?.queue.slice(savedRecovery.nextIndex)
   if (recoveredQueue) items.value.forEach((item) => { item.enabled = recoveredQueue.includes(item.id) })
   // TCP / UDP 测试项可同时勾选，按列表顺序逐个执行
   const selected = items.value.filter((i) => i.enabled)
-  if (!selected.length) { errorDialog.value = { title: '无法开始', message: '请至少选择一个测试项目。' }; return }
+  if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg') }; return }
   items.value.forEach((i) => { if (i.enabled) i.status = 'waiting' })
   points.value = []; progress.value = 0; elapsed.value = 0; connected.value = false
   summary.startedAt = new Date().toLocaleString('zh-CN', { hour12: false }); summary.completed = 0; summary.total = selected.length; summary.logPaths = []
@@ -288,24 +302,24 @@ async function start() {
 /** 启动 riperf3 服务端（独立于客户端任务队列，两者可同时运行） */
 async function startServer() {
   if (serverRunning.value) return
-  if (serverConfig.value.port < 1 || serverConfig.value.port > 65535) { errorDialog.value = { title: '参数错误', message: '端口应在 1–65535 之间' }; return }
-  if (serverConfig.value.interval < 1 || serverConfig.value.interval > 60) { errorDialog.value = { title: '参数错误', message: '日志输出间隔应在 1–60 秒之间' }; return }
+  if (serverConfig.value.port < 1 || serverConfig.value.port > 65535) { errorDialog.value = { title: t('err.paramError'), message: t('err.port') }; return }
+  if (serverConfig.value.interval < 1 || serverConfig.value.interval > 60) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverInterval') }; return }
   const bindTarget = serverConfig.value.bindIp.trim() || local.value.ip
-  log('INFO', `正在启动 riperf3 服务端，监听 ${serverConfig.value.bindIp.trim() ? serverConfig.value.bindIp : '所有网卡'}:${serverConfig.value.port}…`)
-  if (!isTauri()) { serverRunning.value = true; log('INFO', '预览模式：模拟服务端启动'); return }
+  log('INFO', t('log.startServer', { addr: serverConfig.value.bindIp.trim() ? serverConfig.value.bindIp : t('sdash.allAdapters'), port: serverConfig.value.port }))
+  if (!isTauri()) { serverRunning.value = true; log('INFO', t('log.previewServer')); return }
   // 新一轮服务端会话：清空上一次的概览统计与曲线
   serverUptime.value = 0; serverCompleted.value = 0; serverServing.value = false; serverPoints.value = []
   serverPeerIp.value = ''; serverPeerPort.value = 0
   try {
     serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval } })
     serverRunning.value = true
-  } catch (error) { log('ERROR', String(error)); errorDialog.value = { title: '服务端启动失败', message: String(error) } }
+  } catch (error) { log('ERROR', String(error)); errorDialog.value = { title: t('err.serverStartFailed'), message: String(error) } }
 }
 async function stopServer() {
   if (!serverRunning.value) return
   try { if (isTauri() && serverSession.value) await invoke('stop_test', { sessionId: serverSession.value }) } catch (e) { log('WARN', String(e)) }
   serverRunning.value = false; serverSession.value = ''
-  log('INFO', '已请求停止服务端，端口将释放')
+  log('INFO', t('log.stopServer'))
 }
 
 async function runNext() {
@@ -316,7 +330,7 @@ async function runNext() {
   progress.value = Math.round((queueIndex.value / Math.max(1, queue.value.length)) * 100)
   // 每个任务独立缓存：开始时清空实时数据，完成后快照到 completedPoints
   points.value = []
-  log('INFO', `开始${item?.label || 'riperf3 服务端'}`)
+  log('INFO', t('log.startTask', { label: item ? itemLabel(item.id) : t('st.serverRunning') }))
   if (!isTauri()) { simulateTask(taskId); return }
   try {
     clientSession.value = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, ...config.value } })
@@ -360,8 +374,8 @@ function handleEvent(event: BackendEvent) {
         }
       } catch { /* ignore */ }
     }
-    if (event.type === 'complete') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; log('INFO', `服务端已停止（${event.status === 'stopped' ? '手动停止' : '已结束'}）`) }
-    if (event.type === 'error') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; log('ERROR', event.message || '服务端异常退出'); errorDialog.value = { title: '服务端错误', message: event.message || '服务端异常退出' } }
+    if (event.type === 'complete') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; log('INFO', t('log.serverStopped', { reason: event.status === 'stopped' ? t('log.stoppedManual') : t('log.stoppedEnded') })) }
+    if (event.type === 'error') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; log('ERROR', event.message || t('err.serverExited')); errorDialog.value = { title: t('err.serverError'), message: event.message || t('err.serverExited') } }
     return
   }
   // 客户端事件：停止或结束后的事件忽略
@@ -374,7 +388,7 @@ function handleEvent(event: BackendEvent) {
   }
   if (event.type === 'metric' && event.metric) { points.value.push(event.metric); connected.value = true; if (event.taskId === 'ping' && event.metric.jitterMs) summary.pingAverage = event.metric.jitterMs }
   if (event.type === 'complete') completeCurrent(event.status || 'success')
-  if (event.type === 'error') failCurrent(event.message || '测试执行失败')
+  if (event.type === 'error') failCurrent(event.message || t('err.execFailed'))
 }
 
 function completeCurrent(status: TestItem['status']) {
@@ -382,10 +396,10 @@ function completeCurrent(status: TestItem['status']) {
   if (status === 'success') summary.completed++
   // 快照本次测试的完整数据到内存缓存（测试完成后图表显示；退出应用即销毁）
   completedPoints.value = [...points.value]
-  if (item) completedLabel.value = item.label
+  if (item) completedLabel.value = itemLabel(item.id)
   if (recovery.value) { recovery.value.nextIndex = queueIndex.value + 1; localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value)) }
   progress.value = Math.round(((queueIndex.value + 1) / queue.value.length) * 100)
-  if (status === 'failed') { failCurrent('测试进程异常退出'); return }
+  if (status === 'failed') { failCurrent(t('log.processExited')); return }
   // 仅驱动窗口启动下一项，避免多个窗口重复拉起同一个任务
   if (driver.value === ownLabel) void runNext()
 }
@@ -393,19 +407,19 @@ function completeCurrent(status: TestItem['status']) {
 function failCurrent(message: string) {
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = 'failed'
   completedPoints.value = [...points.value]
-  if (item) completedLabel.value = item.label
+  if (item) completedLabel.value = itemLabel(item.id)
   log('ERROR', message); finishRun(false)
   const lastLog = summary.logPaths.at(-1)
-  errorDialog.value = { title: '错误告警', message: lastLog ? `${message}\n\n日志文件：${lastLog}` : message }
+  errorDialog.value = { title: t('err.alert'), message: lastLog ? `${message}\n\n${t('err.logFile', { path: lastLog })}` : message }
 }
-function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100; recovery.value = null; localStorage.removeItem('linkgauge-recovery') } log('INFO', '测试流程结束，日志已保存') }
-async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = item.label; try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; if (recovery.value) { recovery.value.nextIndex = Math.max(0, queueIndex.value); localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value)) } finishRun(false) }
+function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100; recovery.value = null; localStorage.removeItem('linkgauge-recovery') } log('INFO', t('log.finish')) }
+async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; if (recovery.value) { recovery.value.nextIndex = Math.max(0, queueIndex.value); localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value)) } finishRun(false) }
 /** 放弃未完成的测试队列并恢复默认全选，重新开始新一轮测试 */
 function discardRecovery() {
   recovery.value = null
   localStorage.removeItem('linkgauge-recovery')
   items.value.forEach((item) => { item.enabled = true; item.status = 'waiting' })
-  log('INFO', '已放弃上次未完成的测试队列，可重新开始')
+  log('INFO', t('log.discardRecovery'))
 }
 
 const reportStamp = () => {
@@ -415,50 +429,58 @@ const reportStamp = () => {
 }
 /** 弹出系统保存对话框，让用户选择保存目录并自定义文件名，确认后生成报告 */
 async function generateReport(format: 'html' | 'pdf' = 'html') {
-  if (!isTauri()) { infoDialog.value = { title: '预览模式', message: `桌面应用中将生成 ${format.toUpperCase()} 报告。` }; return }
+  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.report', { format: format.toUpperCase() }) }; return }
   try {
     const dir = await invoke<string>('get_report_dir')
     const path = await save({
-      title: '保存测试报告',
+      title: t('report.saveTitle'),
       defaultPath: `${dir}\\linkgauge-report-${reportStamp()}.${format}`,
       filters: [{ name: format.toUpperCase(), extensions: [format] }]
     })
     if (!path) return // 用户取消
     const saved = await invoke<string>('generate_report', { request: { format, savePath: path, config: config.value, summary: { ...summary }, points: chartPoints.value, logs: logs.value } })
-    infoDialog.value = { title: '报告已生成', message: saved }
-  } catch (error) { errorDialog.value = { title: '报告生成失败', message: String(error) } }
+    infoDialog.value = { title: t('report.generated'), message: saved }
+  } catch (error) { errorDialog.value = { title: t('err.reportFailed'), message: String(error) } }
 }
 /** 用系统文件管理器打开报告输出目录 */
 async function openReportDir() {
   try {
-    const dir = isTauri() ? await invoke<string>('open_report_dir') : '桌面应用中将打开报告输出目录（应用数据目录下 reports/）'
-    log('INFO', `报告目录：${dir}`)
-  } catch (error) { errorDialog.value = { title: '打开目录失败', message: String(error) } }
+    const dir = isTauri() ? await invoke<string>('open_report_dir') : t('preview.reportDir')
+    log('INFO', t('log.reportDir', { dir }))
+  } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
 }
 /** 用系统文件管理器打开测试日志目录 */
 async function openLogDir() {
   try {
-    const dir = isTauri() ? await invoke<string>('open_log_dir') : '桌面应用中将打开测试日志目录（应用日志目录下 tests/）'
-    log('INFO', `日志目录：${dir}`)
-  } catch (error) { errorDialog.value = { title: '打开目录失败', message: String(error) } }
+    const dir = isTauri() ? await invoke<string>('open_log_dir') : t('preview.logDir')
+    log('INFO', t('log.logDir', { dir }))
+  } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
 }
 /** 导出配置：弹出保存对话框，默认程序安装目录 config/config.json */
 async function exportConfig() {
-  if (!isTauri()) { infoDialog.value = { title: '预览模式', message: '桌面应用中将弹出保存对话框导出配置。' }; return }
+  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.export') }; return }
   try {
     const dir = await invoke<string>('get_export_dir')
-    const path = await save({ title: '导出配置', defaultPath: `${dir}\\config.json`, filters: [{ name: 'JSON', extensions: ['json'] }] })
+    const path = await save({ title: t('tb.exportConfig'), defaultPath: `${dir}\\config.json`, filters: [{ name: 'JSON', extensions: ['json'] }] })
     if (!path) return // 用户取消
     const saved = await invoke<string>('export_config', { path, config: JSON.stringify(config.value, null, 2) })
-    infoDialog.value = { title: '配置已导出', message: saved }
-  } catch (error) { errorDialog.value = { title: '导出失败', message: String(error) } }
+    infoDialog.value = { title: t('report.exported'), message: saved }
+  } catch (error) { errorDialog.value = { title: t('err.exportFailed'), message: String(error) } }
 }
-function importConfig() { const input = document.createElement('input'); input.type = 'file'; input.accept = '.json'; input.onchange = async () => { const file = input.files?.[0]; if (!file) return; try { config.value = { ...defaults, ...JSON.parse(await file.text()) }; log('INFO', '配置导入成功') } catch { errorDialog.value = { title: '导入失败', message: '配置文件不是有效的 JSON。' } } }; input.click() }
+function importConfig() { const input = document.createElement('input'); input.type = 'file'; input.accept = '.json'; input.onchange = async () => { const file = input.files?.[0]; if (!file) return; try { config.value = { ...defaults, ...JSON.parse(await file.text()) }; log('INFO', t('log.importOk')) } catch { errorDialog.value = { title: t('err.importFailed'), message: t('err.importInvalid') } } }; input.click() }
+
+/** 设置弹窗：切换界面语言（默认英文）与主题外观（默认亮色），变更随 side-sync 同步到所有窗口 */
+function onLocaleChange(event: Event) {
+  setLocale((event.target as HTMLSelectElement).value as Locale)
+}
+function onThemeChange(event: Event) {
+  setTheme((event.target as HTMLSelectElement).value as Theme)
+}
 
 onMounted(async () => {
   const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
-  const unfinished = localStorage.getItem('linkgauge-recovery'); if (unfinished) try { recovery.value = JSON.parse(unfinished); config.value = { ...defaults, ...recovery.value!.config }; const remaining = recovery.value!.queue.slice(recovery.value!.nextIndex); items.value.forEach((item) => { item.enabled = remaining.includes(item.id); item.status = 'waiting' }); /* 恢复确认弹窗只在主窗口弹出，分离窗口静默加载状态（运行中的状态随后由同步事件更新） */ if (side.value === 'hub') infoDialog.value = { title: '发现未完成测试', message: '上次测试未正常完成，是否继续上次的测试队列？', recovery: true } } catch { localStorage.removeItem('linkgauge-recovery') }
+  const unfinished = localStorage.getItem('linkgauge-recovery'); if (unfinished) try { recovery.value = JSON.parse(unfinished); config.value = { ...defaults, ...recovery.value!.config }; const remaining = recovery.value!.queue.slice(recovery.value!.nextIndex); items.value.forEach((item) => { item.enabled = remaining.includes(item.id); item.status = 'waiting' }); /* 恢复确认弹窗只在主窗口弹出，分离窗口静默加载状态（运行中的状态随后由同步事件更新） */ if (side.value === 'hub') infoDialog.value = { title: t('recover.title'), message: t('recover.message'), recovery: true } } catch { localStorage.removeItem('linkgauge-recovery') }
   if (isTauri()) {
     try {
       // 跨窗口同步：状态包广播 + 主窗口收回标签通知 + 子窗口被请求关闭
@@ -471,7 +493,7 @@ onMounted(async () => {
           event.preventDefault()
           try {
             await emit('side-dock', { side: side.value })
-          } catch (e) { log('WARN', `收回标签通知失败：${e}`) }
+          } catch (e) { log('WARN', t('log.dockNotifyFailed', { e: String(e) })) }
           await getCurrentWindow().destroy()
         })
         unlistenClose = await listen<DockEvent>('side-close', (e) => { if (e.payload.side === side.value) void dockBack() })
@@ -494,13 +516,13 @@ onMounted(async () => {
       // 网卡选择对话框只在主窗口弹出，避免多个窗口同时弹窗
       if (side.value === 'hub' && interfaces.value.length > 1) { nicSelected.value = 0; nicDialog.value = true }
       unlisten = await listen<BackendEvent>('test-event', (e) => handleEvent(e.payload))
-    } catch (e) { log('WARN', `系统信息读取失败：${e}`) }
+    } catch (e) { log('WARN', t('log.sysInfoFailed', { e: String(e) })) }
   } else {
     // 浏览器预览模式：无网卡信息，使用回退默认值
     if (!config.value.serverIp) config.value.serverIp = '127.0.0.1'
     if (config.value.bandwidth === -1) config.value.bandwidth = 100
   }
-  log('INFO', 'LinkGauge 已就绪')
+  log('INFO', t('log.ready'))
 })
 onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenClose?.(); if (ticker) clearInterval(ticker) })
 </script>
@@ -509,9 +531,9 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenCl
   <div class="app-shell" :class="['view-' + side, { 'no-summary': side === 'server' }]">
     <div class="titlebar">
       <div class="brand-icon">⌁</div>
-      <h1>LinkGauge<template v-if="side !== 'hub'"> · {{ side === 'client' ? '客户端' : '服务端' }}</template></h1>
-      <nav v-if="side === 'hub'" class="toolbar-actions"><button @click="importConfig"><Icon name="download" />导入配置</button><button @click="exportConfig"><Icon name="upload" />导出配置</button><button @click="infoDialog = { title: '引擎信息', message: '内置 riperf3 引擎（纯 Rust 实现 iperf3 协议，与官方 iperf3 互通）\n无需安装 iperf3，无外部依赖' }"><Icon name="settings" />设置</button><button @click="infoDialog = { title: '关于', message: 'LinkGauge v0.1.0\nRust + Tauri + Vue 3\n测试引擎：riperf3（MIT OR Apache-2.0）' }"><Icon name="info" />关于</button></nav>
-      <nav v-else class="toolbar-actions"><button title="关闭此窗口并把标签放回主窗口" @click="dockBack"><Icon name="monitor" />⇱ 停靠回主窗口</button></nav>
+      <h1>LinkGauge<template v-if="side !== 'hub'"> · {{ side === 'client' ? t('common.client') : t('common.server') }}</template></h1>
+      <nav v-if="side === 'hub'" class="toolbar-actions"><button @click="importConfig"><Icon name="download" />{{ t('tb.importConfig') }}</button><button @click="exportConfig"><Icon name="upload" />{{ t('tb.exportConfig') }}</button><button @click="settingsDialog = true"><Icon name="settings" />{{ t('tb.settings') }}</button><button @click="infoDialog = { title: t('tb.about'), message: t('about.message') }"><Icon name="info" />{{ t('tb.about') }}</button></nav>
+      <nav v-else class="toolbar-actions"><button :title="t('tb.dockBack')" @click="dockBack"><Icon name="monitor" />⇱ {{ t('tb.dockBack') }}</button></nav>
     </div>
     <div class="workspace">
       <ConfigPanel
@@ -530,22 +552,23 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenCl
         @update:config="config = $event" @update:server-config="serverConfig = $event" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength"
       />
       <div v-else class="panel config-panel dock-empty">
-        <h2>标签页已分离</h2>
-        <p>客户端 / 服务端已各自独立为窗口，可拖到另一块屏幕或分屏摆放；关闭子窗口即可收回标签。</p>
+        <h2>{{ t('tab.detachedTitle') }}</h2>
+        <p>{{ t('tab.detachedDesc') }}</p>
         <div class="dock-actions">
-          <button class="primary" @click="requestDock('client')"><Icon name="monitor" />收回客户端标签</button>
-          <button class="primary" @click="requestDock('server')"><Icon name="monitor" />收回服务端标签</button>
+          <button class="primary" @click="requestDock('client')"><Icon name="monitor" />{{ t('tab.dockClient') }}</button>
+          <button class="primary" @click="requestDock('server')"><Icon name="monitor" />{{ t('tab.dockServer') }}</button>
         </div>
       </div>
       <!-- 客户端视角：概览 + 实时曲线（主窗口客户端标签 / 客户端分离窗口） -->
       <Dashboard v-if="!showServerView" :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" :local-port="clientLocalPort" />
       <!-- 服务端视角：服务端自身概览 + 服务端观测的实时曲线（与客户端数据独立），对端为客户端 -->
-      <ServerDashboard v-else :bind-target="serverConfig.bindIp.trim() || '所有网卡'" :port="serverConfig.port" :running="serverRunning" :uptime="serverUptime" :completed="serverCompleted" :serving="serverServing" :points="serverPoints" :peer-ip="serverPeerIp" :peer-port="serverPeerPort" />
+      <ServerDashboard v-else :bind-target="serverConfig.bindIp.trim() || t('sdash.allAdapters')" :port="serverConfig.port" :running="serverRunning" :uptime="serverUptime" :completed="serverCompleted" :serving="serverServing" :points="serverPoints" :peer-ip="serverPeerIp" :peer-port="serverPeerPort" />
       <!-- 客户端/服务端视角各自只显示自己的日志（引擎日志 + 本窗口 UI 日志） -->
       <StatusPanel :mode="showServerView ? 'logs' : 'full'" :items="items" :logs="showServerView ? serverLogs : clientLogs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
     </div>
     <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
-    <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">重试</button><template v-if="infoDialog?.recovery"><button class="primary" @click="infoDialog = null; start()">恢复测试</button><button class="danger" @click="infoDialog = null; discardRecovery()">停止并重新开始</button></template><button v-if="!infoDialog?.recovery" @click="errorDialog = null; infoDialog = null">确定</button></div></div></div>
-    <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>选择本机网卡</h2><p class="nic-hint">检测到多个网卡，请选择测试使用的本机网卡：</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : '速率未知' }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">确定</button><button @click="nicDialog = false; applyNic(0)">取消（默认第一个）</button></div></div></div>
+    <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><template v-if="infoDialog?.recovery"><button class="primary" @click="infoDialog = null; start()">{{ t('recover.resume') }}</button><button class="danger" @click="infoDialog = null; discardRecovery()">{{ t('recover.discard') }}</button></template><button v-if="!infoDialog?.recovery" @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
+    <div v-if="settingsDialog" class="modal-backdrop" @click.self="settingsDialog = false"><div class="modal"><button class="modal-close" @click="settingsDialog = false">×</button><h2>{{ t('settings.title') }}</h2><div class="settings-form"><label><span>{{ t('settings.language') }}</span><select :value="locale" @change="onLocaleChange($event)"><option value="en">English</option><option value="zh">中文</option></select></label><label><span>{{ t('settings.theme') }}</span><select :value="theme" @change="onThemeChange($event)"><option value="light">{{ t('settings.light') }}</option><option value="dark">{{ t('settings.dark') }}</option></select></label></div><p class="settings-note">{{ t('settings.engineNote') }}</p><div class="modal-actions"><button class="primary" @click="settingsDialog = false">{{ t('common.confirm') }}</button></div></div></div>
+    <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false; applyNic(0)">{{ t('nic.cancel') }}</button></div></div></div>
   </div>
 </template>

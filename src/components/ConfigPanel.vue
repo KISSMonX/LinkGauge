@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { NetworkInfo, ServerConfig, TestConfig, TestItem } from '../types'
+import { useI18n, type MessageKey } from '../i18n'
 import Icon from './Icon.vue'
 
 /** tabs：主窗口已停靠的标签列表（undefined = 分离窗口，仅显示 detached 一侧） */
@@ -23,6 +24,8 @@ const emit = defineEmits<{
   detach: [side: 'client' | 'server']
 }>()
 
+const { t } = useI18n()
+const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 const isTauri = () => '__TAURI_INTERNALS__' in window
 /** 当前展示的一侧：分离窗口固定为 detached，主窗口跟随激活标签 */
 const visibleSide = computed<'client' | 'server'>(() => props.detached ?? props.tab)
@@ -38,7 +41,7 @@ function startTabDrag(side: 'client' | 'server', event: PointerEvent) {
   if (!isTauri() || !props.tabs?.length || event.button !== 0) return
   const ghost = document.createElement('div')
   ghost.className = 'tab-ghost'
-  ghost.textContent = side === 'client' ? '客户端' : '服务端'
+  ghost.textContent = t(side === 'client' ? 'common.client' : 'common.server')
   document.body.appendChild(ghost)
   drag.value = { side, startX: event.clientX, startY: event.clientY, ghost }
   dragFar.value = false
@@ -50,9 +53,9 @@ function onTabDragMove(event: PointerEvent) {
   if (!d) return
   const dist = Math.hypot(event.clientX - d.startX, event.clientY - d.startY)
   dragFar.value = dist > DETACH_THRESHOLD
-  d.ghost.textContent = d.side === 'client' ? '客户端' : '服务端'
+  d.ghost.textContent = t(d.side === 'client' ? 'common.client' : 'common.server')
   d.ghost.classList.toggle('detach', dragFar.value)
-  if (dragFar.value) d.ghost.textContent += ' ⇱ 释放以分离'
+  if (dragFar.value) d.ghost.textContent += ` ${t('tab.detachRelease')}`
   d.ghost.style.transform = `translate(${event.clientX - 8}px, ${event.clientY - 8}px)`
 }
 function endTabDrag(event: PointerEvent) {
@@ -93,7 +96,9 @@ const bandwidthOptions = computed(() => {
   const options: { value: number; label: string }[] = []
   for (const value of [nic, 100, 1000, 0]) {
     if (options.some((option) => option.value === value)) continue
-    const label = value === nic && nic > 0 ? `${value} Mbps（当前网卡）` : value === 0 ? '0 Mbps（不限制）' : `${value} Mbps`
+    const label = value === nic && nic > 0
+      ? t('cfg.bandwidthNic', { v: value })
+      : value === 0 ? t('cfg.bandwidthUnlimited') : `${value} Mbps`
     options.push({ value, label })
   }
   return options
@@ -110,7 +115,7 @@ const isPreset = (presets: number[], value: number) => presets.includes(value)
 function lengthOptions(presets: number[], savedCustom: number) {
   const options = presets.map((value) => ({ value, label: formatLength(value) }))
   if (savedCustom > 0 && !isPreset(presets, savedCustom)) {
-    options.push({ value: savedCustom, label: `${formatLength(savedCustom)}（自定义）` })
+    options.push({ value: savedCustom, label: `${formatLength(savedCustom)}（${t('cfg.custom')}）` })
   }
   return options
 }
@@ -168,67 +173,68 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
 <template>
   <aside class="panel config-panel">
     <div v-if="tabs" class="mode-tabs">
-      <button v-for="side in tabs" :key="side" :class="{ active: tab === side }" title="拖拽标签可分离为独立窗口" @pointerdown="startTabDrag(side, $event)" @pointermove="onTabDragMove" @pointerup="endTabDrag" @pointercancel="endTabDrag" @click="onTabClick(); emit('update:tab', side)"><Icon name="monitor" />{{ side === 'client' ? '客户端' : '服务端' }}<span class="tab-detach">⇱</span></button>
+      <button v-for="side in tabs" :key="side" :class="{ active: tab === side }" :title="t('tab.dragHint')" @pointerdown="startTabDrag(side, $event)" @pointermove="onTabDragMove" @pointerup="endTabDrag" @pointercancel="endTabDrag" @click="onTabClick(); emit('update:tab', side)"><Icon name="monitor" />{{ side === 'client' ? t('common.client') : t('common.server') }}<span class="tab-detach">⇱</span></button>
     </div>
     <template v-if="visibleSide === 'client'">
     <section class="config-section tests-section">
-      <div class="section-title"><h2>测试项目</h2></div>
-      <p class="protocol-hint">TCP 与 UDP 测试项可同时勾选，将按列表顺序逐个执行</p>
+      <div class="section-title"><h2>{{ t('cfg.tests') }}</h2></div>
+      <p class="protocol-hint">{{ t('cfg.testsHint') }}</p>
       <div class="test-list">
         <label v-for="(item, index) in items" :key="item.id">
           <input type="checkbox" :checked="item.enabled" :disabled="clientRunning" @change="emit('toggle-item', item.id)" />
-          <span>{{ index + 1 }}. {{ item.label }}</span><span class="drag">≡</span>
+          <span>{{ index + 1 }}. {{ itemLabel(item.id) }}</span><span class="drag">≡</span>
         </label>
       </div>
     </section>
     <section class="config-section parameters">
-      <div class="section-title"><h2>参数设置</h2><button class="text-button" :disabled="clientRunning" @click="emit('reset')">↻ 重置</button></div>
-      <label><span>服务端 IP</span><span class="ip-row"><input :value="config.serverIp" :disabled="clientRunning" @input="set('serverIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="clientRunning" title="选择本机网卡" @click="emit('pick-nic')">本机</button></span></label>
-      <label><span>端口</span><input type="number" :value="config.port" min="1" max="65535" :disabled="clientRunning" @input="set('port', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><span>持续时间(s)</span><input type="number" :value="config.duration" min="1" max="86400" :disabled="clientRunning" @input="set('duration', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><span>并发流数</span><input type="number" :value="config.parallel" min="1" max="128" :disabled="clientRunning" @input="set('parallel', Number(($event.target as HTMLInputElement).value))" /><small>仅 TCP 多并发流生效</small></label>
-      <label><span>带宽限制</span><select :value="config.bandwidth" :disabled="clientRunning" @change="set('bandwidth', Number(($event.target as HTMLSelectElement).value))"><option v-for="option in bandwidthOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>0 = 不限制</small></label>
-      <label><span>TCP 报文长度</span><select :value="tcpPacketSelect" :disabled="clientRunning" @change="onPacketChange('tcp', $event)"><option v-for="option in tcpPacketOptions" :key="option.value" :value="option.value">{{ option.label }}</option><option value="custom">自定义…</option></select></label>
-      <label><span>UDP 报文长度</span><select :value="udpPacketSelect" :disabled="clientRunning" @change="onPacketChange('udp', $event)"><option v-for="option in udpPacketOptions" :key="option.value" :value="option.value">{{ option.label }}</option><option value="custom">自定义…</option></select></label>
-      <label><span>间隔输出(s)</span><input type="number" :value="config.interval" min="1" max="60" :disabled="clientRunning" @input="set('interval', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><span>测试引擎</span><select disabled><option>riperf3（纯 Rust 内置）</option></select></label>
-      <label><span>传输方向</span><select disabled><option>正向（默认）</option></select></label>
-      <label class="log-option"><input type="checkbox" checked disabled /><span>测试中出现非致命错误仅记录日志</span></label>
-      <p class="runtime-state available">● 内置 riperf3 引擎已就绪（无需安装 iperf3）</p>
+      <div class="section-title"><h2>{{ t('cfg.params') }}</h2><button class="text-button" :disabled="clientRunning" @click="emit('reset')">{{ t('cfg.reset') }}</button></div>
+      <label><span>{{ t('cfg.serverIp') }}</span><span class="ip-row"><input :value="config.serverIp" :disabled="clientRunning" @input="set('serverIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="clientRunning" :title="t('nic.title')" @click="emit('pick-nic')">{{ t('cfg.nicBtn') }}</button></span></label>
+      <label><span>{{ t('cfg.port') }}</span><input type="number" :value="config.port" min="1" max="65535" :disabled="clientRunning" @input="set('port', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label><span>{{ t('cfg.duration') }}</span><input type="number" :value="config.duration" min="1" max="86400" :disabled="clientRunning" @input="set('duration', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label><span>{{ t('cfg.parallel') }}</span><input type="number" :value="config.parallel" min="1" max="128" :disabled="clientRunning" @input="set('parallel', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('cfg.parallelNote') }}</small></label>
+      <label><span>{{ t('cfg.bandwidth') }}</span><select :value="config.bandwidth" :disabled="clientRunning" @change="set('bandwidth', Number(($event.target as HTMLSelectElement).value))"><option v-for="option in bandwidthOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>{{ t('cfg.unlimited') }}</small></label>
+      <label><span>{{ t('cfg.tcpLen') }}</span><select :value="tcpPacketSelect" :disabled="clientRunning" @change="onPacketChange('tcp', $event)"><option v-for="option in tcpPacketOptions" :key="option.value" :value="option.value">{{ option.label }}</option><option value="custom">{{ t('cfg.custom') }}</option></select></label>
+      <label><span>{{ t('cfg.udpLen') }}</span><select :value="udpPacketSelect" :disabled="clientRunning" @change="onPacketChange('udp', $event)"><option v-for="option in udpPacketOptions" :key="option.value" :value="option.value">{{ option.label }}</option><option value="custom">{{ t('cfg.custom') }}</option></select></label>
+      <label><span>{{ t('cfg.interval') }}</span><input type="number" :value="config.interval" min="1" max="60" :disabled="clientRunning" @input="set('interval', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label><span>{{ t('cfg.engine') }}</span><select disabled><option>{{ t('cfg.engineValue') }}</option></select></label>
+      <label><span>{{ t('cfg.direction') }}</span><select disabled><option>{{ t('cfg.directionValue') }}</option></select></label>
+      <label class="log-option"><input type="checkbox" checked disabled /><span>{{ t('cfg.logOption') }}</span></label>
+      <p class="runtime-state available">{{ t('cfg.engineReady') }}</p>
     </section>
     <div class="config-actions">
-      <button class="primary" :disabled="clientRunning" @click="emit('start')"><Icon name="play" />{{ recovery ? '恢复测试' : '开始测试' }}</button>
-      <button class="danger" :disabled="!clientRunning" @click="emit('stop')"><Icon name="stop" />停止测试</button>
+      <button class="primary" :disabled="clientRunning" @click="emit('start')"><Icon name="play" />{{ recovery ? t('cfg.resume') : t('cfg.start') }}</button>
+      <button class="danger" :disabled="!clientRunning" @click="emit('stop')"><Icon name="stop" />{{ t('cfg.stop') }}</button>
     </div>
     </template>
     <template v-else>
-    <section class="config-section server-params">      <div class="section-title"><h2>服务端设置</h2><span :class="['status-pill', serverRunning ? 'ok' : 'idle']">{{ serverRunning ? '运行中' : '未运行' }}</span></div>
-      <label><span>绑定 IP</span><span class="ip-row"><input :value="serverConfig.bindIp" :disabled="serverRunning" placeholder="留空 = 所有网卡" @input="setServer('bindIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="serverRunning" title="选择本机网卡" @click="emit('pick-nic-server')">本机</button></span></label>
-      <label><span>监听端口</span><input type="number" :value="serverConfig.port" min="1" max="65535" :disabled="serverRunning" @input="setServer('port', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><span>日志输出间隔(s)</span><input type="number" :value="serverConfig.interval" min="1" max="60" :disabled="serverRunning" @input="setServer('interval', Number(($event.target as HTMLInputElement).value))" /><small>每隔几秒输出一次日志与统计</small></label>
-      <p class="server-hint">服务端将持续监听配置的端口并处理测试请求，客户端与服务端可同时运行（同机测试时客户端连本机 IP 与同一端口）。绑定 IP 留空时监听所有网卡。</p>
-      <p class="runtime-state available">● 内置 riperf3 引擎已就绪（无需安装 iperf3）</p>
+    <section class="config-section server-params">
+      <div class="section-title"><h2>{{ t('srv.title') }}</h2><span :class="['status-pill', serverRunning ? 'ok' : 'idle']">{{ serverRunning ? t('common.running') : t('common.notRunning') }}</span></div>
+      <label><span>{{ t('srv.bindIp') }}</span><span class="ip-row"><input :value="serverConfig.bindIp" :disabled="serverRunning" :placeholder="t('srv.bindPlaceholder')" @input="setServer('bindIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="serverRunning" :title="t('nic.title')" @click="emit('pick-nic-server')">{{ t('cfg.nicBtn') }}</button></span></label>
+      <label><span>{{ t('srv.port') }}</span><input type="number" :value="serverConfig.port" min="1" max="65535" :disabled="serverRunning" @input="setServer('port', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label><span>{{ t('srv.interval') }}</span><input type="number" :value="serverConfig.interval" min="1" max="60" :disabled="serverRunning" @input="setServer('interval', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('srv.intervalNote') }}</small></label>
+      <p class="server-hint">{{ t('srv.hint') }}</p>
+      <p class="runtime-state available">{{ t('cfg.engineReady') }}</p>
     </section>
     <div class="config-actions">
-      <button class="primary" :disabled="serverRunning" @click="emit('start-server')"><Icon name="play" />启动服务</button>
-      <button class="danger" :disabled="!serverRunning" @click="emit('stop-server')"><Icon name="stop" />停止服务</button>
+      <button class="primary" :disabled="serverRunning" @click="emit('start-server')"><Icon name="play" />{{ t('srv.start') }}</button>
+      <button class="danger" :disabled="!serverRunning" @click="emit('stop-server')"><Icon name="stop" />{{ t('srv.stop') }}</button>
     </div>
     </template>
     <div v-if="customDialog" class="modal-backdrop" @click.self="customDialog = false">
       <div class="modal">
         <button class="modal-close" @click="customDialog = false">×</button>
-        <h2>自定义{{ customTarget === 'tcp' ? 'TCP' : 'UDP' }}报文长度</h2>
+        <h2>{{ t('cust.title', { protocol: customTarget === 'tcp' ? t('common.tcp') : t('common.udp') }) }}</h2>
         <div class="modal-body">
           <span class="modal-symbol info">i</span>
           <p class="custom-length-form">
-            <input type="number" v-model.number="customValue" min="1" placeholder="数值" />
+            <input type="number" v-model.number="customValue" min="1" :placeholder="t('cust.value')" />
             <select v-model="customUnit"><option value="bytes">Bytes</option><option value="kb">KB</option><option value="mb">MB</option></select>
           </p>
-          <p class="custom-length-result">换算：<b>{{ customBytes }}</b> bytes（范围 1 ~ {{ customTarget === 'tcp' ? '1048576 (1MB)' : '65536 (64KB)' }}）</p>
+          <p class="custom-length-result">{{ t('cust.result', { bytes: customBytes, max: customTarget === 'tcp' ? '1048576 (1MB)' : '65536 (64KB)' }) }}</p>
         </div>
         <div class="modal-actions">
-          <button @click="customDialog = false">取消</button>
-          <button class="primary" @click="confirmCustomLength">确定</button>
+          <button @click="customDialog = false">{{ t('common.cancel') }}</button>
+          <button class="primary" @click="confirmCustomLength">{{ t('common.confirm') }}</button>
         </div>
       </div>
     </div>

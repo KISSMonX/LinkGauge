@@ -1,22 +1,24 @@
 <script setup lang="ts">
 import type { TestConfig, TestSummary } from '../types'
+import { useI18n } from '../i18n'
 import Icon from './Icon.vue'
 
 defineProps<{ config: TestConfig; summary: TestSummary }>()
 const emit = defineEmits<{ report: [format: 'html' | 'pdf']; 'open-dir': [] }>()
+const { t } = useI18n()
 </script>
 
 <template>
   <footer class="panel report-summary">
-    <h2 class="panel-title">测试报告概览</h2>
+    <h2 class="panel-title">{{ t('rep.title') }}</h2>
     <div class="summary-grid">
-      <div><span>测试时间</span><strong>{{ summary.startedAt || '--' }}</strong></div>
-      <div><span>测试模式</span><strong>{{ config.mode === 'client' ? '客户端' : '服务端' }} / TCP + UDP 混合</strong></div>
-      <div><span>已完成项目数</span><strong>{{ summary.completed }} / {{ summary.total }}</strong></div>
-      <div><span>平均带宽</span><strong class="blue">{{ summary.averageBandwidth.toFixed(2) }} Mbps</strong></div>
-      <div><span>Ping 平均时延</span><strong class="green">{{ summary.pingAverage.toFixed(2) }} ms</strong></div>
-      <div><span>丢包率</span><strong class="green">{{ summary.lossPercent.toFixed(2) }}%</strong></div>
-      <div class="report-output"><span>报告输出</span><p><button @click="emit('report','html')">🌐 HTML</button><button class="pdf" @click="emit('report','pdf')"><Icon name="report" />PDF</button><button @click="emit('open-dir')">📁 打开目录</button></p></div>
+      <div><span>{{ t('rep.time') }}</span><strong>{{ summary.startedAt || '--' }}</strong></div>
+      <div><span>{{ t('rep.mode') }}</span><strong>{{ config.mode === 'client' ? t('common.client') : t('common.server') }} / {{ t('rep.mixed') }}</strong></div>
+      <div><span>{{ t('rep.completed') }}</span><strong>{{ summary.completed }} / {{ summary.total }}</strong></div>
+      <div><span>{{ t('rep.avgBw') }}</span><strong class="blue">{{ summary.averageBandwidth.toFixed(2) }} Mbps</strong></div>
+      <div><span>{{ t('rep.ping') }}</span><strong class="green">{{ summary.pingAverage.toFixed(2) }} ms</strong></div>
+      <div><span>{{ t('rep.loss') }}</span><strong class="green">{{ summary.lossPercent.toFixed(2) }}%</strong></div>
+      <div class="report-output"><span>{{ t('rep.output') }}</span><p><button @click="emit('report','html')">🌐 HTML</button><button class="pdf" @click="emit('report','pdf')"><Icon name="report" />PDF</button><button @click="emit('open-dir')">📁 {{ t('rep.openDir') }}</button></p></div>
     </div>
   </footer>
 </template>
