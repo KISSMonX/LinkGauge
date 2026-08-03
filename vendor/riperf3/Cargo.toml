@@ -1,0 +1,51 @@
+[package]
+name = "riperf3"
+# Vendored from https://github.com/therealevanhenry/riperf3 (HEAD, 0.9.0-dev),
+# with a local on_interval patch — see README.md in the repo root.
+version = "0.9.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Evan Henry"]
+description = "Wire-compatible Rust implementation of iperf3 — safe, cross-platform network performance testing library"
+homepage = "https://github.com/therealevanhenry/riperf3"
+repository = "https://github.com/therealevanhenry/riperf3"
+keywords = ["riperf3", "iperf3", "iperf", "network", "speedtest"]
+categories = ["network-programming", "command-line-utilities"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+base64 = "0.22"
+libc = "0.2"
+log = "0.4"
+rpassword = "5"
+rand = "0.9"
+rsa = "0.9"
+serde = { version = "1", features = ["derive"] }
+sha1 = "0.10"
+sha2 = "0.10"
+# raw_value enabled at the crate level (not just the workspace) so it flattens
+# into the PUBLISHED manifest: #57 emits cJSON-formatted number tokens via
+# serde_json::value::RawValue. A workspace-only feature does NOT flatten on
+# publish, which would leave the published crate free-riding on a consumer to
+# enable raw_value — the same socket2 #92 trap as `all` below.
+# preserve_order (#378): GT is cJSON end-to-end — insertion order everywhere —
+# so an alphabetizing serde_json::Map is the ONE traitor to the #300-class key
+# order wherever a doc round-trips through Value (the --get-server-output
+# attach + re-emit, the params/results wire blobs). IndexMap-backed maps make
+# every Value round-trip order-preserving; the hand-written serializers
+# already emit GT's order. Crate-level for the same publish-flattening reason.
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+socket2 = { version = "0.5", features = ["all"] }
+thiserror = "2.0"
+# tokio >= 1.44: its Windows HandlerRoutine parks for close/logoff/shutdown
+# (tokio #7122) — earlier versions returned immediately and lost the clean
+# pidfile-unlink race (#158 review). libc is lockfile-held at 1.44's floor
+# (0.2.168): 0.2.186 breaks nix-0.29/mio-1.0.2 on NetBSD (untied by a future
+# nix >= 0.30 bump).
+tokio = { version = "1.44", features = ["full"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["net", "sched", "process", "resource", "fs", "term", "socket", "zerocopy", "feature"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Networking_WinSock", "Win32_System_Threading"] }

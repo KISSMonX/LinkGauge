@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct TestRequest {
     pub task_id: String,
     pub mode: String,
+    /// 协议由 task_id 推断（udp-* 为 UDP），此字段仅兼容旧版前端，不再参与逻辑
+    #[serde(default)]
     pub protocol: String,
     pub server_ip: String,
     #[serde(default)]
@@ -15,7 +17,6 @@ pub struct TestRequest {
     pub bandwidth: u64,
     pub packet_length: u32,
     pub interval: u64,
-    pub iperf_path: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -68,19 +69,12 @@ pub struct InterfaceInfo {
     pub speed_mbps: u64,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IperfRuntimeInfo {
-    pub available: bool,
-    pub bundled: bool,
-    pub path: String,
-    pub version: String,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportRequest {
     pub format: String,
+    #[serde(default)]
+    pub save_path: Option<String>,
     pub config: serde_json::Value,
     pub summary: serde_json::Value,
     pub points: Vec<MetricPoint>,

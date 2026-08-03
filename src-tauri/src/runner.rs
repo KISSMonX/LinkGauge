@@ -1,32 +1,41 @@
 use crate::models::{MetricPoint, TestEvent, TestRequest};
-use crate::runtime::resolve_iperf_path;
 use chrono::Local;
 use regex::Regex;
+use riperf3::{ClientBuilder, ServerBuilder, Termination, TransportProtocol};
 use std::{
     collections::{HashMap, HashSet},
+    fs::File as StdFile,
+    io::Write as StdWrite,
     process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     fs::{self, OpenOptions},
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, BufReader},
     process::Command,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, watch, Mutex as AsyncMutex},
     time::{sleep, Duration},
 };
 use uuid::Uuid;
 
-#[derive(Default)]
-pub struct AppState {
-    pub cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
-    pub child_pids: Arc<Mutex<HashSet<u32>>>,
+/// 每个会话的中断信号：ping 走进程取消标志，riperf3 走 watch 通道（优雅终止）
+pub(crate) enum SessionSignal {
+    Ping(Arc<AtomicBool>),
+    Engine(watch::Sender<Option<String>>),
 }
 
-/// 应用退出时同步终止所有遗留测试进程，防止 iperf3 残留占用端口
+#[derive(Default)]
+pub struct AppState {
+    pub(crate) sessions: Arc<AsyncMutex<HashMap<String, SessionSignal>>>,
+    /// ping 子进程残留 PID 集合（riperf3 为进程内引擎，无子进程）
+    pub(crate) child_pids: Arc<AsyncMutex<HashSet<u32>>>,
+}
+
+/// 应用退出时同步终止所有遗留 ping 测试进程
 pub fn kill_all_children_sync(state: &AppState) {
     let pids: Vec<u32> = state.child_pids.blocking_lock().iter().copied().collect();
     for pid in pids {
@@ -50,54 +59,163 @@ pub async fn start_test(
 ) -> Result<String, String> {
     validate(&request)?;
     let session_id = Uuid::new_v4().to_string();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    state
-        .cancellations
-        .lock()
-        .await
-        .insert(session_id.clone(), cancelled.clone());
-    let state_map = state.cancellations.clone();
+    let sessions = state.sessions.clone();
     let pids = state.child_pids.clone();
     let spawned_id = session_id.clone();
-    tauri::async_runtime::spawn(async move {
-        run_process(app, spawned_id.clone(), request, cancelled, pids).await;
-        state_map.lock().await.remove(&spawned_id);
-    });
+    if request.task_id == "ping" {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), SessionSignal::Ping(cancelled.clone()));
+        tauri::async_runtime::spawn(async move {
+            run_ping(app, spawned_id.clone(), request, cancelled, pids).await;
+            sessions.lock().await.remove(&spawned_id);
+        });
+    } else if request.mode == "server" || request.task_id == "server" {
+        let (tx, rx) = watch::channel(None);
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), SessionSignal::Engine(tx));
+        tauri::async_runtime::spawn(async move {
+            run_engine_server(app, spawned_id.clone(), request, rx).await;
+            sessions.lock().await.remove(&spawned_id);
+        });
+    } else {
+        let (tx, rx) = watch::channel(None);
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), SessionSignal::Engine(tx));
+        tauri::async_runtime::spawn(async move {
+            run_engine_client(app, spawned_id.clone(), request, rx).await;
+            sessions.lock().await.remove(&spawned_id);
+        });
+    }
     Ok(session_id)
 }
 
 #[tauri::command]
 pub async fn stop_test(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let map = state.cancellations.lock().await;
-    let flag = map
+    let map = state.sessions.lock().await;
+    let signal = map
         .get(&session_id)
         .ok_or_else(|| "当前测试任务不存在或已经结束".to_string())?;
-    flag.store(true, Ordering::SeqCst);
+    match signal {
+        SessionSignal::Ping(flag) => flag.store(true, Ordering::SeqCst),
+        SessionSignal::Engine(tx) => {
+            let _ = tx.send(Some("用户手动停止".into()));
+        }
+    }
     Ok(())
 }
 
+/// 用系统文件管理器打开测试日志目录，返回目录路径
+#[tauri::command]
+pub async fn open_log_dir(app: AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|e| e.to_string())?
+        .join("tests");
+    fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("无法创建日志目录：{e}"))?;
+    let result = std::process::Command::new(if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    })
+    .arg(&dir)
+    .spawn()
+    .map_err(|e| format!("无法打开日志目录：{e}"))?;
+    drop(result);
+    Ok(dir.to_string_lossy().to_string())
+}
+
 fn validate(request: &TestRequest) -> Result<(), String> {
-    if request.duration == 0 || request.interval == 0 {
-        return Err("持续时间和输出周期必须大于 0".into());
+    // 服务端模式不需要持续时间（duration 恒为 0），只校验输出周期
+    if request.mode != "server" && request.duration == 0 {
+        return Err("持续时间必须大于 0".into());
+    }
+    if request.interval == 0 {
+        return Err("输出周期必须大于 0".into());
     }
     if request.server_ip.trim().is_empty() && request.mode != "server" {
         return Err("服务端地址不能为空".into());
     }
-    if request.iperf_path.trim().is_empty() {
-        return Err("iperf3 可执行文件路径不能为空".into());
+    if request.port == 0 {
+        return Err("端口无效".into());
     }
     Ok(())
 }
 
-async fn run_process(
+// ---------------------------------------------------------------------------
+// riperf3 客户端任务
+// ---------------------------------------------------------------------------
+
+/// 客户端参数映射（纯函数，便于单测）——与旧 CLI 参数一一对应
+#[derive(Debug, PartialEq)]
+struct ClientParams {
+    protocol: TransportProtocol,
+    duration: u32,
+    num_streams: u32,
+    blksize: Option<usize>,
+    reverse: bool,
+    bidir: bool,
+    /// 带宽限制（bps），None 表示不限制
+    bandwidth_bps: Option<u64>,
+    interval: f64,
+    bind_address: Option<String>,
+}
+
+fn client_params_for(request: &TestRequest) -> ClientParams {
+    // 协议由任务类型推断：udp-* 为 UDP，其余（含 stress）为 TCP，
+    // 使 TCP/UDP 测试项可以在同一队列中混合执行
+    let protocol = if request.task_id.starts_with("udp-") {
+        TransportProtocol::Udp
+    } else {
+        TransportProtocol::Tcp
+    };
+    let mut params = ClientParams {
+        protocol,
+        duration: request.duration as u32,
+        num_streams: 1,
+        blksize: (request.packet_length > 0).then_some(request.packet_length as usize),
+        reverse: false,
+        bidir: false,
+        bandwidth_bps: (request.bandwidth > 0).then_some(request.bandwidth * 1_000_000),
+        interval: request.interval as f64,
+        bind_address: (!request.local_ip.trim().is_empty()).then(|| request.local_ip.clone()),
+    };
+    match request.task_id.as_str() {
+        "tcp-parallel" => params.num_streams = request.parallel.max(1) as u32,
+        "tcp-reverse" => params.reverse = true,
+        "tcp-bidir" => params.bidir = true,
+        _ => {}
+    }
+    params
+}
+
+/// 日志文件句柄：回调（同步）与主任务（异步）共用，加锁串行写入
+struct TestLog {
+    file: Arc<Mutex<StdFile>>,
+    working_path: std::path::PathBuf,
+    base_name: String,
+}
+type SessionLog = Arc<TestLog>;
+
+async fn run_engine_client(
     app: AppHandle,
     session_id: String,
     request: TestRequest,
-    cancelled: Arc<AtomicBool>,
-    child_pids: Arc<Mutex<HashSet<u32>>>,
+    rx: watch::Receiver<Option<String>>,
 ) {
     let task_name = task_label(&request.task_id);
-    let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
     let local_ip = if request.local_ip.trim().is_empty() {
         local_ip_address::local_ip()
             .map(|ip| ip.to_string())
@@ -105,70 +223,271 @@ async fn run_process(
     } else {
         request.local_ip.clone()
     };
-    let base_name = format!(
-        "{}-{}-{}-{}",
-        safe_name(&local_ip),
-        safe_name(&request.server_ip),
-        safe_name(task_name),
-        stamp
-    );
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("iperf3-gui"))
-        .join("tests");
-    if let Err(error) = fs::create_dir_all(&log_dir).await {
-        emit_error(
-            &app,
-            &session_id,
-            &request.task_id,
-            format!("无法创建日志目录：{error}"),
-            None,
-        );
+    let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
         return;
-    }
-    let working_path = log_dir.join(format!("{}-进行中.log", base_name));
-    let mut log_file = match OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&working_path)
-        .await
-    {
-        Ok(file) => file,
-        Err(error) => {
-            emit_error(
-                &app,
-                &session_id,
-                &request.task_id,
-                format!("无法创建日志文件：{error}"),
-                None,
-            );
-            return;
-        }
     };
-    let (iperf_path, _) = resolve_iperf_path(&app, &request.iperf_path);
-    let (program, args) = command_for(&request, iperf_path.to_string_lossy().as_ref());
     let header = format!(
-        "测试时间: {}\n客户端IP: {}\n服务端IP: {}\n测试模式: {}\n测试项目: {}\n执行命令: {} {}\n\n",
-        Local::now().format("%Y-%m-%d %H:%M:%S"),
-        local_ip,
-        request.server_ip,
-        request.mode,
-        task_name,
-        program,
-        args.join(" ")
+        "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: {}, 端口 {}, 时长 {}s, 并发 {}, 带宽 {}, 报文长度 {}, 输出周期 {}s\n\n",
+        riperf3::VERSION,
+        if client_params_for(&request).protocol == TransportProtocol::Udp { "UDP" } else { "TCP" },
+        request.port,
+        request.duration,
+        client_params_for(&request).num_streams,
+        if request.bandwidth > 0 {
+            format!("{}M", request.bandwidth)
+        } else {
+            "不限制".into()
+        },
+        request.packet_length,
+        request.interval,
     );
-    let _ = log_file.write_all(header.as_bytes()).await;
+    append_log(&log, &header);
     emit_log(
         &app,
         &session_id,
         &request.task_id,
         "INFO",
-        format!("执行：{} {}", program, args.join(" ")),
+        format!("执行：riperf3 -c {}（内嵌引擎）", request.server_ip),
     );
 
-    let mut command = Command::new(&program);
+    let params = client_params_for(&request);
+    // 实时指标回调：每输出周期触发一次，发出 metric 事件并写入日志
+    let hook_app = app.clone();
+    let hook_session = session_id.clone();
+    let hook_task = request.task_id.clone();
+    let hook_log = log.clone();
+    let on_interval = move |interval: &riperf3::json_report::Interval| {
+        if interval.sum.omitted {
+            return;
+        }
+        let sum = &interval.sum;
+        let second = sum.end.round() as i64;
+        let metric = MetricPoint {
+            second,
+            bandwidth_mbps: sum.bits_per_second / 1_000_000.0,
+            transfer_mb: sum.bytes as f64 / 1_000_000.0,
+            jitter_ms: sum.jitter_ms.unwrap_or(0.0),
+            loss_percent: sum.lost_percent.unwrap_or(0.0),
+            retransmits: sum.retransmits.unwrap_or(0).max(0) as u64,
+        };
+        emit_metric(&hook_app, &hook_session, &hook_task, metric);
+        append_log(
+            &hook_log,
+            &format!("[INFO] {}", format_interval_line(second, sum)),
+        );
+    };
+
+    let mut builder = ClientBuilder::new(&request.server_ip)
+        .port(Some(request.port))
+        .protocol(params.protocol)
+        .duration(params.duration)
+        .num_streams(params.num_streams)
+        .interval(params.interval)
+        .json_output(true)
+        .emit_output(false)
+        .interrupt(rx)
+        .on_interval(on_interval);
+    if let Some(size) = params.blksize {
+        builder = builder.blksize(size);
+    }
+    if params.reverse {
+        builder = builder.reverse(true);
+    }
+    if params.bidir {
+        builder = builder.bidir(true);
+    }
+    if let Some(bps) = params.bandwidth_bps {
+        builder = builder.bandwidth(bps);
+    }
+    if let Some(addr) = &params.bind_address {
+        builder = builder.bind_address(addr);
+    }
+    let client = match builder.build() {
+        Ok(client) => client,
+        Err(error) => {
+            fail_engine(
+                &app,
+                &session_id,
+                &request.task_id,
+                &log,
+                &format!("测试配置无效：{error}"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let outcome = client.run().await;
+    finish_engine(&app, &session_id, &request.task_id, &log, &request, outcome).await;
+}
+
+// ---------------------------------------------------------------------------
+// riperf3 服务端任务：持续监听直到手动停止
+// ---------------------------------------------------------------------------
+
+async fn run_engine_server(
+    app: AppHandle,
+    session_id: String,
+    request: TestRequest,
+    rx: watch::Receiver<Option<String>>,
+) {
+    let task_name = task_label(&request.task_id);
+    let local_ip = if request.local_ip.trim().is_empty() {
+        local_ip_address::local_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|_| "127.0.0.1".into())
+    } else {
+        request.local_ip.clone()
+    };
+    let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
+        return;
+    };
+    append_log(
+        &log,
+        &format!(
+            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 监听端口 {}，持续服务\n\n",
+            riperf3::VERSION,
+            request.port
+        ),
+    );
+
+    let server = match ServerBuilder::new()
+        .port(Some(request.port))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .interrupt(rx)
+        .build()
+    {
+        Ok(server) => server,
+        Err(error) => {
+            fail_engine(
+                &app,
+                &session_id,
+                &request.task_id,
+                &log,
+                &format!("服务端配置无效：{error}"),
+            )
+            .await;
+            return;
+        }
+    };
+    let bound = match server.bind().await {
+        Ok(bound) => bound,
+        Err(error) => {
+            fail_engine(
+                &app,
+                &session_id,
+                &request.task_id,
+                &log,
+                &format!("无法监听端口 {}：{error}", request.port),
+            )
+            .await;
+            return;
+        }
+    };
+    append_log(
+        &log,
+        &format!("[INFO] 服务端已就绪，监听端口 {}", request.port),
+    );
+    emit_log(
+        &app,
+        &session_id,
+        &request.task_id,
+        "INFO",
+        format!("服务端已就绪，监听端口 {}", request.port),
+    );
+
+    loop {
+        match bound.run_once().await {
+            Ok(outcome) => {
+                if outcome.termination == Termination::Interrupted {
+                    append_log(&log, "\n测试结果: 服务端已停止（手动停止）");
+                    emit_log(
+                        &app,
+                        &session_id,
+                        &request.task_id,
+                        "INFO",
+                        "服务端已停止（手动停止）".into(),
+                    );
+                    finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
+                    return;
+                }
+                // 单次测试结束：写入汇总并继续监听
+                append_log(&log, "\n[INFO] 一次测试完成，汇总如下：");
+                append_engine_summary(&log, &outcome.report);
+                emit_log(
+                    &app,
+                    &session_id,
+                    &request.task_id,
+                    "INFO",
+                    "一次测试完成，继续监听…".into(),
+                );
+            }
+            Err(error) => {
+                // 空闲时收到停止信号返回 Aborted，正常退出
+                if matches!(error, riperf3::RiperfError::Aborted(_)) {
+                    append_log(&log, "\n测试结果: 服务端已停止（手动停止）");
+                    emit_log(
+                        &app,
+                        &session_id,
+                        &request.task_id,
+                        "INFO",
+                        "服务端已停止（手动停止）".into(),
+                    );
+                    finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
+                    return;
+                }
+                append_log(&log, &format!("[WARN] 一次连接处理失败：{error}，继续监听"));
+                emit_log(
+                    &app,
+                    &session_id,
+                    &request.task_id,
+                    "WARN",
+                    format!("一次连接处理失败：{error}，继续监听"),
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ping 任务（保留系统进程调用，riperf3 不支持 ICMP）
+// ---------------------------------------------------------------------------
+
+async fn run_ping(
+    app: AppHandle,
+    session_id: String,
+    request: TestRequest,
+    cancelled: Arc<AtomicBool>,
+    child_pids: Arc<AsyncMutex<HashSet<u32>>>,
+) {
+    let task_name = task_label(&request.task_id);
+    let local_ip = if request.local_ip.trim().is_empty() {
+        local_ip_address::local_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|_| "127.0.0.1".into())
+    } else {
+        request.local_ip.clone()
+    };
+    let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
+        return;
+    };
+    let args = if cfg!(windows) {
+        vec!["-n".into(), "4".into(), request.server_ip.clone()]
+    } else {
+        vec!["-c".into(), "4".into(), request.server_ip.clone()]
+    };
+    append_log(&log, &format!("[INFO] 执行：ping {}", args.join(" ")));
+    emit_log(
+        &app,
+        &session_id,
+        &request.task_id,
+        "INFO",
+        format!("执行：ping {}", args.join(" ")),
+    );
+
+    let mut command = Command::new("ping");
     command
         .args(&args)
         .stdout(Stdio::piped())
@@ -179,22 +498,9 @@ async fn run_process(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let message = if error.kind() == std::io::ErrorKind::NotFound {
-                format!("未找到 {program}。请安装 iperf3，或在配置中填写可执行文件完整路径。")
-            } else {
-                format!("启动测试进程失败：{error}")
-            };
-            let _ = log_file
-                .write_all(format!("[ERROR] {message}\n").as_bytes())
-                .await;
-            let final_path = finish_log(&working_path, &base_name, false).await;
-            emit_error(
-                &app,
-                &session_id,
-                &request.task_id,
-                message,
-                Some(final_path),
-            );
+            let message = format!("启动 ping 失败：{error}");
+            append_log(&log, &format!("[ERROR] {message}"));
+            fail_engine(&app, &session_id, &request.task_id, &log, &message).await;
             return;
         }
     };
@@ -214,37 +520,20 @@ async fn run_process(
     drop(tx);
     let mut final_success = false;
     let mut final_stopped = false;
-    let mut exit_message = None;
-    // 缓冲进程最近输出（含 stderr），进程异常退出时作为失败原因附在错误消息中
-    let mut recent_lines: Vec<String> = Vec::new();
     loop {
         tokio::select! {
             status = child.wait() => {
-                match status {
-                    Ok(value) if value.success() => final_success = true,
-                    Ok(value) => {
-                        // Windows 上退出码是 u32 强转 i32，-1 实为 0xFFFFFFFF，附十六进制便于查证
-                        let code = value.code().map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
-                        let hex = value.code().map(|v| format!(" (0x{:08X})", v as u32)).unwrap_or_default();
-                        let detail = recent_lines.iter().rev().take(10).cloned().collect::<Vec<_>>().join(" | ");
-                        exit_message = Some(if detail.is_empty() {
-                            format!("测试进程退出，状态码：{code}{hex}，且进程未输出任何信息")
-                        } else {
-                            format!("测试进程退出，状态码：{code}{hex}。进程输出：{detail}")
-                        });
-                    }
-                    Err(error) => exit_message = Some(format!("等待测试进程失败：{error}")),
-                }
+                final_success = status.map(|value| value.success()).unwrap_or(false);
                 break;
             }
             line = rx.recv() => {
                 if let Some((line, is_error)) = line {
-                    recent_lines.push(if is_error { format!("[stderr] {line}") } else { line.clone() });
-                    if recent_lines.len() > 50 { recent_lines.remove(0); }
                     let level = if is_error { "WARN" } else { "INFO" };
-                    let _ = log_file.write_all(format!("[{}] {}\n", level, line).as_bytes()).await;
+                    append_log(&log, &format!("[{level}] {line}"));
                     emit_log(&app, &session_id, &request.task_id, level, line.clone());
-                    if let Some(metric) = parse_metric(&line) { emit_metric(&app, &session_id, &request.task_id, metric); }
+                    if let Some(metric) = parse_ping_metric(&line) {
+                        emit_metric(&app, &session_id, &request.task_id, metric);
+                    }
                 }
             }
             _ = sleep(Duration::from_millis(100)) => {
@@ -257,34 +546,23 @@ async fn run_process(
             }
         }
     }
-
-    let outcome = if final_success { "完成" } else { "未完成" };
-    let _ = log_file
-        .write_all(format!("\n测试结果: {outcome}\n").as_bytes())
-        .await;
-    let _ = log_file.flush().await;
-    drop(log_file);
     if let Some(pid) = pid {
         child_pids.lock().await.remove(&pid);
     }
-    let final_path = finish_log(&working_path, &base_name, final_success).await;
+    append_log(
+        &log,
+        &format!(
+            "\n测试结果: {}",
+            if final_success { "完成" } else { "未完成" }
+        ),
+    );
     if final_stopped {
-        emit_complete(&app, &session_id, &request.task_id, "stopped", final_path);
+        finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
     } else if final_success {
-        emit_complete(&app, &session_id, &request.task_id, "success", final_path);
+        finish_ok(&app, &session_id, &request.task_id, &log, "success").await;
     } else {
-        let message = format!(
-            "{}\n详细日志：{}",
-            exit_message.unwrap_or_else(|| "测试失败".into()),
-            final_path
-        );
-        emit_error(
-            &app,
-            &session_id,
-            &request.task_id,
-            message,
-            Some(final_path),
-        );
+        let message = "ping 测试进程异常退出".to_string();
+        fail_engine(&app, &session_id, &request.task_id, &log, &message).await;
     }
 }
 
@@ -301,86 +579,7 @@ async fn read_lines<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-fn command_for(request: &TestRequest, resolved_iperf: &str) -> (String, Vec<String>) {
-    if request.task_id == "ping" {
-        let args = if cfg!(windows) {
-            vec!["-n".into(), "4".into(), request.server_ip.clone()]
-        } else {
-            vec!["-c".into(), "4".into(), request.server_ip.clone()]
-        };
-        return ("ping".into(), args);
-    }
-    let mut args = if request.mode == "server" || request.task_id == "server" {
-        vec![
-            "-s".into(),
-            "-p".into(),
-            request.port.to_string(),
-            "-i".into(),
-            request.interval.to_string(),
-        ]
-    } else {
-        vec![
-            "-c".into(),
-            request.server_ip.clone(),
-            "-p".into(),
-            request.port.to_string(),
-            "-t".into(),
-            request.duration.to_string(),
-            "-i".into(),
-            request.interval.to_string(),
-            "-f".into(),
-            "m".into(),
-        ]
-    };
-    match request.task_id.as_str() {
-        "tcp-bidir" => args.push("--bidir".into()),
-        "tcp-parallel" => {
-            args.push("-P".into());
-            args.push(request.parallel.to_string());
-        }
-        "tcp-reverse" => args.push("-R".into()),
-        "udp-bandwidth" | "udp-loss" => args.push("-u".into()),
-        _ => {}
-    }
-    // 带宽限制与报文长度为通用参数，TCP/UDP 客户端测试均生效（服务端模式不传）
-    if request.mode != "server" && request.task_id != "server" {
-        if request.bandwidth > 0 {
-            args.push("-b".into());
-            args.push(format!("{}M", request.bandwidth));
-        } else if request.task_id == "udp-bandwidth" || request.task_id == "udp-loss" {
-            // UDP 不传 -b 默认只有 1 Mbps，显式传 -b 0 表示不限制
-            args.push("-b".into());
-            args.push("0".into());
-        }
-        if request.packet_length > 0 {
-            args.push("-l".into());
-            args.push(request.packet_length.to_string());
-        }
-    }
-    (resolved_iperf.to_string(), args)
-}
-
-fn parse_metric(line: &str) -> Option<MetricPoint> {
-    let bandwidth = Regex::new(r"(?i)(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\s+sec\s+(\d+(?:\.\d+)?)\s+([KMG]?Bytes)\s+(\d+(?:\.\d+)?)\s+([KMG]?bits/sec)(?:\s+(\d+))?").ok()?;
-    if let Some(c) = bandwidth.captures(line) {
-        let second = c.get(2)?.as_str().parse::<f64>().ok()?.round() as i64;
-        let transfer = unit_to_mega(c.get(3)?.as_str().parse().ok()?, c.get(4)?.as_str());
-        let speed = unit_to_mega(c.get(5)?.as_str().parse().ok()?, c.get(6)?.as_str());
-        let mut metric = MetricPoint {
-            second,
-            bandwidth_mbps: speed,
-            transfer_mb: transfer,
-            retransmits: c.get(7).and_then(|v| v.as_str().parse().ok()).unwrap_or(0),
-            ..Default::default()
-        };
-        if let Ok(udp) = Regex::new(r"(\d+(?:\.\d+)?)\s+ms\s+\d+/\d+\s+\((\d+(?:\.\d+)?)%\)") {
-            if let Some(u) = udp.captures(line) {
-                metric.jitter_ms = u[1].parse().unwrap_or(0.0);
-                metric.loss_percent = u[2].parse().unwrap_or(0.0);
-            }
-        }
-        return Some(metric);
-    }
+fn parse_ping_metric(line: &str) -> Option<MetricPoint> {
     let ping = Regex::new(r"(?i)(?:time|时间)[=<＝]\s*(\d+(?:\.\d+)?)\s*ms").ok()?;
     ping.captures(line).map(|c| MetricPoint {
         jitter_ms: c[1].parse().unwrap_or(0.0),
@@ -388,21 +587,269 @@ fn parse_metric(line: &str) -> Option<MetricPoint> {
     })
 }
 
-fn unit_to_mega(value: f64, unit: &str) -> f64 {
-    if unit.starts_with('G') {
-        value * 1000.0
-    } else if unit.starts_with('K') {
-        value / 1000.0
-    } else {
-        value
+// ---------------------------------------------------------------------------
+// 日志与结果处理
+// ---------------------------------------------------------------------------
+
+/// 创建测试日志文件并写入文件头，失败时发出错误事件
+async fn setup_log(
+    app: &AppHandle,
+    session_id: &str,
+    request: &TestRequest,
+    local_ip: &str,
+    task_name: &str,
+) -> Option<SessionLog> {
+    let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
+    let base_name = format!(
+        "{}-{}-{}-{}",
+        safe_name(local_ip),
+        safe_name(&request.server_ip),
+        safe_name(task_name),
+        stamp
+    );
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("linkgauge"))
+        .join("tests");
+    if let Err(error) = fs::create_dir_all(&log_dir).await {
+        emit_error(
+            app,
+            session_id,
+            &request.task_id,
+            format!("无法创建日志目录：{error}"),
+            None,
+        );
+        return None;
+    }
+    let working_path = log_dir.join(format!("{base_name}-进行中.log"));
+    let file = match OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&working_path)
+        .await
+    {
+        Ok(file) => file,
+        Err(error) => {
+            emit_error(
+                app,
+                session_id,
+                &request.task_id,
+                format!("无法创建日志文件：{error}"),
+                None,
+            );
+            return None;
+        }
+    };
+    let header = format!(
+        "测试时间: {}\n客户端IP: {}\n服务端IP: {}\n测试模式: {}\n测试项目: {}\n",
+        Local::now().format("%Y-%m-%d %H:%M:%S"),
+        local_ip,
+        request.server_ip,
+        request.mode,
+        task_name
+    );
+    let log = Arc::new(TestLog {
+        file: Arc::new(Mutex::new(file.into_std().await)),
+        working_path,
+        base_name,
+    });
+    append_log(&log, &header);
+    Some(log)
+}
+
+/// 同步追加一行日志（实时回调与主任务共用）
+fn append_log(log: &SessionLog, line: &str) {
+    if let Ok(mut file) = log.file.lock() {
+        let _ = file.write_all(line.as_bytes());
     }
 }
+
+/// 客户端结束时按 RunOutcome 归类结果：成功 / 手动停止 / 失败
+async fn finish_engine(
+    app: &AppHandle,
+    session_id: &str,
+    task_id: &str,
+    log: &SessionLog,
+    request: &TestRequest,
+    outcome: Result<riperf3::RunOutcome, riperf3::RiperfError>,
+) {
+    match outcome {
+        Err(error) => {
+            let message = format!("测试失败：{error}");
+            fail_engine(app, session_id, task_id, log, &message).await;
+        }
+        Ok(outcome) => {
+            let report = &outcome.report;
+            append_log(log, "\n[INFO] 测试结束，最终汇总：");
+            append_engine_summary(log, report);
+            emit_final_metric(app, session_id, task_id, report, request.duration as i64);
+            match outcome.termination {
+                Termination::Completed => {
+                    append_log(log, "\n测试结果: 完成");
+                    finish_ok(app, session_id, task_id, log, "success").await;
+                }
+                Termination::Interrupted => {
+                    append_log(log, "\n测试结果: 手动停止");
+                    finish_ok(app, session_id, task_id, log, "stopped").await;
+                }
+                Termination::ServerTerminated => {
+                    let message = "服务端主动终止了测试".to_string();
+                    fail_engine(app, session_id, task_id, log, &message).await;
+                }
+                Termination::ServerError(msg) => {
+                    let message = format!("服务端返回错误：{msg}");
+                    fail_engine(app, session_id, task_id, log, &message).await;
+                }
+                other => {
+                    let message = format!("测试异常结束：{other:?}");
+                    fail_engine(app, session_id, task_id, log, &message).await;
+                }
+            }
+        }
+    }
+}
+
+/// 追加最终汇总（发送/接收方向的传输量与平均带宽，UDP 附抖动丢包）
+fn append_engine_summary(log: &SessionLog, report: &riperf3::Report) {
+    if let Some(sent) = &report.end.sum_sent {
+        let mut line = format!(
+            "发送方向: {:.2} MBytes, 平均 {:.2} Mbits/sec",
+            sent.bytes as f64 / 1_000_000.0,
+            sent.bits_per_second / 1_000_000.0
+        );
+        if let Some(retransmits) = sent.retransmits {
+            line.push_str(&format!(", 重传 {retransmits}"));
+        }
+        append_log(log, &format!("[INFO] {line}"));
+    }
+    if let Some(received) = &report.end.sum_received {
+        let mut line = format!(
+            "接收方向: {:.2} MBytes, 平均 {:.2} Mbits/sec",
+            received.bytes as f64 / 1_000_000.0,
+            received.bits_per_second / 1_000_000.0
+        );
+        if let Some(jitter) = received.jitter_ms {
+            line.push_str(&format!(
+                ", 抖动 {:.3} ms, 丢包 {}/{} ({:.2}%)",
+                jitter,
+                received.lost_packets.unwrap_or(0),
+                received.packets.unwrap_or(0),
+                received.lost_percent.unwrap_or(0.0)
+            ));
+        }
+        append_log(log, &format!("[INFO] {line}"));
+    }
+}
+
+/// 补发一个最终指标点：携带对端方向的抖动/丢包与全程平均带宽，供前端汇总统计
+fn emit_final_metric(
+    app: &AppHandle,
+    session_id: &str,
+    task_id: &str,
+    report: &riperf3::Report,
+    second: i64,
+) {
+    // 取传输量较大的方向作为统计口径（正向 / 反向 / 双向通用）
+    let side = match (
+        report.end.sum_sent.as_ref(),
+        report.end.sum_received.as_ref(),
+    ) {
+        (Some(sent), Some(received)) => Some(if sent.bytes >= received.bytes {
+            sent
+        } else {
+            received
+        }),
+        (Some(sent), None) => Some(sent),
+        (None, Some(received)) => Some(received),
+        (None, None) => None,
+    };
+    if let Some(side) = side {
+        emit_metric(
+            app,
+            session_id,
+            task_id,
+            MetricPoint {
+                second,
+                bandwidth_mbps: side.bits_per_second / 1_000_000.0,
+                transfer_mb: side.bytes as f64 / 1_000_000.0,
+                jitter_ms: side.jitter_ms.unwrap_or(0.0),
+                loss_percent: side.lost_percent.unwrap_or(0.0),
+                retransmits: side.retransmits.unwrap_or(0).max(0) as u64,
+            },
+        );
+    }
+}
+
+/// 逐秒指标行的日志格式（近似 iperf3 文本输出）
+fn format_interval_line(second: i64, sum: &riperf3::json_report::IntervalSum) -> String {
+    let mut line = format!(
+        "第 {second} 秒: {:.2} MBytes, {:.2} Mbits/sec",
+        sum.bytes as f64 / 1_000_000.0,
+        sum.bits_per_second / 1_000_000.0
+    );
+    if let Some(jitter) = sum.jitter_ms {
+        line.push_str(&format!(
+            ", 抖动 {:.3} ms, 丢包 {}/{} ({:.2}%)",
+            jitter,
+            sum.lost_packets.unwrap_or(0),
+            sum.packets.unwrap_or(0),
+            sum.lost_percent.unwrap_or(0.0)
+        ));
+    }
+    if let Some(retransmits) = sum.retransmits {
+        line.push_str(&format!(", 重传 {retransmits}"));
+    }
+    line
+}
+
+async fn finish_ok(
+    app: &AppHandle,
+    session_id: &str,
+    task_id: &str,
+    log: &SessionLog,
+    status: &str,
+) {
+    let success = status == "success";
+    let log_path = finish_log(log, success).await;
+    emit_complete(app, session_id, task_id, status, log_path);
+}
+
+async fn fail_engine(
+    app: &AppHandle,
+    session_id: &str,
+    task_id: &str,
+    log: &SessionLog,
+    message: &str,
+) {
+    append_log(log, &format!("[ERROR] {message}"));
+    let log_path = finish_log(log, false).await;
+    let full = format!("{message}\n详细日志：{log_path}");
+    emit_error(app, session_id, task_id, full, Some(log_path));
+}
+
+/// 关闭日志文件并按完成状态重命名（完成/未完成/手动停止均保留日志）
+async fn finish_log(log: &SessionLog, success: bool) -> String {
+    if let Ok(mut file) = log.file.lock() {
+        let _ = file.flush();
+    }
+    let final_path = log.working_path.with_file_name(format!(
+        "{}-{}.log",
+        log.base_name,
+        if success { "completed" } else { "incomplete" }
+    ));
+    let _ = fs::rename(&log.working_path, &final_path).await;
+    final_path.to_string_lossy().to_string()
+}
+
 fn safe_name(value: &str) -> String {
     value
         .chars()
         .map(|c| if "<>:\"/\\|?*".contains(c) { '_' } else { c })
         .collect()
 }
+
 fn task_label(id: &str) -> &str {
     match id {
         "ping" => "Ping连通性测试",
@@ -413,22 +860,11 @@ fn task_label(id: &str) -> &str {
         "udp-loss" => "UDP抖动丢包",
         "tcp-reverse" => "TCP反向测试",
         "stress" => "持续压力测试",
-        "server" => "iperf3服务端",
+        "server" => "riperf3服务端",
         _ => "网络测试",
     }
 }
-async fn finish_log(working: &std::path::Path, base: &str, success: bool) -> String {
-    let parent = working
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let path = parent.join(format!(
-        "{}-{}.log",
-        base,
-        if success { "completed" } else { "incomplete" }
-    ));
-    let _ = fs::rename(working, &path).await;
-    path.to_string_lossy().to_string()
-}
+
 fn emit_log(app: &AppHandle, session: &str, task: &str, level: &str, message: String) {
     let _ = app.emit(
         "test-event",
@@ -492,8 +928,9 @@ fn emit_error(app: &AppHandle, session: &str, task: &str, message: String, path:
 
 #[cfg(test)]
 mod tests {
-    use super::{command_for, parse_metric};
+    use super::client_params_for;
     use crate::models::TestRequest;
+    use riperf3::TransportProtocol;
 
     fn request(task_id: &str, mode: &str, protocol: &str) -> TestRequest {
         TestRequest {
@@ -504,78 +941,82 @@ mod tests {
             local_ip: "192.168.1.50".into(),
             port: 5201,
             duration: 10,
-            parallel: 1,
+            parallel: 4,
             bandwidth: 0,
             packet_length: 1024,
             interval: 1,
-            iperf_path: "bundled".into(),
         }
     }
 
-    /// 检查参数列表中 flag 后紧跟的取值是否为 value
-    fn has_flag(args: &[String], flag: &str, value: &str) -> bool {
-        args.iter()
-            .position(|arg| arg == flag)
-            .and_then(|index| args.get(index + 1))
-            .is_some_and(|next| next == value)
+    #[test]
+    fn tcp_single_maps_to_basic_client() {
+        let params = client_params_for(&request("tcp-single", "client", "tcp"));
+        assert_eq!(params.protocol, TransportProtocol::Tcp);
+        assert_eq!(params.duration, 10);
+        assert_eq!(params.num_streams, 1);
+        assert!(!params.reverse);
+        assert!(!params.bidir);
+        assert_eq!(params.blksize, Some(1024));
+        assert_eq!(params.interval, 1.0);
+        assert_eq!(params.bind_address.as_deref(), Some("192.168.1.50"));
     }
 
     #[test]
-    fn tcp_bandwidth_limit_is_applied() {
+    fn tcp_parallel_maps_num_streams() {
+        let params = client_params_for(&request("tcp-parallel", "client", "tcp"));
+        assert_eq!(params.num_streams, 4);
+    }
+
+    #[test]
+    fn tcp_bidir_and_reverse_flags() {
+        assert!(client_params_for(&request("tcp-bidir", "client", "tcp")).bidir);
+        assert!(client_params_for(&request("tcp-reverse", "client", "tcp")).reverse);
+    }
+
+    #[test]
+    fn udp_maps_protocol() {
+        assert_eq!(
+            client_params_for(&request("udp-bandwidth", "client", "udp")).protocol,
+            TransportProtocol::Udp
+        );
+        assert_eq!(
+            client_params_for(&request("udp-loss", "client", "udp")).protocol,
+            TransportProtocol::Udp
+        );
+    }
+
+    #[test]
+    fn tcp_tasks_map_to_tcp_regardless_of_protocol_field() {
+        // 混合队列中协议由 task_id 决定，request.protocol 字段不再参与
+        assert_eq!(
+            client_params_for(&request("tcp-single", "client", "udp")).protocol,
+            TransportProtocol::Tcp
+        );
+        assert_eq!(
+            client_params_for(&request("stress", "client", "tcp")).protocol,
+            TransportProtocol::Tcp
+        );
+    }
+
+    #[test]
+    fn bandwidth_zero_means_unlimited() {
+        assert_eq!(
+            client_params_for(&request("tcp-single", "client", "tcp")).bandwidth_bps,
+            None
+        );
+    }
+
+    #[test]
+    fn bandwidth_mbps_to_bps() {
         let mut req = request("tcp-single", "client", "tcp");
         req.bandwidth = 100;
-        let (_, args) = command_for(&req, "iperf3");
-        assert!(has_flag(&args, "-b", "100M"));
-        assert!(has_flag(&args, "-l", "1024"));
+        assert_eq!(client_params_for(&req).bandwidth_bps, Some(100_000_000));
     }
 
     #[test]
-    fn tcp_unlimited_omits_bandwidth_flag() {
-        let req = request("tcp-single", "client", "tcp");
-        let (_, args) = command_for(&req, "iperf3");
-        assert!(!args.iter().any(|arg| arg == "-b"));
-        assert!(has_flag(&args, "-l", "1024"));
-    }
-
-    #[test]
-    fn udp_unlimited_uses_b_zero() {
-        let req = request("udp-bandwidth", "client", "udp");
-        let (_, args) = command_for(&req, "iperf3");
-        assert!(args.iter().any(|arg| arg == "-u"));
-        assert!(has_flag(&args, "-b", "0"));
-        assert!(has_flag(&args, "-l", "1024"));
-    }
-
-    #[test]
-    fn server_mode_has_no_bandwidth_or_length() {
-        let req = request("server", "server", "tcp");
-        let (_, args) = command_for(&req, "iperf3");
-        assert!(!args.iter().any(|arg| arg == "-b" || arg == "-l"));
-    }
-
-    #[test]
-    fn parses_tcp_interval() {
-        let metric =
-            parse_metric("[  5]   0.00-1.00   sec   112 MBytes   941 Mbits/sec  3").unwrap();
-        assert_eq!(metric.second, 1);
-        assert_eq!(metric.bandwidth_mbps, 941.0);
-        assert_eq!(metric.transfer_mb, 112.0);
-        assert_eq!(metric.retransmits, 3);
-    }
-
-    #[test]
-    fn parses_udp_interval() {
-        let metric = parse_metric(
-            "[  5]   0.00-1.00   sec  11.9 MBytes  100 Mbits/sec  0.123 ms  2/1000 (0.2%)",
-        )
-        .unwrap();
-        assert_eq!(metric.jitter_ms, 0.123);
-        assert_eq!(metric.loss_percent, 0.2);
-    }
-
-    #[test]
-    fn parses_ping_latency() {
-        let metric = parse_metric("Reply from 192.168.1.1: bytes=32 time=2.5ms TTL=64").unwrap();
-        assert_eq!(metric.jitter_ms, 2.5);
+    fn packet_length_zero_omits_blksize() {
+        let mut req = request("tcp-single", "client", "tcp");
+        req.packet_length = 0;
+        assert_eq!(client_params_for(&req).blksize, None);
     }
 }

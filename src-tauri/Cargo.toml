@@ -1,12 +1,12 @@
 [package]
-name = "iperf3-gui"
+name = "linkgauge"
 version = "0.1.0"
-description = "Cross-platform iperf3 desktop GUI"
-authors = ["iperf3 GUI contributors"]
+description = "Cross-platform network performance desktop GUI (riperf3 engine)"
+authors = ["LinkGauge contributors"]
 edition = "2021"
 
 [lib]
-name = "iperf3_gui_lib"
+name = "linkgauge_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "fs", "sync", "time", "macros"] }
@@ -24,3 +25,13 @@ regex = "1"
 hostname = "0.4"
 local-ip-address = "0.6"
 mac_address = "1"
+# 纯 Rust 的 iperf3 协议实现（vendor 自 https://github.com/therealevanhenry/riperf3，
+# 含本地 on_interval 补丁，详见 vendor/riperf3）
+riperf3 = { path = "../vendor/riperf3" }
+
+# 发布构建体积优化：剥离调试符号 + 链接时优化 + 单代码单元 + abort 恐慌
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
