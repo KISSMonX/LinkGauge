@@ -11,6 +11,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 ## Features
 
 - Client and server operating modes
+- Server can bind a specific IP and port, with a configurable log/statistics output interval (seconds)
 - Separate TCP and UDP configuration views
 - Ping connectivity checks
 - TCP single-direction, bidirectional, parallel-stream, reverse, and stress tests
@@ -230,6 +231,7 @@ The current installer is not code-signed, so Windows SmartScreen may display a w
 
 - On launch, Client and Server are two tabs. **Drag a tab** (release after pulling it ~100px) to detach that side into its own window — handy for a second monitor or half-and-half split-screen setups.
 - Detached windows stay in sync in real time (parameters, test status, metric charts, and logs); tests can be started or stopped from any window.
+- The detached server window shows server-side data only: its own overview (listen address, uptime, completed tests), the bandwidth curve as observed by the server, and server-only logs — fully independent from client data. Its **Local NIC** button also opens the interface picker.
 - Closing a detached window (or clicking **Dock back to main window** in its title bar) returns the tab to the main window. With all tabs detached, the main window keeps the charts and logs as an overview.
 - Closing the main window quits the whole app; any detached windows close together with it.
 
@@ -244,10 +246,11 @@ The peer must be reachable, its firewall must allow the configured TCP/UDP port,
 - Reports are written under the OS-specific Tauri application data directory in `reports/`.
 - The custom packet length is persisted to `settings.json` in the OS-specific Tauri application config directory.
 
-Log filenames follow this pattern:
+Log filenames follow this pattern (server and client logs are recorded separately):
 
 ```text
-<local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<completed|incomplete>.log
+Server-<local-ip>-<port>-<yyyyMMddHHmmss>-<completed|incomplete>.log   # server
+Client-<local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<completed|incomplete>.log   # client
 ```
 
 ## Test Engine (riperf3)

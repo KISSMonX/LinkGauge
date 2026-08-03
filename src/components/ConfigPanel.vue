@@ -17,6 +17,7 @@ const emit = defineEmits<{
   'stop-server': []
   clear: []
   'pick-nic': []
+  'pick-nic-server': []
   'save-custom-length': [protocol: 'tcp' | 'udp', value: number]
   /** 标签页被拖拽分离为独立窗口 */
   detach: [side: 'client' | 'server']
@@ -202,14 +203,15 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
     </template>
     <template v-else>
     <section class="config-section server-params">      <div class="section-title"><h2>服务端设置</h2><span :class="['status-pill', serverRunning ? 'ok' : 'idle']">{{ serverRunning ? '运行中' : '未运行' }}</span></div>
+      <label><span>绑定 IP</span><span class="ip-row"><input :value="serverConfig.bindIp" :disabled="serverRunning" placeholder="留空 = 所有网卡" @input="setServer('bindIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="serverRunning" title="选择本机网卡" @click="emit('pick-nic-server')">本机</button></span></label>
       <label><span>监听端口</span><input type="number" :value="serverConfig.port" min="1" max="65535" :disabled="serverRunning" @input="setServer('port', Number(($event.target as HTMLInputElement).value))" /></label>
-      <p class="server-hint">服务端将持续监听配置的端口并处理测试请求，客户端与服务端可同时运行（同机测试时客户端连本机 IP 与同一端口）。</p>
+      <label><span>日志输出间隔(s)</span><input type="number" :value="serverConfig.interval" min="1" max="60" :disabled="serverRunning" @input="setServer('interval', Number(($event.target as HTMLInputElement).value))" /><small>每隔几秒输出一次日志与统计</small></label>
+      <p class="server-hint">服务端将持续监听配置的端口并处理测试请求，客户端与服务端可同时运行（同机测试时客户端连本机 IP 与同一端口）。绑定 IP 留空时监听所有网卡。</p>
       <p class="runtime-state available">● 内置 riperf3 引擎已就绪（无需安装 iperf3）</p>
     </section>
     <div class="config-actions">
       <button class="primary" :disabled="serverRunning" @click="emit('start-server')"><Icon name="play" />启动服务</button>
       <button class="danger" :disabled="!serverRunning" @click="emit('stop-server')"><Icon name="stop" />停止服务</button>
-      <button @click="emit('clear')"><Icon name="trash" />清空日志</button>
     </div>
     </template>
     <div v-if="customDialog" class="modal-backdrop" @click.self="customDialog = false">

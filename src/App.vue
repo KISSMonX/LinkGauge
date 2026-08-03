@@ -7,13 +7,14 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { save } from '@tauri-apps/plugin-dialog'
 import ConfigPanel from './components/ConfigPanel.vue'
 import Dashboard from './components/Dashboard.vue'
+import ServerDashboard from './components/ServerDashboard.vue'
 import StatusPanel from './components/StatusPanel.vue'
 import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
 import type { BackendEvent, DockEvent, InterfaceInfo, LogEntry, MetricPoint, NetworkInfo, ServerConfig, SyncState, TestConfig, TestItem, TestSummary } from './types'
 
 const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 8192, interval: 1 }
-const serverDefaults: ServerConfig = { port: 5201 }
+const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1 }
 const config = ref<TestConfig>({ ...defaults })
 const serverConfig = ref<ServerConfig>({ ...serverDefaults })
 const items = ref<TestItem[]>([
@@ -55,8 +56,20 @@ const savedTcpLength = ref(0)
 const savedUdpLength = ref(0)
 const nicDialog = ref(false)
 const nicSelected = ref(0)
+/** 网卡选择弹窗的目标：客户端「服务端 IP」还是服务端「绑定 IP」 */
+const nicTarget = ref<'serverIp' | 'bindIp'>('serverIp')
 /** 服务端 IP 尚未被用户手动修改时，重选网卡会同步更新它 */
 const autoServerIp = ref(false)
+/** 服务端独立统计（来自后端 status 事件广播，各窗口各自维护同一份数据） */
+const serverUptime = ref(0)
+const serverCompleted = ref(0)
+const serverServing = ref(false)
+const serverPoints = ref<MetricPoint[]>([])
+/** 最近一次连接服务端的客户端地址（服务端概览「对端=客户端」） */
+const serverPeerIp = ref('')
+const serverPeerPort = ref(0)
+/** 服务端窗口只显示服务端自身日志（引擎日志 + 本窗口 UI 日志），与客户端日志独立 */
+const serverLogs = computed(() => logs.value.filter((l) => l.module === 'server' || l.module === 'UI'))
 let ticker: number | undefined
 let unlisten: UnlistenFn | undefined
 
@@ -199,10 +212,15 @@ async function dockBack() {
   } catch (e) { log('ERROR', `收回标签失败：${e}`) }
 }
 
-/** 应用指定序号的网卡作为本机信息（默认列表第一个） */
+/** 应用指定序号的网卡：客户端模式更新本机信息与服务端 IP；服务端模式更新绑定 IP */
 function applyNic(index: number) {
   const nic = interfaces.value[index]
   if (!nic) return
+  if (nicTarget.value === 'bindIp') {
+    serverConfig.value = { ...serverConfig.value, bindIp: nic.ip }
+    log('INFO', `服务端绑定 IP 已设置为 ${nic.ip}`)
+    return
+  }
   // 带宽限制仍是旧网卡默认值时，跟随新网卡速率（用户手动改过则保留）
   const bandwidthIsNicDefault = config.value.bandwidth === local.value.speedMbps
   local.value = { ...local.value, ip: nic.ip, mac: nic.mac, interfaceName: nic.interfaceName, speedMbps: nic.speedMbps }
@@ -210,8 +228,9 @@ function applyNic(index: number) {
   if (autoServerIp.value) config.value.serverIp = nic.ip
   log('INFO', `已选择网卡：${nic.interfaceName} (${nic.ip})`)
 }
-function openNicDialog() {
+function openNicDialog(target: 'serverIp' | 'bindIp' = 'serverIp') {
   if (!interfaces.value.length || clientRunning.value) return
+  nicTarget.value = target
   nicSelected.value = Math.max(0, interfaces.value.findIndex((i) => i.ip === local.value.ip))
   nicDialog.value = true
 }
@@ -262,10 +281,15 @@ async function start() {
 async function startServer() {
   if (serverRunning.value) return
   if (serverConfig.value.port < 1 || serverConfig.value.port > 65535) { errorDialog.value = { title: '参数错误', message: '端口应在 1–65535 之间' }; return }
-  log('INFO', `正在启动 riperf3 服务端，监听端口 ${serverConfig.value.port}…`)
+  if (serverConfig.value.interval < 1 || serverConfig.value.interval > 60) { errorDialog.value = { title: '参数错误', message: '日志输出间隔应在 1–60 秒之间' }; return }
+  const bindTarget = serverConfig.value.bindIp.trim() || local.value.ip
+  log('INFO', `正在启动 riperf3 服务端，监听 ${serverConfig.value.bindIp.trim() ? serverConfig.value.bindIp : '所有网卡'}:${serverConfig.value.port}…`)
   if (!isTauri()) { serverRunning.value = true; log('INFO', '预览模式：模拟服务端启动'); return }
+  // 新一轮服务端会话：清空上一次的概览统计与曲线
+  serverUptime.value = 0; serverCompleted.value = 0; serverServing.value = false; serverPoints.value = []
+  serverPeerIp.value = ''; serverPeerPort.value = 0
   try {
-    serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', serverIp: local.value.ip, localIp: local.value.ip, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: 1 } })
+    serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval } })
     serverRunning.value = true
   } catch (error) { log('ERROR', String(error)); errorDialog.value = { title: '服务端启动失败', message: String(error) } }
 }
@@ -309,10 +333,27 @@ function handleEvent(event: BackendEvent) {
   if (!isClient && !isServer) return
   if (event.type === 'log') log(event.level || 'INFO', event.message || '', event.taskId)
   if (event.logPath && !summary.logPaths.includes(event.logPath)) summary.logPaths.push(event.logPath)
-  // 服务端事件：独立于客户端队列，仅维护运行状态
+  // 服务端事件：独立于客户端队列，维护服务端运行状态与独立统计
   if (isServer) {
-    if (event.type === 'complete') { serverRunning.value = false; serverSession.value = ''; log('INFO', `服务端已停止（${event.status === 'stopped' ? '手动停止' : '已结束'}）`) }
-    if (event.type === 'error') { serverRunning.value = false; serverSession.value = ''; log('ERROR', event.message || '服务端异常退出'); errorDialog.value = { title: '服务端错误', message: event.message || '服务端异常退出' } }
+    if (event.type === 'status' && event.message) {
+      try {
+        const s = JSON.parse(event.message) as { uptime?: number; completed?: number; serving?: boolean; bandwidthMbps?: number | null; transferMb?: number; jitterMs?: number; lossPercent?: number; retransmits?: number; peerIp?: string; peerPort?: number }
+        if (typeof s.uptime === 'number') serverUptime.value = s.uptime
+        if (typeof s.completed === 'number') serverCompleted.value = s.completed
+        serverServing.value = !!s.serving
+        // 对端（客户端）地址：测试完成后由服务端携带，供概览展示
+        if (typeof s.peerIp === 'string' && s.peerIp) {
+          serverPeerIp.value = s.peerIp
+          serverPeerPort.value = s.peerPort ?? 0
+        }
+        // 测试进行中且带间隔统计时，追加到服务端自己的实时曲线
+        if (s.serving && typeof s.bandwidthMbps === 'number') {
+          serverPoints.value.push({ second: s.uptime ?? 0, bandwidthMbps: s.bandwidthMbps, transferMb: s.transferMb ?? 0, jitterMs: s.jitterMs ?? 0, lossPercent: s.lossPercent ?? 0, retransmits: s.retransmits ?? 0 })
+        }
+      } catch { /* ignore */ }
+    }
+    if (event.type === 'complete') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; log('INFO', `服务端已停止（${event.status === 'stopped' ? '手动停止' : '已结束'}）`) }
+    if (event.type === 'error') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; log('ERROR', event.message || '服务端异常退出'); errorDialog.value = { title: '服务端错误', message: event.message || '服务端异常退出' } }
     return
   }
   // 客户端事件：停止或结束后的事件忽略
@@ -458,7 +499,7 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenCl
       <nav v-if="side === 'hub'" class="toolbar-actions"><button @click="importConfig"><Icon name="download" />导入配置</button><button @click="exportConfig"><Icon name="upload" />导出配置</button><button @click="infoDialog = { title: '引擎信息', message: '内置 riperf3 引擎（纯 Rust 实现 iperf3 协议，与官方 iperf3 互通）\n无需安装 iperf3，无外部依赖' }"><Icon name="settings" />设置</button><button @click="infoDialog = { title: '关于', message: 'LinkGauge v0.1.0\nRust + Tauri + Vue 3\n测试引擎：riperf3（MIT OR Apache-2.0）' }"><Icon name="info" />关于</button></nav>
       <nav v-else class="toolbar-actions"><button title="关闭此窗口并把标签放回主窗口" @click="dockBack"><Icon name="monitor" />⇱ 停靠回主窗口</button></nav>
     </div>
-    <div class="workspace" :class="{ 'workspace-server': side === 'server' }">
+    <div class="workspace">
       <ConfigPanel
         v-if="side === 'hub' && dockedTabs.length"
         :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
@@ -472,7 +513,7 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenCl
       <ConfigPanel
         v-else-if="side === 'server'"
         detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="config = $event" @update:server-config="serverConfig = $event" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength"
+        @update:config="config = $event" @update:server-config="serverConfig = $event" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength"
       />
       <div v-else class="panel config-panel dock-empty">
         <h2>标签页已分离</h2>
@@ -482,8 +523,12 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenCl
           <button class="primary" @click="requestDock('server')"><Icon name="monitor" />收回服务端标签</button>
         </div>
       </div>
+      <!-- 客户端视角：概览 + 实时曲线（主窗口 / 客户端分离窗口） -->
       <Dashboard v-if="side !== 'server'" :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" />
-      <StatusPanel :mode="side === 'server' ? 'logs' : 'full'" :items="items" :logs="logs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
+      <!-- 服务端视角：服务端自身概览 + 服务端观测的实时曲线（与客户端数据独立），对端为客户端 -->
+      <ServerDashboard v-else :bind-target="serverConfig.bindIp.trim() || '所有网卡'" :port="serverConfig.port" :running="serverRunning" :uptime="serverUptime" :completed="serverCompleted" :serving="serverServing" :points="serverPoints" :peer-ip="serverPeerIp" :peer-port="serverPeerPort" />
+      <!-- 服务端窗口日志只看服务端自身（引擎 + 本窗口 UI），与客户端日志分开 -->
+      <StatusPanel :mode="side === 'server' ? 'logs' : 'full'" :items="items" :logs="side === 'server' ? serverLogs : logs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
     </div>
     <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
     <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">重试</button><template v-if="infoDialog?.recovery"><button class="primary" @click="infoDialog = null; start()">恢复测试</button><button class="danger" @click="infoDialog = null; discardRecovery()">停止并重新开始</button></template><button v-if="!infoDialog?.recovery" @click="errorDialog = null; infoDialog = null">确定</button></div></div></div>

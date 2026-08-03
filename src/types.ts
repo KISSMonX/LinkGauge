@@ -28,6 +28,10 @@ export interface TestConfig {
 /** 服务端独立配置（与服务端标签页绑定，与客户端参数互不影响） */
 export interface ServerConfig {
   port: number
+  /** 绑定 IP：留空表示绑定所有网卡（默认 0.0.0.0 双栈） */
+  bindIp: string
+  /** 日志 / 统计信息输出间隔（秒） */
+  interval: number
 }
 
 export interface NetworkInfo {

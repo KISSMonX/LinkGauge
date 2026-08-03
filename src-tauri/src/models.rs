@@ -11,6 +11,9 @@ pub struct TestRequest {
     pub server_ip: String,
     #[serde(default)]
     pub local_ip: String,
+    /// 服务端绑定 IP（仅服务端模式使用；空 = 绑定所有网卡）
+    #[serde(default)]
+    pub bind_ip: String,
     pub port: u16,
     pub duration: u64,
     pub parallel: u16,

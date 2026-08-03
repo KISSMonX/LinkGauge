@@ -8,7 +8,7 @@ use std::{
     io::Write as StdWrite,
     process::Stdio,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
@@ -338,6 +338,19 @@ async fn run_engine_client(
 // riperf3 服务端任务：持续监听直到手动停止
 // ---------------------------------------------------------------------------
 
+/// 服务端最近一个输出周期的统计快照（on_interval 回调写入，心跳任务读取并广播给前端）；
+/// 同时记录最近一次连接的客户端地址（服务端概览「对端=客户端」的数据源）
+#[derive(Default, Clone)]
+struct ServerInterval {
+    bandwidth_mbps: f64,
+    transfer_mb: f64,
+    jitter_ms: f64,
+    loss_percent: f64,
+    retransmits: u64,
+    peer_ip: String,
+    peer_port: u16,
+}
+
 async fn run_engine_server(
     app: AppHandle,
     session_id: String,
@@ -355,16 +368,49 @@ async fn run_engine_server(
     let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
         return;
     };
+    let bind_display = if request.bind_ip.trim().is_empty() {
+        "0.0.0.0（所有网卡）".to_string()
+    } else {
+        request.bind_ip.clone()
+    };
     append_log(
         &log,
         &format!(
-            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 监听端口 {}，持续服务\n\n",
+            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务\n\n",
             riperf3::VERSION,
+            bind_display,
             request.port
         ),
     );
 
-    let server = match ServerBuilder::new()
+    // 服务端支持绑定指定 IP（留空 = 绑定所有网卡）；测试进行中由 on_interval 回调标记，
+    // 该回调同时采样当前测试的间隔统计（服务端视角的实时曲线数据源）
+    let serving = Arc::new(AtomicBool::new(false));
+    let latest = Arc::new(Mutex::new(None::<ServerInterval>));
+    let mut server_builder = ServerBuilder::new();
+    if !request.bind_ip.trim().is_empty() {
+        server_builder = server_builder.bind_address(&request.bind_ip);
+    }
+    server_builder = server_builder.on_interval({
+        let serving = serving.clone();
+        let latest = latest.clone();
+        move |interval: &riperf3::json_report::Interval| {
+            serving.store(true, Ordering::Relaxed);
+            if interval.sum.omitted {
+                return;
+            }
+            let sum = &interval.sum;
+            *latest.lock().unwrap() = Some(ServerInterval {
+                bandwidth_mbps: sum.bits_per_second / 1_000_000.0,
+                transfer_mb: sum.bytes as f64 / 1_000_000.0,
+                jitter_ms: sum.jitter_ms.unwrap_or(0.0),
+                loss_percent: sum.lost_percent.unwrap_or(0.0),
+                retransmits: sum.retransmits.unwrap_or(0).max(0) as u64,
+                ..Default::default()
+            });
+        }
+    });
+    let server = match server_builder
         .port(Some(request.port))
         .one_off(true)
         .json_output(true)
@@ -401,20 +447,107 @@ async fn run_engine_server(
     };
     append_log(
         &log,
-        &format!("[INFO] 服务端已就绪，监听端口 {}", request.port),
+        &format!("[INFO] 服务端已就绪，监听 {bind_display}:{}", request.port),
     );
     emit_log(
         &app,
         &session_id,
         &request.task_id,
         "INFO",
-        format!("服务端已就绪，监听端口 {}", request.port),
+        format!("服务端已就绪，监听 {bind_display}:{}", request.port),
     );
+
+    // 周期状态输出：按「日志输出间隔」每隔 N 秒写一次运行日志与统计信息（并发于监听循环）
+    let interval_secs = request.interval.max(1);
+    let completed = Arc::new(AtomicU64::new(0));
+    let bind_short = if request.bind_ip.trim().is_empty() {
+        "0.0.0.0".to_string()
+    } else {
+        request.bind_ip.clone()
+    };
+    let port = request.port;
+    let heartbeat = {
+        let log = log.clone();
+        let app = app.clone();
+        let session_id = session_id.clone();
+        let task_id = request.task_id.clone();
+        let completed = completed.clone();
+        let serving = serving.clone();
+        let latest = latest.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+            ticker.tick().await; // 跳过立即触发的第一次
+            let started = std::time::Instant::now();
+            loop {
+                ticker.tick().await;
+                let uptime = started.elapsed().as_secs();
+                let is_serving = serving.load(Ordering::Relaxed);
+                let done = completed.load(Ordering::Relaxed);
+                let snapshot = latest.lock().unwrap().clone();
+                // 文本日志行（写文件 + 广播）
+                let status_text = if is_serving { "测试进行中" } else { "空闲" };
+                let message = format!(
+                    "运行状态：监听 {bind_short}:{port}，已运行 {uptime}s，累计完成 {done} 次测试，当前{status_text}"
+                );
+                append_log(&log, &format!("[INFO] {message}"));
+                emit_log(&app, &session_id, &task_id, "INFO", message);
+                // 结构化统计事件：供服务端窗口的概览与实时曲线使用（携带当前测试的间隔统计与最近客户端地址）
+                let stats = match &snapshot {
+                    Some(s) => format!(
+                        r#","bandwidthMbps":{},"transferMb":{},"jitterMs":{},"lossPercent":{},"retransmits":{}"#,
+                        s.bandwidth_mbps, s.transfer_mb, s.jitter_ms, s.loss_percent, s.retransmits
+                    ),
+                    None => String::new(),
+                };
+                let peer = match &snapshot {
+                    Some(s) if !s.peer_ip.is_empty() => {
+                        format!(r#","peerIp":"{}","peerPort":{}"#, s.peer_ip, s.peer_port)
+                    }
+                    _ => String::new(),
+                };
+                let payload = format!(
+                    r#"{{"uptime":{},"completed":{},"serving":{}{}{}}}"#,
+                    uptime, done, is_serving, stats, peer
+                );
+                let _ = app.emit(
+                    "test-event",
+                    TestEvent {
+                        session_id: session_id.clone(),
+                        task_id: task_id.clone(),
+                        event_type: "status".into(),
+                        status: None,
+                        level: None,
+                        message: Some(payload),
+                        metric: None,
+                        log_path: None,
+                    },
+                );
+            }
+        })
+    };
 
     loop {
         match bound.run_once().await {
             Ok(outcome) => {
+                serving.store(false, Ordering::Relaxed);
+                completed.fetch_add(1, Ordering::Relaxed);
+                // 记录本次连接的客户端地址（服务端概览「对端=客户端」的数据源）
+                let peer = outcome
+                    .report
+                    .start
+                    .connected
+                    .first()
+                    .map(|c| (c.remote_host.clone(), c.remote_port));
+                *latest.lock().unwrap() = match &peer {
+                    Some((ip, p)) => Some(ServerInterval {
+                        peer_ip: ip.clone(),
+                        peer_port: *p,
+                        ..Default::default()
+                    }),
+                    None => None,
+                };
                 if outcome.termination == Termination::Interrupted {
+                    heartbeat.abort();
                     append_log(&log, "\n测试结果: 服务端已停止（手动停止）");
                     emit_log(
                         &app,
@@ -427,19 +560,26 @@ async fn run_engine_server(
                     return;
                 }
                 // 单次测试结束：写入汇总并继续监听
-                append_log(&log, "\n[INFO] 一次测试完成，汇总如下：");
+                let peer_text = peer
+                    .as_ref()
+                    .map(|(ip, p)| format!("{ip}:{p}"))
+                    .unwrap_or_else(|| "未知地址".to_string());
+                append_log(&log, &format!("\n[INFO] 客户端 {peer_text} 完成测试，汇总如下："));
                 append_engine_summary(&log, &outcome.report);
                 emit_log(
                     &app,
                     &session_id,
                     &request.task_id,
                     "INFO",
-                    "一次测试完成，继续监听…".into(),
+                    format!("一次测试完成（客户端 {peer_text}），继续监听…"),
                 );
             }
             Err(error) => {
+                serving.store(false, Ordering::Relaxed);
+                *latest.lock().unwrap() = None;
                 // 空闲时收到停止信号返回 Aborted，正常退出
                 if matches!(error, riperf3::RiperfError::Aborted(_)) {
+                    heartbeat.abort();
                     append_log(&log, "\n测试结果: 服务端已停止（手动停止）");
                     emit_log(
                         &app,
@@ -613,13 +753,18 @@ async fn setup_log(
     task_name: &str,
 ) -> Option<SessionLog> {
     let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
-    let base_name = format!(
-        "{}-{}-{}-{}",
-        safe_name(local_ip),
-        safe_name(&request.server_ip),
-        safe_name(task_name),
-        stamp
-    );
+    // 服务端与客户端日志分开记录：Server-{本机IP}-{端口}-{时间} / Client-{本机IP}-{对端IP}-{测试项}-{时间}
+    let base_name = if request.mode == "server" || request.task_id == "server" {
+        format!("Server-{}-{}-{}", safe_name(local_ip), request.port, stamp)
+    } else {
+        format!(
+            "Client-{}-{}-{}-{}",
+            safe_name(local_ip),
+            safe_name(&request.server_ip),
+            safe_name(task_name),
+            stamp
+        )
+    };
     let log_dir = app
         .path()
         .app_log_dir()
