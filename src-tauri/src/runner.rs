@@ -299,7 +299,29 @@ async fn run_engine_client(
         .json_output(true)
         .emit_output(false)
         .interrupt(rx)
-        .on_interval(on_interval);
+        .on_interval(on_interval)
+        .on_connect({
+            // 控制连接建立即广播本地端口（客户端「连接状态」展示本次连接的本地端口）
+            let app = app.clone();
+            let session_id = session_id.clone();
+            let task_id = request.task_id.clone();
+            move |addr| {
+                let payload = format!(r#"{{"localPort":{}}}"#, addr.port());
+                let _ = app.emit(
+                    "test-event",
+                    TestEvent {
+                        session_id: session_id.clone(),
+                        task_id: task_id.clone(),
+                        event_type: "status".into(),
+                        status: None,
+                        level: None,
+                        message: Some(payload),
+                        metric: None,
+                        log_path: None,
+                    },
+                );
+            }
+        });
     if let Some(size) = params.blksize {
         builder = builder.blksize(size);
     }
@@ -408,6 +430,39 @@ async fn run_engine_server(
                 retransmits: sum.retransmits.unwrap_or(0).max(0) as u64,
                 ..Default::default()
             });
+        }
+    });
+    // 客户端一建立控制连接就实时广播对端地址（服务端概览「对端=客户端」无需等待测试结束）
+    server_builder = server_builder.on_connect({
+        let app = app.clone();
+        let session_id = session_id.clone();
+        let task_id = request.task_id.clone();
+        let log = log.clone();
+        move |addr| {
+            let host = addr.ip().to_canonical().to_string();
+            let port = addr.port();
+            append_log(&log, &format!("[INFO] 客户端 {host}:{port} 已连接"));
+            emit_log(
+                &app,
+                &session_id,
+                &task_id,
+                "INFO",
+                format!("客户端 {host}:{port} 已连接"),
+            );
+            let payload = format!(r#"{{"serving":true,"peerIp":"{}","peerPort":{}}}"#, host, port);
+            let _ = app.emit(
+                "test-event",
+                TestEvent {
+                    session_id: session_id.clone(),
+                    task_id: task_id.clone(),
+                    event_type: "status".into(),
+                    status: None,
+                    level: None,
+                    message: Some(payload),
+                    metric: None,
+                    log_path: None,
+                },
+            );
         }
     });
     let server = match server_builder

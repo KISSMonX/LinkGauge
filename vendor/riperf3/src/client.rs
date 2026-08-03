@@ -86,6 +86,9 @@ pub struct Client {
     /// Per-interval live callback (local LinkGauge patch), see
     /// [`ClientBuilder::on_interval`].
     pub(crate) on_interval: Option<crate::reporter::IntervalHook>,
+    /// Live connection callback (local LinkGauge patch), see
+    /// [`ClientBuilder::on_connect`].
+    pub(crate) on_connect: Option<crate::reporter::ConnectHook>,
 }
 
 /// Build the peer half of a stream's end-block pair from the server's
@@ -416,6 +419,12 @@ impl Client {
         // ---- Generate cookie and connect ----
         let cookie = protocol::make_cookie();
         let (ctrl, control_mss, blksize) = self.connect_control(&cookie).await?;
+        // (local LinkGauge patch) real-time local-address notification
+        if let Some(hook) = &self.on_connect {
+            if let Ok(addr) = ctrl.local_addr() {
+                hook.0(addr);
+            }
+        }
 
         // The run's accumulated state, threaded through the per-state
         // handlers (#289) — field docs on RunCtx.
@@ -2997,6 +3006,7 @@ pub struct ClientBuilder {
     rsa_public_key_path: Option<String>,
     use_pkcs1_padding: bool,
     on_interval: Option<crate::reporter::IntervalHook>,
+    on_connect: Option<crate::reporter::ConnectHook>,
 }
 
 impl Default for ClientBuilder {
@@ -3061,6 +3071,7 @@ impl Default for ClientBuilder {
             rsa_public_key_path: None,
             use_pkcs1_padding: false,
             on_interval: None,
+            on_connect: None,
         }
     }
 }
@@ -3297,6 +3308,17 @@ impl ClientBuilder {
         hook: impl Fn(&crate::json_report::Interval) + Send + Sync + 'static,
     ) -> Self {
         self.on_interval = Some(crate::reporter::IntervalHook::new(hook));
+        self
+    }
+
+    /// Live connection callback (local LinkGauge patch): invoked with the
+    /// client's local socket address right after the control connection is
+    /// established — consumers can show the local port in real time.
+    pub fn on_connect(
+        mut self,
+        hook: impl Fn(std::net::SocketAddr) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_connect = Some(crate::reporter::ConnectHook::new(hook));
         self
     }
 
@@ -3825,6 +3847,7 @@ impl ClientBuilder {
             rsa_public_key_path: self.rsa_public_key_path,
             use_pkcs1_padding: self.use_pkcs1_padding,
             on_interval: self.on_interval,
+            on_connect: self.on_connect.clone(),
         })
     }
 }

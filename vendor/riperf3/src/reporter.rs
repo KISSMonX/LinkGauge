@@ -584,6 +584,33 @@ impl PartialEq for IntervalHook {
     }
 }
 
+/// Connection-time callback for embedding consumers (local LinkGauge patch):
+/// invoked right after the control connection is established (client) or
+/// accepted (server), with the peer's socket address, so a GUI can show the
+/// connection in real time instead of waiting for the run to end.
+#[derive(Clone)]
+pub struct ConnectHook(pub(crate) Arc<dyn Fn(std::net::SocketAddr) + Send + Sync>);
+
+impl ConnectHook {
+    pub fn new(f: impl Fn(std::net::SocketAddr) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+}
+
+// The closure field carries no Debug/PartialEq — hand-roll both so
+// `Client`/`Server` keep their derived impls (same pattern as IntervalHook).
+impl std::fmt::Debug for ConnectHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConnectHook(..)")
+    }
+}
+
+impl PartialEq for ConnectHook {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// Configuration for the interval reporter.
 pub struct IntervalReporterConfig {
     pub interval_secs: f64,

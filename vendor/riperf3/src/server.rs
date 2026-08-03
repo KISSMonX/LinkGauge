@@ -498,6 +498,9 @@ pub struct Server {
     /// Per-interval live callback (local LinkGauge patch), see
     /// [`ServerBuilder::on_interval`].
     pub(crate) on_interval: Option<crate::reporter::IntervalHook>,
+    /// Live connection callback (local LinkGauge patch), see
+    /// [`ServerBuilder::on_connect`].
+    pub(crate) on_connect: Option<crate::reporter::ConnectHook>,
 }
 
 /// Best-effort source IP the kernel would use to reach `client_addr`, paired
@@ -1020,6 +1023,10 @@ impl Server {
                 return Ok(None);
             }
         };
+        // (local LinkGauge patch) real-time peer notification
+        if let Some(hook) = &self.on_connect {
+            hook.0(peer_addr);
+        }
         // (#222 r1 item 6: the Time/banner/Cookie/MSS block prints AFTER the
         // param exchange — GT's iperf_on_connect fires there — so a
         // --get-server-output capture relays it; see print_connect_block.)
@@ -4483,6 +4490,9 @@ pub struct ServerBuilder {
     json_stream_full_output: bool,
     format_char: char,
     on_interval: Option<crate::reporter::IntervalHook>,
+    /// Live connection callback (local LinkGauge patch), see
+    /// [`ServerBuilder::on_connect`].
+    on_connect: Option<crate::reporter::ConnectHook>,
 }
 
 impl Default for ServerBuilder {
@@ -4515,6 +4525,7 @@ impl Default for ServerBuilder {
             // iperf3 has NO default -f: every figure auto-scales (#221).
             format_char: 'a',
             on_interval: None,
+            on_connect: None,
         }
     }
 }
@@ -4586,6 +4597,17 @@ impl ServerBuilder {
         hook: impl Fn(&crate::json_report::Interval) + Send + Sync + 'static,
     ) -> Self {
         self.on_interval = Some(crate::reporter::IntervalHook::new(hook));
+        self
+    }
+
+    /// Live connection callback (local LinkGauge patch): invoked with the
+    /// client's socket address as soon as the control connection is accepted
+    /// — before the test starts, so consumers can show the peer in real time.
+    pub fn on_connect(
+        mut self,
+        hook: impl Fn(std::net::SocketAddr) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_connect = Some(crate::reporter::ConnectHook::new(hook));
         self
     }
 
@@ -4792,6 +4814,7 @@ impl ServerBuilder {
             json_stream_full_output: self.json_stream_full_output,
             format_char: self.format_char,
             on_interval: self.on_interval,
+            on_connect: self.on_connect,
         })
     }
 }

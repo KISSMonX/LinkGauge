@@ -46,6 +46,8 @@ const queueIndex = ref(-1)
 const progress = ref(0)
 const elapsed = ref(0)
 const connected = ref(false)
+/** 本次连接的客户端本地端口（控制连接建立时由后端广播） */
+const clientLocalPort = ref(0)
 const errorDialog = ref<{ title: string; message: string } | null>(null)
 /** recovery 为 true 表示「发现未完成测试」弹窗，提供恢复/放弃两个选项 */
 const infoDialog = ref<{ title: string; message: string; recovery?: boolean } | null>(null)
@@ -68,8 +70,10 @@ const serverPoints = ref<MetricPoint[]>([])
 /** 最近一次连接服务端的客户端地址（服务端概览「对端=客户端」） */
 const serverPeerIp = ref('')
 const serverPeerPort = ref(0)
-/** 服务端窗口只显示服务端自身日志（引擎日志 + 本窗口 UI 日志），与客户端日志独立 */
+/** 服务端视角只显示服务端自身日志（引擎日志 + 本窗口 UI 日志），与客户端日志独立 */
 const serverLogs = computed(() => logs.value.filter((l) => l.module === 'server' || l.module === 'UI'))
+/** 客户端视角只显示客户端自身日志（客户端任务 + 本窗口 UI 日志），与服务器日志独立 */
+const clientLogs = computed(() => logs.value.filter((l) => l.module !== 'server'))
 let ticker: number | undefined
 let unlisten: UnlistenFn | undefined
 
@@ -87,6 +91,8 @@ let unlistenSync: UnlistenFn | undefined
 let unlistenDock: UnlistenFn | undefined
 let unlistenClose: UnlistenFn | undefined
 
+/** 当前展示的是服务端视角：服务端分离窗口，或主窗口激活「服务端」标签（右侧概览/曲线/日志随之切换） */
+const showServerView = computed(() => side.value === 'server' || (side.value === 'hub' && activeTab.value === 'server'))
 const current = computed(() => items.value.find((i) => i.status === 'running'))
 const summary = reactive<TestSummary>({ startedAt: '', completed: 0, total: 0, averageBandwidth: 0, maxBandwidth: 0, minBandwidth: 0, totalTransferMb: 0, pingAverage: 0, lossPercent: 0, jitterMs: 0, logPaths: [] })
 const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false })
@@ -212,8 +218,9 @@ async function dockBack() {
   } catch (e) { log('ERROR', `收回标签失败：${e}`) }
 }
 
-/** 应用指定序号的网卡：客户端模式更新本机信息与服务端 IP；服务端模式更新绑定 IP */
-function applyNic(index: number) {
+/** 应用指定序号的网卡：客户端模式更新本机信息与服务端 IP；服务端模式更新绑定 IP。
+ *  explicit=true 表示用户在弹窗里明确选择（点「确定」），此时总是把服务端 IP 同步为所选网卡 IP */
+function applyNic(index: number, explicit = false) {
   const nic = interfaces.value[index]
   if (!nic) return
   if (nicTarget.value === 'bindIp') {
@@ -225,7 +232,8 @@ function applyNic(index: number) {
   const bandwidthIsNicDefault = config.value.bandwidth === local.value.speedMbps
   local.value = { ...local.value, ip: nic.ip, mac: nic.mac, interfaceName: nic.interfaceName, speedMbps: nic.speedMbps }
   if (bandwidthIsNicDefault) config.value.bandwidth = nic.speedMbps > 0 ? nic.speedMbps : 0
-  if (autoServerIp.value) config.value.serverIp = nic.ip
+  // 用户明确选择的网卡始终同步服务端 IP；启动/取消等默认应用仅在未手动设置过时跟随
+  if (explicit || autoServerIp.value) config.value.serverIp = nic.ip
   log('INFO', `已选择网卡：${nic.interfaceName} (${nic.ip})`)
 }
 function openNicDialog(target: 'serverIp' | 'bindIp' = 'serverIp') {
@@ -358,6 +366,12 @@ function handleEvent(event: BackendEvent) {
   }
   // 客户端事件：停止或结束后的事件忽略
   if (!clientRunning.value) return
+  if (event.type === 'status' && event.message) {
+    try {
+      const s = JSON.parse(event.message) as { localPort?: number }
+      if (typeof s.localPort === 'number') clientLocalPort.value = s.localPort
+    } catch { /* ignore */ }
+  }
   if (event.type === 'metric' && event.metric) { points.value.push(event.metric); connected.value = true; if (event.taskId === 'ping' && event.metric.jitterMs) summary.pingAverage = event.metric.jitterMs }
   if (event.type === 'complete') completeCurrent(event.status || 'success')
   if (event.type === 'error') failCurrent(event.message || '测试执行失败')
@@ -503,7 +517,7 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenCl
       <ConfigPanel
         v-if="side === 'hub' && dockedTabs.length"
         :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength" @detach="detachTab"
+        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength" @detach="detachTab"
       />
       <ConfigPanel
         v-else-if="side === 'client'"
@@ -523,15 +537,15 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenCl
           <button class="primary" @click="requestDock('server')"><Icon name="monitor" />收回服务端标签</button>
         </div>
       </div>
-      <!-- 客户端视角：概览 + 实时曲线（主窗口 / 客户端分离窗口） -->
-      <Dashboard v-if="side !== 'server'" :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" />
+      <!-- 客户端视角：概览 + 实时曲线（主窗口客户端标签 / 客户端分离窗口） -->
+      <Dashboard v-if="!showServerView" :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" :local-port="clientLocalPort" />
       <!-- 服务端视角：服务端自身概览 + 服务端观测的实时曲线（与客户端数据独立），对端为客户端 -->
       <ServerDashboard v-else :bind-target="serverConfig.bindIp.trim() || '所有网卡'" :port="serverConfig.port" :running="serverRunning" :uptime="serverUptime" :completed="serverCompleted" :serving="serverServing" :points="serverPoints" :peer-ip="serverPeerIp" :peer-port="serverPeerPort" />
-      <!-- 服务端窗口日志只看服务端自身（引擎 + 本窗口 UI），与客户端日志分开 -->
-      <StatusPanel :mode="side === 'server' ? 'logs' : 'full'" :items="items" :logs="side === 'server' ? serverLogs : logs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
+      <!-- 客户端/服务端视角各自只显示自己的日志（引擎日志 + 本窗口 UI 日志） -->
+      <StatusPanel :mode="showServerView ? 'logs' : 'full'" :items="items" :logs="showServerView ? serverLogs : clientLogs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
     </div>
     <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
     <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">重试</button><template v-if="infoDialog?.recovery"><button class="primary" @click="infoDialog = null; start()">恢复测试</button><button class="danger" @click="infoDialog = null; discardRecovery()">停止并重新开始</button></template><button v-if="!infoDialog?.recovery" @click="errorDialog = null; infoDialog = null">确定</button></div></div></div>
-    <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>选择本机网卡</h2><p class="nic-hint">检测到多个网卡，请选择测试使用的本机网卡：</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : '速率未知' }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected)">确定</button><button @click="nicDialog = false; applyNic(0)">取消（默认第一个）</button></div></div></div>
+    <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>选择本机网卡</h2><p class="nic-hint">检测到多个网卡，请选择测试使用的本机网卡：</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : '速率未知' }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">确定</button><button @click="nicDialog = false; applyNic(0)">取消（默认第一个）</button></div></div></div>
   </div>
 </template>
