@@ -49,27 +49,40 @@ const packetOptions = computed(() => {
 
 /** select 取值：能匹配选项就用数字，否则为 'custom' */
 const packetSelectValue = computed(() => (packetOptions.value.some((option) => option.value === props.config.packetLength) ? props.config.packetLength : 'custom'))
-const customMode = computed(() => packetSelectValue.value === 'custom')
-const customInput = ref<number | null>(null)
-watch(packetSelectValue, (value) => {
-  if (value === 'custom' && customInput.value === null) {
-    customInput.value = props.config.packetLength > 0 && !isPreset(props.config.packetLength) ? props.config.packetLength : (props.savedCustomLength || 1024)
-  }
-}, { immediate: true })
+
+/** 自定义报文长度弹窗：输入数值 + 选择单位（Bytes / KB / MB） */
+const customDialog = ref(false)
+const customValue = ref<number | null>(null)
+const customUnit = ref<'bytes' | 'kb' | 'mb'>('kb')
+const UNIT_FACTOR = { bytes: 1, kb: 1024, mb: 1024 * 1024 }
+const customBytes = computed(() => {
+  const value = customValue.value
+  if (value === null || !Number.isFinite(value) || value <= 0) return 0
+  return Math.round(value * UNIT_FACTOR[customUnit.value])
+})
+
+function openCustomDialog() {
+  // 预填当前报文长度，按大小换算成最合适的单位
+  const length = props.config.packetLength > 0 && !isPreset(props.config.packetLength) ? props.config.packetLength : (props.savedCustomLength || 4096)
+  if (length % (1024 * 1024) === 0) { customValue.value = length / (1024 * 1024); customUnit.value = 'mb' }
+  else if (length % 1024 === 0) { customValue.value = length / 1024; customUnit.value = 'kb' }
+  else { customValue.value = length; customUnit.value = 'bytes' }
+  customDialog.value = true
+}
+function confirmCustomLength() {
+  const bytes = customBytes.value
+  if (bytes < 1 || bytes > 262144) return // 超出范围不关闭，用户可继续调整
+  customDialog.value = false
+  emit('save-custom-length', bytes)
+}
 
 function onPacketChange(event: Event) {
   const value = (event.target as HTMLSelectElement).value
   if (value === 'custom') {
-    customInput.value = props.config.packetLength > 0 && !isPreset(props.config.packetLength) ? props.config.packetLength : (props.savedCustomLength || 1024)
+    openCustomDialog()
   } else {
     set('packetLength', Number(value))
   }
-}
-function confirmCustomLength() {
-  const length = customInput.value
-  if (length === null || !Number.isFinite(length) || length < 1 || length > 262144) { customInput.value = null; return }
-  customInput.value = null
-  emit('save-custom-length', Math.round(length))
 }
 </script>
 
@@ -98,7 +111,6 @@ function confirmCustomLength() {
       <label><span>并发流数</span><input type="number" :value="config.parallel" min="1" max="128" :disabled="clientRunning" @input="set('parallel', Number(($event.target as HTMLInputElement).value))" /><small>仅 TCP 多并发流生效</small></label>
       <label><span>带宽限制</span><select :value="config.bandwidth" :disabled="clientRunning" @change="set('bandwidth', Number(($event.target as HTMLSelectElement).value))"><option v-for="option in bandwidthOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>0 = 不限制</small></label>
       <label><span>报文长度</span><select :value="packetSelectValue" :disabled="clientRunning" @change="onPacketChange"><option v-for="option in packetOptions" :key="option.value" :value="option.value">{{ option.label }}</option><option value="custom">自定义…</option></select></label>
-      <label v-if="customMode"><span>自定义长度</span><span class="ip-row"><input type="number" v-model.number="customInput" min="1" max="262144" :disabled="clientRunning" placeholder="bytes" /><button class="mini-button" type="button" :disabled="clientRunning" @click="confirmCustomLength">保存</button></span><small>1 ~ 262144 bytes</small></label>
       <label><span>间隔输出(s)</span><input type="number" :value="config.interval" min="1" max="60" :disabled="clientRunning" @input="set('interval', Number(($event.target as HTMLInputElement).value))" /></label>
       <label><span>测试引擎</span><select disabled><option>riperf3（纯 Rust 内置）</option></select></label>
       <label><span>传输方向</span><select disabled><option>正向（默认）</option></select></label>
@@ -123,5 +135,23 @@ function confirmCustomLength() {
       <button @click="emit('clear')"><Icon name="trash" />清空日志</button>
     </div>
     </template>
+    <div v-if="customDialog" class="modal-backdrop" @click.self="customDialog = false">
+      <div class="modal">
+        <button class="modal-close" @click="customDialog = false">×</button>
+        <h2>自定义报文长度</h2>
+        <div class="modal-body">
+          <span class="modal-symbol info">i</span>
+          <p class="custom-length-form">
+            <input type="number" v-model.number="customValue" min="1" :placeholder="customUnit === 'mb' ? '1 ~ 256' : customUnit === 'kb' ? '1 ~ 262144' : '1 ~ 262144'" />
+            <select v-model="customUnit"><option value="bytes">Bytes</option><option value="kb">KB</option><option value="mb">MB</option></select>
+          </p>
+          <p class="custom-length-result">换算：<b>{{ customBytes }}</b> bytes（范围 1 ~ 262144 bytes）</p>
+        </div>
+        <div class="modal-actions">
+          <button @click="customDialog = false">取消</button>
+          <button class="primary" @click="confirmCustomLength">确定</button>
+        </div>
+      </div>
+    </div>
   </aside>
 </template>
