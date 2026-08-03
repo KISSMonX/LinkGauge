@@ -1,6 +1,6 @@
-# iperf3 GUI
+# LinkGauge: iperf3 GUI
 
-[English](README.md) | [Chinese](README.zh-CN.md)
+[English](README.md) | [中文](README.zh-CN.md)
 
 A desktop network performance testing application built with Rust, Tauri 2, Vue 3, and TypeScript. It provides a structured GUI workflow for Ping, TCP, and UDP testing while keeping test execution, process control, and log persistence in the Rust backend.
 
