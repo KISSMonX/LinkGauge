@@ -46,3 +46,29 @@ pub fn save_custom_packet_length(app: AppHandle, length: u32) -> Result<(), Stri
     settings.custom_packet_length = Some(length);
     save_settings(&app, &settings)
 }
+
+/// 返回程序安装目录下的 config 文件夹路径（不存在则创建），作为导出配置对话框的默认位置。
+/// 注意：tauri 的 executable_dir() 在 Windows 上不支持（dirs crate 限制），
+/// 因此基于 current_exe() 定位程序所在目录。
+#[tauri::command]
+pub async fn get_export_dir() -> Result<String, String> {
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| format!("无法定位程序目录：{e}"))?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let dir = exe_dir.join("config");
+    fs::create_dir_all(&dir).map_err(|e| format!("无法创建配置目录：{e}"))?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+/// 将配置 JSON 写入用户通过保存对话框指定的路径
+#[tauri::command]
+pub async fn export_config(path: String, config: String) -> Result<String, String> {
+    let path = PathBuf::from(&path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("无法创建目录：{e}"))?;
+    }
+    fs::write(&path, config).map_err(|e| format!("写入配置文件失败：{e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}

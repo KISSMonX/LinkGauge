@@ -26,6 +26,8 @@ pub fn run() {
             system::get_network_interfaces,
             settings::get_custom_packet_length,
             settings::save_custom_packet_length,
+            settings::get_export_dir,
+            settings::export_config,
             report::generate_report,
             report::get_report_dir,
             report::open_report_dir

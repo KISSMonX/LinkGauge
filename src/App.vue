@@ -10,7 +10,7 @@ import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
 import type { BackendEvent, InterfaceInfo, LogEntry, MetricPoint, NetworkInfo, ServerConfig, TestConfig, TestItem, TestSummary } from './types'
 
-const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 1024, interval: 1 }
+const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 4096, interval: 1 }
 const serverDefaults: ServerConfig = { port: 5201 }
 const config = ref<TestConfig>({ ...defaults })
 const serverConfig = ref<ServerConfig>({ ...serverDefaults })
@@ -73,6 +73,8 @@ watch(points, (value) => {
 }, { deep: true })
 
 watch(() => config.value.serverIp, (value) => { if (value && value !== local.value.ip) autoServerIp.value = false })
+/** 参数自动保存：任何修改即时写入本地存储，下次启动读取最近一次配置 */
+watch(config, (value) => localStorage.setItem('linkgauge-config', JSON.stringify(value)), { deep: true })
 /** 服务端参数本地持久化（与客户端配置分开保存） */
 watch(serverConfig, (value) => localStorage.setItem('linkgauge-server-config', JSON.stringify(value)), { deep: true })
 
@@ -262,12 +264,21 @@ async function openLogDir() {
     log('INFO', `日志目录：${dir}`)
   } catch (error) { errorDialog.value = { title: '打开目录失败', message: String(error) } }
 }
-function exportConfig() { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(config.value, null, 2)], { type: 'application/json' })); a.download = 'linkgauge-config.json'; a.click(); URL.revokeObjectURL(a.href); log('INFO', '配置已导出') }
+/** 导出配置：弹出保存对话框，默认程序安装目录 config/config.json */
+async function exportConfig() {
+  if (!isTauri()) { infoDialog.value = { title: '预览模式', message: '桌面应用中将弹出保存对话框导出配置。' }; return }
+  try {
+    const dir = await invoke<string>('get_export_dir')
+    const path = await save({ title: '导出配置', defaultPath: `${dir}\\config.json`, filters: [{ name: 'JSON', extensions: ['json'] }] })
+    if (!path) return // 用户取消
+    const saved = await invoke<string>('export_config', { path, config: JSON.stringify(config.value, null, 2) })
+    infoDialog.value = { title: '配置已导出', message: saved }
+  } catch (error) { errorDialog.value = { title: '导出失败', message: String(error) } }
+}
 function importConfig() { const input = document.createElement('input'); input.type = 'file'; input.accept = '.json'; input.onchange = async () => { const file = input.files?.[0]; if (!file) return; try { config.value = { ...defaults, ...JSON.parse(await file.text()) }; log('INFO', '配置导入成功') } catch { errorDialog.value = { title: '导入失败', message: '配置文件不是有效的 JSON。' } } }; input.click() }
-function saveConfig() { localStorage.setItem('linkgauge-config', JSON.stringify(config.value)); log('INFO', '配置已保存到本机') }
 
 onMounted(async () => {
-  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { config.value = { ...defaults, ...JSON.parse(saved) } } catch { /* ignore */ }
+  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024) parsed.packetLength = 4096 /* 旧默认值迁移为新默认 4KB */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
   const unfinished = localStorage.getItem('linkgauge-recovery'); if (unfinished) try { recovery.value = JSON.parse(unfinished); config.value = { ...defaults, ...recovery.value!.config }; const remaining = recovery.value!.queue.slice(recovery.value!.nextIndex); items.value.forEach((item) => { item.enabled = remaining.includes(item.id); item.status = 'waiting' }); infoDialog.value = { title: '发现未完成测试', message: '上次测试未正常完成，是否继续上次的测试队列？', recovery: true } } catch { localStorage.removeItem('linkgauge-recovery') }
   if (isTauri()) {
@@ -300,7 +311,7 @@ onUnmounted(() => { unlisten?.(); if (ticker) clearInterval(ticker) })
 
 <template>
   <div class="app-shell">
-    <div class="titlebar"><div class="brand-icon">⌁</div><h1>LinkGauge</h1><nav class="toolbar-actions"><button @click="importConfig"><Icon name="download" />导入配置</button><button @click="exportConfig"><Icon name="upload" />导出配置</button><button @click="saveConfig"><Icon name="save" />保存配置</button><button @click="infoDialog = { title: '引擎信息', message: '内置 riperf3 引擎（纯 Rust 实现 iperf3 协议，与官方 iperf3 互通）\n无需安装 iperf3，无外部依赖' }"><Icon name="settings" />设置</button><button @click="infoDialog = { title: '关于', message: 'LinkGauge v0.1.0\nRust + Tauri + Vue 3\n测试引擎：riperf3（MIT OR Apache-2.0）' }"><Icon name="info" />关于</button></nav></div>
+    <div class="titlebar"><div class="brand-icon">⌁</div><h1>LinkGauge</h1><nav class="toolbar-actions"><button @click="importConfig"><Icon name="download" />导入配置</button><button @click="exportConfig"><Icon name="upload" />导出配置</button><button @click="infoDialog = { title: '引擎信息', message: '内置 riperf3 引擎（纯 Rust 实现 iperf3 协议，与官方 iperf3 互通）\n无需安装 iperf3，无外部依赖' }"><Icon name="settings" />设置</button><button @click="infoDialog = { title: '关于', message: 'LinkGauge v0.1.0\nRust + Tauri + Vue 3\n测试引擎：riperf3（MIT OR Apache-2.0）' }"><Icon name="info" />关于</button></nav></div>
     <div class="workspace"><ConfigPanel :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedCustomLength" @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength" /><Dashboard :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" /><StatusPanel :items="items" :logs="logs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" /></div>
     <ReportSummary :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
     <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">重试</button><template v-if="infoDialog?.recovery"><button class="primary" @click="infoDialog = null; start()">恢复测试</button><button class="danger" @click="infoDialog = null; discardRecovery()">停止并重新开始</button></template><button v-if="!infoDialog?.recovery" @click="errorDialog = null; infoDialog = null">确定</button></div></div></div>
