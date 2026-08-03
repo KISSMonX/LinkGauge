@@ -3,7 +3,7 @@ use crate::runtime::resolve_iperf_path;
 use chrono::Local;
 use regex::Regex;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -23,6 +23,23 @@ use uuid::Uuid;
 #[derive(Default)]
 pub struct AppState {
     pub cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    pub child_pids: Arc<Mutex<HashSet<u32>>>,
+}
+
+/// 应用退出时同步终止所有遗留测试进程，防止 iperf3 残留占用端口
+pub fn kill_all_children_sync(state: &AppState) {
+    let pids: Vec<u32> = state.child_pids.blocking_lock().iter().copied().collect();
+    for pid in pids {
+        #[cfg(windows)]
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status();
+        #[cfg(not(windows))]
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+    state.child_pids.blocking_lock().clear();
 }
 
 #[tauri::command]
@@ -40,9 +57,10 @@ pub async fn start_test(
         .await
         .insert(session_id.clone(), cancelled.clone());
     let state_map = state.cancellations.clone();
+    let pids = state.child_pids.clone();
     let spawned_id = session_id.clone();
     tauri::async_runtime::spawn(async move {
-        run_process(app, spawned_id.clone(), request, cancelled).await;
+        run_process(app, spawned_id.clone(), request, cancelled, pids).await;
         state_map.lock().await.remove(&spawned_id);
     });
     Ok(session_id)
@@ -76,6 +94,7 @@ async fn run_process(
     session_id: String,
     request: TestRequest,
     cancelled: Arc<AtomicBool>,
+    child_pids: Arc<Mutex<HashSet<u32>>>,
 ) {
     let task_name = task_label(&request.task_id);
     let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
@@ -179,6 +198,10 @@ async fn run_process(
             return;
         }
     };
+    let pid = child.id();
+    if let Some(pid) = pid {
+        child_pids.lock().await.insert(pid);
+    }
     let (tx, mut rx) = mpsc::channel::<(String, bool)>(128);
     if let Some(stdout) = child.stdout.take() {
         let tx = tx.clone();
@@ -192,19 +215,32 @@ async fn run_process(
     let mut final_success = false;
     let mut final_stopped = false;
     let mut exit_message = None;
-
+    // 缓冲进程最近输出（含 stderr），进程异常退出时作为失败原因附在错误消息中
+    let mut recent_lines: Vec<String> = Vec::new();
     loop {
         tokio::select! {
             status = child.wait() => {
                 match status {
                     Ok(value) if value.success() => final_success = true,
-                    Ok(value) => exit_message = Some(format!("测试进程退出，状态码：{}", value.code().map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()))),
+                    Ok(value) => {
+                        // Windows 上退出码是 u32 强转 i32，-1 实为 0xFFFFFFFF，附十六进制便于查证
+                        let code = value.code().map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
+                        let hex = value.code().map(|v| format!(" (0x{:08X})", v as u32)).unwrap_or_default();
+                        let detail = recent_lines.iter().rev().take(10).cloned().collect::<Vec<_>>().join(" | ");
+                        exit_message = Some(if detail.is_empty() {
+                            format!("测试进程退出，状态码：{code}{hex}，且进程未输出任何信息")
+                        } else {
+                            format!("测试进程退出，状态码：{code}{hex}。进程输出：{detail}")
+                        });
+                    }
                     Err(error) => exit_message = Some(format!("等待测试进程失败：{error}")),
                 }
                 break;
             }
             line = rx.recv() => {
                 if let Some((line, is_error)) = line {
+                    recent_lines.push(if is_error { format!("[stderr] {line}") } else { line.clone() });
+                    if recent_lines.len() > 50 { recent_lines.remove(0); }
                     let level = if is_error { "WARN" } else { "INFO" };
                     let _ = log_file.write_all(format!("[{}] {}\n", level, line).as_bytes()).await;
                     emit_log(&app, &session_id, &request.task_id, level, line.clone());
@@ -228,17 +264,25 @@ async fn run_process(
         .await;
     let _ = log_file.flush().await;
     drop(log_file);
+    if let Some(pid) = pid {
+        child_pids.lock().await.remove(&pid);
+    }
     let final_path = finish_log(&working_path, &base_name, final_success).await;
     if final_stopped {
         emit_complete(&app, &session_id, &request.task_id, "stopped", final_path);
     } else if final_success {
         emit_complete(&app, &session_id, &request.task_id, "success", final_path);
     } else {
+        let message = format!(
+            "{}\n详细日志：{}",
+            exit_message.unwrap_or_else(|| "测试失败".into()),
+            final_path
+        );
         emit_error(
             &app,
             &session_id,
             &request.task_id,
-            exit_message.unwrap_or_else(|| "测试失败".into()),
+            message,
             Some(final_path),
         );
     }

@@ -14,12 +14,12 @@ const config = ref<TestConfig>({ ...defaults })
 const items = ref<TestItem[]>([
   { id: 'ping', label: 'Ping 连通性测试', protocol: 'ping', enabled: true, status: 'waiting' },
   { id: 'tcp-single', label: 'TCP 单向带宽', protocol: 'tcp', enabled: true, status: 'waiting' },
-  { id: 'tcp-bidir', label: 'TCP 双向带宽', protocol: 'tcp', enabled: false, status: 'waiting' },
-  { id: 'tcp-parallel', label: 'TCP 多并发流', protocol: 'tcp', enabled: false, status: 'waiting' },
-  { id: 'udp-bandwidth', label: 'UDP 带宽', protocol: 'udp', enabled: false, status: 'waiting' },
-  { id: 'udp-loss', label: 'UDP 抖动 / 丢包', protocol: 'udp', enabled: false, status: 'waiting' },
-  { id: 'tcp-reverse', label: '反向测试（Reverse）', protocol: 'tcp', enabled: false, status: 'waiting' },
-  { id: 'stress', label: '持续时间压力测试', protocol: 'tcp', enabled: false, status: 'waiting' }
+  { id: 'tcp-bidir', label: 'TCP 双向带宽', protocol: 'tcp', enabled: true, status: 'waiting' },
+  { id: 'tcp-parallel', label: 'TCP 多并发流', protocol: 'tcp', enabled: true, status: 'waiting' },
+  { id: 'udp-bandwidth', label: 'UDP 带宽', protocol: 'udp', enabled: true, status: 'waiting' },
+  { id: 'udp-loss', label: 'UDP 抖动 / 丢包', protocol: 'udp', enabled: true, status: 'waiting' },
+  { id: 'tcp-reverse', label: '反向测试（Reverse）', protocol: 'tcp', enabled: true, status: 'waiting' },
+  { id: 'stress', label: '持续时间压力测试', protocol: 'tcp', enabled: true, status: 'waiting' }
 ])
 const local = ref<NetworkInfo>({ ip: '127.0.0.1', mac: '--', hostname: 'localhost', interfaceName: '默认网卡', speedMbps: 0 })
 const runtime = ref<IperfRuntimeInfo>({ available: false, bundled: false, path: '', version: '检测中…' })
@@ -66,7 +66,10 @@ watch(() => config.value.serverIp, (value) => { if (value && value !== local.val
 function applyNic(index: number) {
   const nic = interfaces.value[index]
   if (!nic) return
+  // 带宽限制仍是旧网卡默认值时，跟随新网卡速率（用户手动改过则保留）
+  const bandwidthIsNicDefault = config.value.bandwidth === local.value.speedMbps
   local.value = { ...local.value, ip: nic.ip, mac: nic.mac, interfaceName: nic.interfaceName, speedMbps: nic.speedMbps }
+  if (bandwidthIsNicDefault) config.value.bandwidth = nic.speedMbps > 0 ? nic.speedMbps : 0
   if (autoServerIp.value) config.value.serverIp = nic.ip
   log('INFO', `已选择网卡：${nic.interfaceName} (${nic.ip})`)
 }
@@ -97,7 +100,8 @@ function validate() {
 
 async function start() {
   const savedRecovery = recovery.value
-  if (savedRecovery) config.value = { ...savedRecovery.config }
+  // 恢复测试时参数以用户当前界面为准（应用启动时已从恢复状态加载过上次参数），
+  // 不再用开始测试时的快照覆盖，避免用户修改的端口等参数被回退
   if (config.value.bandwidth < 0) config.value.bandwidth = local.value.speedMbps > 0 ? local.value.speedMbps : 0
   const invalid = validate(); if (invalid) { errorDialog.value = { title: '参数错误', message: invalid }; return }
   const recoveredQueue = savedRecovery?.queue.slice(savedRecovery.nextIndex)
@@ -160,7 +164,9 @@ function completeCurrent(status: TestItem['status']) {
 
 function failCurrent(message: string) {
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = 'failed'
-  log('ERROR', message); finishRun(false); errorDialog.value = { title: '错误告警', message }
+  log('ERROR', message); finishRun(false)
+  const lastLog = summary.logPaths.at(-1)
+  errorDialog.value = { title: '错误告警', message: lastLog ? `${message}\n\n日志文件：${lastLog}` : message }
 }
 function finishRun(completed: boolean) { running.value = false; activeSession.value = ''; connected.value = false; if (ticker) clearInterval(ticker); ticker = undefined; if (completed) { progress.value = 100; recovery.value = null; localStorage.removeItem('iperf3-gui-recovery') } log('INFO', '测试流程结束，日志已保存') }
 async function stop() { if (!running.value) return; try { if (isTauri() && activeSession.value) await invoke('stop_test', { sessionId: activeSession.value }) } catch (e) { log('WARN', String(e)) }; const item = current.value; if (item) item.status = 'stopped'; if (recovery.value) { recovery.value.nextIndex = Math.max(0, queueIndex.value); localStorage.setItem('iperf3-gui-recovery', JSON.stringify(recovery.value)) } finishRun(false) }
