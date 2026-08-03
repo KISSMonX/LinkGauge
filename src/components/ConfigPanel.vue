@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { NetworkInfo, ServerConfig, TestConfig, TestItem } from '../types'
 import Icon from './Icon.vue'
 
-const props = defineProps<{ tab: 'client' | 'server'; config: TestConfig; serverConfig: ServerConfig; items: TestItem[]; clientRunning: boolean; serverRunning: boolean; recovery?: boolean; local: NetworkInfo; savedCustomLength: number; savedCustomUdpLength: number }>()
+/** tabs：主窗口已停靠的标签列表（undefined = 分离窗口，仅显示 detached 一侧） */
+const props = defineProps<{ tabs?: ('client' | 'server')[]; detached?: 'client' | 'server'; tab: 'client' | 'server'; config: TestConfig; serverConfig: ServerConfig; items: TestItem[]; clientRunning: boolean; serverRunning: boolean; recovery?: boolean; local: NetworkInfo; savedCustomLength: number; savedCustomUdpLength: number }>()
 const emit = defineEmits<{
   'update:tab': [value: 'client' | 'server']
   'update:config': [value: TestConfig]
@@ -17,7 +18,70 @@ const emit = defineEmits<{
   clear: []
   'pick-nic': []
   'save-custom-length': [protocol: 'tcp' | 'udp', value: number]
+  /** 标签页被拖拽分离为独立窗口 */
+  detach: [side: 'client' | 'server']
 }>()
+
+const isTauri = () => '__TAURI_INTERNALS__' in window
+/** 当前展示的一侧：分离窗口固定为 detached，主窗口跟随激活标签 */
+const visibleSide = computed<'client' | 'server'>(() => props.detached ?? props.tab)
+
+// —— 标签页拖拽分离：pointer 事件 + 跟随光标的幽灵标签，拖出阈值松开即分离 ——
+const DETACH_THRESHOLD = 100
+const drag = ref<{ side: 'client' | 'server'; startX: number; startY: number; ghost: HTMLElement } | null>(null)
+const dragFar = ref(false)
+const suppressedClick = ref(false)
+
+function startTabDrag(side: 'client' | 'server', event: PointerEvent) {
+  // 仅在桌面端、主窗口标签栏可用；分离窗口没有标签栏
+  if (!isTauri() || !props.tabs?.length || event.button !== 0) return
+  const ghost = document.createElement('div')
+  ghost.className = 'tab-ghost'
+  ghost.textContent = side === 'client' ? '客户端' : '服务端'
+  document.body.appendChild(ghost)
+  drag.value = { side, startX: event.clientX, startY: event.clientY, ghost }
+  dragFar.value = false
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  event.preventDefault()
+}
+function onTabDragMove(event: PointerEvent) {
+  const d = drag.value
+  if (!d) return
+  const dist = Math.hypot(event.clientX - d.startX, event.clientY - d.startY)
+  dragFar.value = dist > DETACH_THRESHOLD
+  d.ghost.textContent = d.side === 'client' ? '客户端' : '服务端'
+  d.ghost.classList.toggle('detach', dragFar.value)
+  if (dragFar.value) d.ghost.textContent += ' ⇱ 释放以分离'
+  d.ghost.style.transform = `translate(${event.clientX - 8}px, ${event.clientY - 8}px)`
+}
+function endTabDrag(event: PointerEvent) {
+  const d = drag.value
+  if (!d) return
+  drag.value = null
+  dragFar.value = false
+  d.ghost.remove()
+  // pointercancel（捕获中断/窗口失焦）只清理，不触发分离
+  if (event.type !== 'pointerup') return
+  // 拖出阈值 = 分离；阈值内松开 = 弹回（本次拖拽抑制随后的 click 切标签）
+  if (Math.hypot(event.clientX - d.startX, event.clientY - d.startY) > DETACH_THRESHOLD) {
+    suppressedClick.value = true
+    emit('detach', d.side)
+  }
+}
+function onTabClick() {
+  // 拖拽结束后浏览器仍会派发 click，这里直接吞掉，避免误切换标签
+  if (suppressedClick.value) { suppressedClick.value = false; return }
+}
+/** 窗口失焦（拖拽中切到其他程序）时清理幽灵标签，避免残留 */
+function cancelTabDrag() {
+  const d = drag.value
+  if (!d) return
+  drag.value = null
+  dragFar.value = false
+  d.ghost.remove()
+}
+onMounted(() => { window.addEventListener('blur', cancelTabDrag) })
+onUnmounted(() => { window.removeEventListener('blur', cancelTabDrag) })
 
 const set = <K extends keyof TestConfig>(key: K, value: TestConfig[K]) => emit('update:config', { ...props.config, [key]: value })
 const setServer = <K extends keyof ServerConfig>(key: K, value: ServerConfig[K]) => emit('update:server-config', { ...props.serverConfig, [key]: value })
@@ -102,11 +166,10 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
 
 <template>
   <aside class="panel config-panel">
-    <div class="mode-tabs">
-      <button :class="{ active: tab === 'client' }" @click="emit('update:tab', 'client')"><Icon name="monitor" />客户端</button>
-      <button :class="{ active: tab === 'server' }" @click="emit('update:tab', 'server')"><Icon name="monitor" />服务端</button>
+    <div v-if="tabs" class="mode-tabs">
+      <button v-for="side in tabs" :key="side" :class="{ active: tab === side }" title="拖拽标签可分离为独立窗口" @pointerdown="startTabDrag(side, $event)" @pointermove="onTabDragMove" @pointerup="endTabDrag" @pointercancel="endTabDrag" @click="onTabClick(); emit('update:tab', side)"><Icon name="monitor" />{{ side === 'client' ? '客户端' : '服务端' }}<span class="tab-detach">⇱</span></button>
     </div>
-    <template v-if="tab === 'client'">
+    <template v-if="visibleSide === 'client'">
     <section class="config-section tests-section">
       <div class="section-title"><h2>测试项目</h2></div>
       <p class="protocol-hint">TCP 与 UDP 测试项可同时勾选，将按列表顺序逐个执行</p>
@@ -138,8 +201,7 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
     </div>
     </template>
     <template v-else>
-    <section class="config-section server-params">
-      <div class="section-title"><h2>服务端设置</h2><span :class="['status-pill', serverRunning ? 'ok' : 'idle']">{{ serverRunning ? '运行中' : '未运行' }}</span></div>
+    <section class="config-section server-params">      <div class="section-title"><h2>服务端设置</h2><span :class="['status-pill', serverRunning ? 'ok' : 'idle']">{{ serverRunning ? '运行中' : '未运行' }}</span></div>
       <label><span>监听端口</span><input type="number" :value="serverConfig.port" min="1" max="65535" :disabled="serverRunning" @input="setServer('port', Number(($event.target as HTMLInputElement).value))" /></label>
       <p class="server-hint">服务端将持续监听配置的端口并处理测试请求，客户端与服务端可同时运行（同机测试时客户端连本机 IP 与同一端口）。</p>
       <p class="runtime-state available">● 内置 riperf3 引擎已就绪（无需安装 iperf3）</p>

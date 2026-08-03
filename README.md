@@ -226,6 +226,13 @@ The current installer is not code-signed, so Windows SmartScreen may display a w
 5. Stop a test when necessary. The partial log is retained, and the remaining queue can be recovered on the next launch.
 6. Generate an HTML or PDF report after one or more tasks finish.
 
+### Split-screen dual windows
+
+- On launch, Client and Server are two tabs. **Drag a tab** (release after pulling it ~100px) to detach that side into its own window — handy for a second monitor or half-and-half split-screen setups.
+- Detached windows stay in sync in real time (parameters, test status, metric charts, and logs); tests can be started or stopped from any window.
+- Closing a detached window (or clicking **Dock back to main window** in its title bar) returns the tab to the main window. With all tabs detached, the main window keeps the charts and logs as an overview.
+- Closing the main window quits the whole app; any detached windows close together with it.
+
 The peer must be reachable, its firewall must allow the configured TCP/UDP port, and an iperf3 server must be running when the application is used in client mode. The built-in engine is wire-compatible with standard iperf3 servers (and riperf3 servers).
 
 ## Configuration and Data

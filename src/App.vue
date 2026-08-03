@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { save } from '@tauri-apps/plugin-dialog'
 import ConfigPanel from './components/ConfigPanel.vue'
 import Dashboard from './components/Dashboard.vue'
 import StatusPanel from './components/StatusPanel.vue'
 import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
-import type { BackendEvent, InterfaceInfo, LogEntry, MetricPoint, NetworkInfo, ServerConfig, TestConfig, TestItem, TestSummary } from './types'
+import type { BackendEvent, DockEvent, InterfaceInfo, LogEntry, MetricPoint, NetworkInfo, ServerConfig, SyncState, TestConfig, TestItem, TestSummary } from './types'
 
 const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 8192, interval: 1 }
 const serverDefaults: ServerConfig = { port: 5201 }
@@ -58,9 +60,22 @@ const autoServerIp = ref(false)
 let ticker: number | undefined
 let unlisten: UnlistenFn | undefined
 
+// —— 多窗口支持：窗口角色（主窗口 hub / 分离的 client / server）+ 标签停靠状态 ——
+const isTauri = () => '__TAURI_INTERNALS__' in window
+const ownLabel = isTauri() ? getCurrentWebviewWindow().label : 'main'
+/** hub = 主窗口（标签页容器）；client / server = 分离出的独立窗口 */
+const side = ref<'hub' | 'client' | 'server'>(ownLabel === 'main' ? 'hub' : ownLabel === 'client' || ownLabel === 'server' ? ownLabel : 'hub')
+/** 主窗口中当前停靠的标签页列表（顺序固定为客户端在前） */
+const dockedTabs = ref<('client' | 'server')[]>(['client', 'server'])
+/** 驱动客户端任务队列的窗口 label：谁点「开始测试」谁驱动，其他窗口只展示不重复启动 */
+const driver = ref('')
+let syncing = false
+let unlistenSync: UnlistenFn | undefined
+let unlistenDock: UnlistenFn | undefined
+let unlistenClose: UnlistenFn | undefined
+
 const current = computed(() => items.value.find((i) => i.status === 'running'))
 const summary = reactive<TestSummary>({ startedAt: '', completed: 0, total: 0, averageBandwidth: 0, maxBandwidth: 0, minBandwidth: 0, totalTransferMb: 0, pingAverage: 0, lossPercent: 0, jitterMs: 0, logPaths: [] })
-const isTauri = () => '__TAURI_INTERNALS__' in window
 const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false })
 const log = (level: LogEntry['level'], message: string, module = 'UI') => logs.value.push({ time: now(), level, module, message })
 
@@ -75,9 +90,114 @@ watch(points, (value) => {
 
 watch(() => config.value.serverIp, (value) => { if (value && value !== local.value.ip) autoServerIp.value = false })
 /** 参数自动保存：任何修改即时写入本地存储，下次启动读取最近一次配置 */
-watch(config, (value) => localStorage.setItem('linkgauge-config', JSON.stringify(value)), { deep: true })
+watch(config, (value) => { localStorage.setItem('linkgauge-config', JSON.stringify(value)); if (!syncing) emitSync() }, { deep: true })
 /** 服务端参数本地持久化（与客户端配置分开保存） */
-watch(serverConfig, (value) => localStorage.setItem('linkgauge-server-config', JSON.stringify(value)), { deep: true })
+watch(serverConfig, (value) => { localStorage.setItem('linkgauge-server-config', JSON.stringify(value)); if (!syncing) emitSync() }, { deep: true })
+
+// —— 跨窗口状态同步：任何本地变更广播 side-sync，其他窗口应用（syncing 标志防回声循环） ——
+function syncBundle(): SyncState {
+  return {
+    config: config.value,
+    serverConfig: serverConfig.value,
+    items: items.value,
+    local: local.value,
+    clientRunning: clientRunning.value,
+    serverRunning: serverRunning.value,
+    clientSession: clientSession.value,
+    serverSession: serverSession.value,
+    queue: queue.value,
+    queueIndex: queueIndex.value,
+    driver: driver.value,
+    recovery: !!recovery.value,
+    savedTcpLength: savedTcpLength.value,
+    savedUdpLength: savedUdpLength.value,
+    summary: { ...summary },
+  }
+}
+function emitSync() {
+  if (!isTauri() || syncing) return
+  void emit('side-sync', syncBundle())
+}
+async function applySync(payload: SyncState) {
+  syncing = true
+  config.value = payload.config
+  serverConfig.value = payload.serverConfig
+  items.value = payload.items
+  local.value = payload.local
+  clientRunning.value = payload.clientRunning
+  serverRunning.value = payload.serverRunning
+  clientSession.value = payload.clientSession
+  serverSession.value = payload.serverSession
+  queue.value = payload.queue
+  queueIndex.value = payload.queueIndex
+  driver.value = payload.driver
+  recovery.value = payload.recovery ? { config: payload.config, queue: [...payload.queue], nextIndex: payload.queueIndex } : null
+  savedTcpLength.value = payload.savedTcpLength
+  savedUdpLength.value = payload.savedUdpLength
+  Object.assign(summary, payload.summary)
+  // 等本次 Vue 变更刷完再解除标志，避免应用远端状态触发的 watcher 再广播回去
+  await nextTick()
+  syncing = false
+}
+/** 运行状态/会话等变化即时同步；计时器只在运行期间走动 */
+watch(clientRunning, (running) => {
+  if (running) { elapsed.value = 0; if (ticker === undefined) ticker = window.setInterval(() => { elapsed.value += 1 }, 1000) }
+  else if (ticker !== undefined) { clearInterval(ticker); ticker = undefined }
+  if (!syncing) emitSync()
+})
+watch(serverRunning, () => emitSync())
+watch(clientSession, () => emitSync())
+watch(serverSession, () => emitSync())
+watch(queue, () => emitSync())
+watch(queueIndex, () => emitSync())
+watch(driver, () => emitSync())
+watch(recovery, () => emitSync())
+watch(items, () => emitSync(), { deep: true })
+watch(local, () => emitSync())
+watch(savedTcpLength, () => emitSync())
+watch(savedUdpLength, () => emitSync())
+watch(summary, () => emitSync(), { deep: true })
+
+// —— 标签页分离 / 收回 ——
+/** 主窗口：标签被拖拽分离 → 创建独立窗口并从停靠列表移除 */
+function detachTab(s: 'client' | 'server') {
+  if (side.value !== 'hub' || !dockedTabs.value.includes(s)) return
+  dockedTabs.value = dockedTabs.value.filter((x) => x !== s)
+  if (activeTab.value === s) activeTab.value = dockedTabs.value[0] ?? 'client'
+  if (!isTauri()) return
+  invoke('create_side_window', { side: s }).catch((e) => {
+    // 创建失败则把标签放回
+    dockedTabs.value = (['client', 'server'] as ('client' | 'server')[]).filter((x) => dockedTabs.value.includes(x) || x === s)
+    errorDialog.value = { title: '窗口创建失败', message: String(e) }
+  })
+  log('INFO', `「${s === 'client' ? '客户端' : '服务端'}」标签已分离为独立窗口，关闭子窗口可收回`)
+}
+/** 主窗口：收到子窗口关闭通知（side-dock）后把标签加回 */
+function dockTab(s: 'client' | 'server') {
+  if (side.value !== 'hub') return
+  const wasDetached = !dockedTabs.value.includes(s)
+  dockedTabs.value = (['client', 'server'] as ('client' | 'server')[]).filter((x) => dockedTabs.value.includes(x) || x === s)
+  // 驱动窗口被收回时由主窗口接管队列驱动；若正处在任务间隙则补跑下一项
+  if (wasDetached && driver.value === s && clientRunning.value) {
+    driver.value = ownLabel
+    if (!current.value && queueIndex.value + 1 < queue.value.length) void runNext()
+  }
+}
+/** 主窗口空状态：请求子窗口自行关闭（走 side-close → 正常收回流程），超时兜底直接收回 */
+async function requestDock(s: 'client' | 'server') {
+  if (side.value !== 'hub') return
+  try { await emit('side-close', { side: s }) } catch (e) { log('WARN', String(e)) }
+  setTimeout(() => dockTab(s), 600)
+}
+/** 子窗口：通知主窗口收回标签并销毁自己（通知失败也要销毁，避免窗口残留） */
+async function dockBack() {
+  try {
+    await emit('side-dock', { side: side.value })
+  } catch (e) { log('WARN', `收回标签通知失败：${e}`) }
+  try {
+    await getCurrentWindow().destroy()
+  } catch (e) { log('ERROR', `收回标签失败：${e}`) }
+}
 
 /** 应用指定序号的网卡作为本机信息（默认列表第一个） */
 function applyNic(index: number) {
@@ -130,10 +250,11 @@ async function start() {
   points.value = []; progress.value = 0; elapsed.value = 0; connected.value = false
   summary.startedAt = new Date().toLocaleString('zh-CN', { hour12: false }); summary.completed = 0; summary.total = selected.length; summary.logPaths = []
   queue.value = recoveredQueue || selected.map((i) => i.id); queueIndex.value = -1; clientRunning.value = true
+  // 本窗口成为队列驱动者：只有它会在任务结束后启动下一项
+  driver.value = ownLabel
   config.value.mode = 'client'
   recovery.value = { config: { ...config.value }, queue: [...queue.value], nextIndex: 0 }
   localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value))
-  ticker = window.setInterval(() => { elapsed.value += 1 }, 1000)
   await runNext()
 }
 
@@ -210,7 +331,8 @@ function completeCurrent(status: TestItem['status']) {
   if (recovery.value) { recovery.value.nextIndex = queueIndex.value + 1; localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value)) }
   progress.value = Math.round(((queueIndex.value + 1) / queue.value.length) * 100)
   if (status === 'failed') { failCurrent('测试进程异常退出'); return }
-  void runNext()
+  // 仅驱动窗口启动下一项，避免多个窗口重复拉起同一个任务
+  if (driver.value === ownLabel) void runNext()
 }
 
 function failCurrent(message: string) {
@@ -221,7 +343,7 @@ function failCurrent(message: string) {
   const lastLog = summary.logPaths.at(-1)
   errorDialog.value = { title: '错误告警', message: lastLog ? `${message}\n\n日志文件：${lastLog}` : message }
 }
-function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (ticker) clearInterval(ticker); ticker = undefined; if (completed) { progress.value = 100; recovery.value = null; localStorage.removeItem('linkgauge-recovery') } log('INFO', '测试流程结束，日志已保存') }
+function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100; recovery.value = null; localStorage.removeItem('linkgauge-recovery') } log('INFO', '测试流程结束，日志已保存') }
 async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = item.label; try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; if (recovery.value) { recovery.value.nextIndex = Math.max(0, queueIndex.value); localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value)) } finishRun(false) }
 /** 放弃未完成的测试队列并恢复默认全选，重新开始新一轮测试 */
 function discardRecovery() {
@@ -281,9 +403,24 @@ function importConfig() { const input = document.createElement('input'); input.t
 onMounted(async () => {
   const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
-  const unfinished = localStorage.getItem('linkgauge-recovery'); if (unfinished) try { recovery.value = JSON.parse(unfinished); config.value = { ...defaults, ...recovery.value!.config }; const remaining = recovery.value!.queue.slice(recovery.value!.nextIndex); items.value.forEach((item) => { item.enabled = remaining.includes(item.id); item.status = 'waiting' }); infoDialog.value = { title: '发现未完成测试', message: '上次测试未正常完成，是否继续上次的测试队列？', recovery: true } } catch { localStorage.removeItem('linkgauge-recovery') }
+  const unfinished = localStorage.getItem('linkgauge-recovery'); if (unfinished) try { recovery.value = JSON.parse(unfinished); config.value = { ...defaults, ...recovery.value!.config }; const remaining = recovery.value!.queue.slice(recovery.value!.nextIndex); items.value.forEach((item) => { item.enabled = remaining.includes(item.id); item.status = 'waiting' }); /* 恢复确认弹窗只在主窗口弹出，分离窗口静默加载状态（运行中的状态随后由同步事件更新） */ if (side.value === 'hub') infoDialog.value = { title: '发现未完成测试', message: '上次测试未正常完成，是否继续上次的测试队列？', recovery: true } } catch { localStorage.removeItem('linkgauge-recovery') }
   if (isTauri()) {
     try {
+      // 跨窗口同步：状态包广播 + 主窗口收回标签通知 + 子窗口被请求关闭
+      unlistenSync = await listen<SyncState>('side-sync', (e) => applySync(e.payload))
+      if (side.value === 'hub') {
+        unlistenDock = await listen<DockEvent>('side-dock', (e) => dockTab(e.payload.side))
+      } else {
+        // 子窗口关闭（右上角 ✕）= 标签收回主窗口，而不是退出
+        unlistenDock = await getCurrentWindow().onCloseRequested(async (event) => {
+          event.preventDefault()
+          try {
+            await emit('side-dock', { side: side.value })
+          } catch (e) { log('WARN', `收回标签通知失败：${e}`) }
+          await getCurrentWindow().destroy()
+        })
+        unlistenClose = await listen<DockEvent>('side-close', (e) => { if (e.payload.side === side.value) void dockBack() })
+      }
       const [info, ifaces, customTcpLen, customUdpLen] = await Promise.all([
         invoke<NetworkInfo>('get_network_info'),
         invoke<InterfaceInfo[]>('get_network_interfaces'),
@@ -299,7 +436,8 @@ onMounted(async () => {
       applyNic(0)
       // 带宽限制默认取当前网卡最大带宽（-1 表示用户尚未设置过）
       if (config.value.bandwidth === -1) config.value.bandwidth = local.value.speedMbps > 0 ? local.value.speedMbps : 0
-      if (interfaces.value.length > 1) { nicSelected.value = 0; nicDialog.value = true }
+      // 网卡选择对话框只在主窗口弹出，避免多个窗口同时弹窗
+      if (side.value === 'hub' && interfaces.value.length > 1) { nicSelected.value = 0; nicDialog.value = true }
       unlisten = await listen<BackendEvent>('test-event', (e) => handleEvent(e.payload))
     } catch (e) { log('WARN', `系统信息读取失败：${e}`) }
   } else {
@@ -309,14 +447,45 @@ onMounted(async () => {
   }
   log('INFO', 'LinkGauge 已就绪')
 })
-onUnmounted(() => { unlisten?.(); if (ticker) clearInterval(ticker) })
+onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenClose?.(); if (ticker) clearInterval(ticker) })
 </script>
 
 <template>
-  <div class="app-shell">
-    <div class="titlebar"><div class="brand-icon">⌁</div><h1>LinkGauge</h1><nav class="toolbar-actions"><button @click="importConfig"><Icon name="download" />导入配置</button><button @click="exportConfig"><Icon name="upload" />导出配置</button><button @click="infoDialog = { title: '引擎信息', message: '内置 riperf3 引擎（纯 Rust 实现 iperf3 协议，与官方 iperf3 互通）\n无需安装 iperf3，无外部依赖' }"><Icon name="settings" />设置</button><button @click="infoDialog = { title: '关于', message: 'LinkGauge v0.1.0\nRust + Tauri + Vue 3\n测试引擎：riperf3（MIT OR Apache-2.0）' }"><Icon name="info" />关于</button></nav></div>
-    <div class="workspace"><ConfigPanel :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength" @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength" /><Dashboard :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" /><StatusPanel :items="items" :logs="logs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" /></div>
-    <ReportSummary :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
+  <div class="app-shell" :class="['view-' + side, { 'no-summary': side === 'server' }]">
+    <div class="titlebar">
+      <div class="brand-icon">⌁</div>
+      <h1>LinkGauge<template v-if="side !== 'hub'"> · {{ side === 'client' ? '客户端' : '服务端' }}</template></h1>
+      <nav v-if="side === 'hub'" class="toolbar-actions"><button @click="importConfig"><Icon name="download" />导入配置</button><button @click="exportConfig"><Icon name="upload" />导出配置</button><button @click="infoDialog = { title: '引擎信息', message: '内置 riperf3 引擎（纯 Rust 实现 iperf3 协议，与官方 iperf3 互通）\n无需安装 iperf3，无外部依赖' }"><Icon name="settings" />设置</button><button @click="infoDialog = { title: '关于', message: 'LinkGauge v0.1.0\nRust + Tauri + Vue 3\n测试引擎：riperf3（MIT OR Apache-2.0）' }"><Icon name="info" />关于</button></nav>
+      <nav v-else class="toolbar-actions"><button title="关闭此窗口并把标签放回主窗口" @click="dockBack"><Icon name="monitor" />⇱ 停靠回主窗口</button></nav>
+    </div>
+    <div class="workspace" :class="{ 'workspace-server': side === 'server' }">
+      <ConfigPanel
+        v-if="side === 'hub' && dockedTabs.length"
+        :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength" @detach="detachTab"
+      />
+      <ConfigPanel
+        v-else-if="side === 'client'"
+        detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength"
+      />
+      <ConfigPanel
+        v-else-if="side === 'server'"
+        detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        @update:config="config = $event" @update:server-config="serverConfig = $event" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength"
+      />
+      <div v-else class="panel config-panel dock-empty">
+        <h2>标签页已分离</h2>
+        <p>客户端 / 服务端已各自独立为窗口，可拖到另一块屏幕或分屏摆放；关闭子窗口即可收回标签。</p>
+        <div class="dock-actions">
+          <button class="primary" @click="requestDock('client')"><Icon name="monitor" />收回客户端标签</button>
+          <button class="primary" @click="requestDock('server')"><Icon name="monitor" />收回服务端标签</button>
+        </div>
+      </div>
+      <Dashboard v-if="side !== 'server'" :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" />
+      <StatusPanel :mode="side === 'server' ? 'logs' : 'full'" :items="items" :logs="logs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
+    </div>
+    <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
     <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">重试</button><template v-if="infoDialog?.recovery"><button class="primary" @click="infoDialog = null; start()">恢复测试</button><button class="danger" @click="infoDialog = null; discardRecovery()">停止并重新开始</button></template><button v-if="!infoDialog?.recovery" @click="errorDialog = null; infoDialog = null">确定</button></div></div></div>
     <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>选择本机网卡</h2><p class="nic-hint">检测到多个网卡，请选择测试使用的本机网卡：</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : '速率未知' }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected)">确定</button><button @click="nicDialog = false; applyNic(0)">取消（默认第一个）</button></div></div></div>
   </div>

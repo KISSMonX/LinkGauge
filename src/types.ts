@@ -85,3 +85,31 @@ export interface TestSummary {
   jitterMs: number
   logPaths: string[]
 }
+
+/** 多窗口（主窗口 + 分离的客户端/服务端窗口）间同步的完整状态包 */
+export interface SyncState {
+  config: TestConfig
+  serverConfig: ServerConfig
+  items: TestItem[]
+  local: NetworkInfo
+  clientRunning: boolean
+  serverRunning: boolean
+  clientSession: string
+  serverSession: string
+  /** 执行队列及其游标（由驱动窗口维护） */
+  queue: string[]
+  queueIndex: number
+  /** 驱动客户端队列的窗口 label（main / client），其他窗口只展示不启动下一项 */
+  driver: string
+  /** 是否存在未完成测试（恢复状态的具体内容由 config/queue/queueIndex 表达） */
+  recovery: boolean
+  savedTcpLength: number
+  savedUdpLength: number
+  /** 汇总数据（由驱动窗口维护 startedAt/completed/total，指标类字段各窗口本地推导） */
+  summary: TestSummary
+}
+
+/** 子窗口关闭（或点击「停靠回主窗口」）时通知主窗口把标签收回 */
+export interface DockEvent {
+  side: 'client' | 'server'
+}
