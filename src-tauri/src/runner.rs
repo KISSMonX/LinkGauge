@@ -171,6 +171,8 @@ pub async fn open_log_dir(app: AppHandle) -> Result<String, String> {
         .map_err(|e| format!("无法创建日志目录：{e}"))?;
     let result = std::process::Command::new(if cfg!(windows) {
         "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
     } else {
         "xdg-open"
     })

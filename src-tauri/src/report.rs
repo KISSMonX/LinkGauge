@@ -61,6 +61,8 @@ pub async fn open_report_dir(app: AppHandle) -> Result<String, String> {
         .map_err(|e| format!("无法创建报告目录：{e}"))?;
     let result = Command::new(if cfg!(windows) {
         "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
     } else {
         "xdg-open"
     })
