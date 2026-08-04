@@ -14,6 +14,9 @@ pub struct TestRequest {
     /// 服务端绑定 IP（仅服务端模式使用；空 = 绑定所有网卡）
     #[serde(default)]
     pub bind_ip: String,
+    /// 界面语言（zh / en，空 = zh）：引擎日志按此语言输出
+    #[serde(default)]
+    pub locale: String,
     pub port: u16,
     pub duration: u64,
     pub parallel: u16,
@@ -82,6 +85,9 @@ pub struct ReportRequest {
     pub format: String,
     #[serde(default)]
     pub save_path: Option<String>,
+    /// 界面语言（zh / en，空 = zh）：HTML 报告按此语言生成
+    #[serde(default)]
+    pub locale: String,
     pub config: serde_json::Value,
     pub summary: serde_json::Value,
     pub points: Vec<MetricPoint>,

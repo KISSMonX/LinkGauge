@@ -10,7 +10,7 @@ const currentBandwidth = computed(() => props.points.at(-1)?.bandwidthMbps || 0)
 const remain = computed(() => Math.max(0, props.config.duration - props.elapsed))
 const formatTime = (s: number) => `00:${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 const chartTitle = computed(() => {
-  const label = props.current?.label || props.completedLabel || t('cfg.item.tcp-single')
+  const label = props.current ? itemLabel(props.current.id) : (props.completedLabel || t('cfg.item.tcp-single'))
   return props.live ? t('dash.liveChart', { label }) : t('dash.doneChart', { label })
 })
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)

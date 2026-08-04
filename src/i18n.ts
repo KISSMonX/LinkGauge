@@ -79,6 +79,12 @@ const zh = {
   'recover.resume': '恢复测试',
   'recover.discard': '停止并重新开始',
 
+  // 停止确认
+  'confirm.stopTitle': '停止测试',
+  'confirm.stopMessage': '确定要停止当前测试吗？已完成的测试结果会保留。',
+  'confirm.stopServerTitle': '停止服务',
+  'confirm.stopServerMessage': '确定要停止服务端吗？停止后端口将释放。',
+
   // 报告 / 预览模式
   'report.generated': '报告已生成',
   'report.saveTitle': '保存测试报告',
@@ -332,6 +338,11 @@ const en: Record<MessageKey, string> = {
   'recover.message': 'The previous test did not finish normally. Resume the previous test queue?',
   'recover.resume': 'Resume test',
   'recover.discard': 'Stop and start over',
+
+  'confirm.stopTitle': 'Stop Test',
+  'confirm.stopMessage': 'Stop the current test? Completed results will be kept.',
+  'confirm.stopServerTitle': 'Stop Server',
+  'confirm.stopServerMessage': 'Stop the server? The port will be released.',
 
   'report.generated': 'Report generated',
   'report.saveTitle': 'Save Test Report',

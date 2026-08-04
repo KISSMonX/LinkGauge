@@ -58,6 +58,8 @@ const errorDialog = ref<{ title: string; message: string } | null>(null)
 const infoDialog = ref<{ title: string; message: string; recovery?: boolean } | null>(null)
 /** 设置弹窗：语言 / 主题 */
 const settingsDialog = ref(false)
+/** 停止确认弹窗：客户端停止测试 / 服务端停止服务（中英文跟随界面语言） */
+const confirmDialog = ref<{ title: string; message: string; action: 'stop' | 'stop-server' } | null>(null)
 interface RecoveryState { config: TestConfig; queue: string[]; nextIndex: number }
 const recovery = ref<RecoveryState | null>(null)
 const interfaces = ref<InterfaceInfo[]>([])
@@ -299,6 +301,22 @@ async function start() {
   await runNext()
 }
 
+/** 停止确认弹窗：点击「停止测试 / 停止服务」先询问用户，确认后才真正停止 */
+function requestStop() {
+  if (!clientRunning.value) return
+  confirmDialog.value = { title: t('confirm.stopTitle'), message: t('confirm.stopMessage'), action: 'stop' }
+}
+function requestStopServer() {
+  if (!serverRunning.value) return
+  confirmDialog.value = { title: t('confirm.stopServerTitle'), message: t('confirm.stopServerMessage'), action: 'stop-server' }
+}
+async function confirmStop() {
+  const action = confirmDialog.value?.action
+  confirmDialog.value = null
+  if (action === 'stop') await stop()
+  else if (action === 'stop-server') await stopServer()
+}
+
 /** 启动 riperf3 服务端（独立于客户端任务队列，两者可同时运行） */
 async function startServer() {
   if (serverRunning.value) return
@@ -311,7 +329,7 @@ async function startServer() {
   serverUptime.value = 0; serverCompleted.value = 0; serverServing.value = false; serverPoints.value = []
   serverPeerIp.value = ''; serverPeerPort.value = 0
   try {
-    serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval } })
+    serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, locale: locale.value, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval } })
     serverRunning.value = true
   } catch (error) { log('ERROR', String(error)); errorDialog.value = { title: t('err.serverStartFailed'), message: String(error) } }
 }
@@ -333,7 +351,7 @@ async function runNext() {
   log('INFO', t('log.startTask', { label: item ? itemLabel(item.id) : t('st.serverRunning') }))
   if (!isTauri()) { simulateTask(taskId); return }
   try {
-    clientSession.value = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, ...config.value } })
+    clientSession.value = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, locale: locale.value, ...config.value } })
   } catch (error) {
     failCurrent(String(error))
   }
@@ -438,7 +456,7 @@ async function generateReport(format: 'html' | 'pdf' = 'html') {
       filters: [{ name: format.toUpperCase(), extensions: [format] }]
     })
     if (!path) return // 用户取消
-    const saved = await invoke<string>('generate_report', { request: { format, savePath: path, config: config.value, summary: { ...summary }, points: chartPoints.value, logs: logs.value } })
+    const saved = await invoke<string>('generate_report', { request: { format, savePath: path, locale: locale.value, config: config.value, summary: { ...summary }, points: chartPoints.value, logs: logs.value } })
     infoDialog.value = { title: t('report.generated'), message: saved }
   } catch (error) { errorDialog.value = { title: t('err.reportFailed'), message: String(error) } }
 }
@@ -539,17 +557,17 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenCl
       <ConfigPanel
         v-if="side === 'hub' && dockedTabs.length"
         :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength" @detach="detachTab"
+        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength" @detach="detachTab"
       />
       <ConfigPanel
         v-else-if="side === 'client'"
         detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength"
+        @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength"
       />
       <ConfigPanel
         v-else-if="side === 'server'"
         detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="config = $event" @update:server-config="serverConfig = $event" @start="start" @stop="stop" @start-server="startServer" @stop-server="stopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength"
+        @update:config="config = $event" @update:server-config="serverConfig = $event" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength"
       />
       <div v-else class="panel config-panel dock-empty">
         <h2>{{ t('tab.detachedTitle') }}</h2>
@@ -568,6 +586,7 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenCl
     </div>
     <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
     <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><template v-if="infoDialog?.recovery"><button class="primary" @click="infoDialog = null; start()">{{ t('recover.resume') }}</button><button class="danger" @click="infoDialog = null; discardRecovery()">{{ t('recover.discard') }}</button></template><button v-if="!infoDialog?.recovery" @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
+    <div v-if="confirmDialog" class="modal-backdrop" @click.self="confirmDialog = null"><div class="modal"><button class="modal-close" @click="confirmDialog = null">×</button><h2>{{ confirmDialog.title }}</h2><div class="modal-body"><span class="modal-symbol info">i</span><p>{{ confirmDialog.message }}</p></div><div class="modal-actions"><button @click="confirmDialog = null">{{ t('common.cancel') }}</button><button class="danger" @click="confirmStop">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="settingsDialog" class="modal-backdrop" @click.self="settingsDialog = false"><div class="modal"><button class="modal-close" @click="settingsDialog = false">×</button><h2>{{ t('settings.title') }}</h2><div class="settings-form"><label><span>{{ t('settings.language') }}</span><select :value="locale" @change="onLocaleChange($event)"><option value="en">English</option><option value="zh">中文</option></select></label><label><span>{{ t('settings.theme') }}</span><select :value="theme" @change="onThemeChange($event)"><option value="light">{{ t('settings.light') }}</option><option value="dark">{{ t('settings.dark') }}</option></select></label></div><p class="settings-note">{{ t('settings.engineNote') }}</p><div class="modal-actions"><button class="primary" @click="settingsDialog = false">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false; applyNic(0)">{{ t('nic.cancel') }}</button></div></div></div>
   </div>

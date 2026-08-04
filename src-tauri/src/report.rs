@@ -93,14 +93,27 @@ async fn write_html(path: PathBuf, request: &ReportRequest) -> Result<String, St
         .iter()
         .map(|l| format!("<div>{}</div>", escape_html(&l.to_string())))
         .collect::<String>();
-    let html = format!(
-        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>LinkGauge 测试报告</title><style>body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0}}pre{{background:#f6f8fb;padding:14px;white-space:pre-wrap}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}</style></head><body><h1>LinkGauge 测试报告</h1><p>生成时间：{}</p><section><h2>测试配置</h2><pre>{}</pre></section><section><h2>统计结果</h2><pre>{}</pre></section><section><h2>测试数据</h2><table><thead><tr><th>时间(s)</th><th>带宽(Mbps)</th><th>传输(MB)</th><th>抖动(ms)</th><th>丢包率</th></tr></thead><tbody>{}</tbody></table></section><section><h2>执行日志</h2><div class="logs">{}</div></section></body></html>"#,
-        Local::now().format("%Y-%m-%d %H:%M:%S"),
-        escape_html(&config),
-        escape_html(&summary),
-        rows,
-        logs
-    );
+    // 报告语言跟随界面语言（默认中文）
+    let is_en = request.locale == "en";
+    let html = if is_en {
+        format!(
+            r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>LinkGauge Test Report</title><style>body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0}}pre{{background:#f6f8fb;padding:14px;white-space:pre-wrap}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}</style></head><body><h1>LinkGauge Test Report</h1><p>Generated: {}</p><section><h2>Test Configuration</h2><pre>{}</pre></section><section><h2>Statistics</h2><pre>{}</pre></section><section><h2>Test Data</h2><table><thead><tr><th>Time (s)</th><th>Bandwidth (Mbps)</th><th>Transfer (MB)</th><th>Jitter (ms)</th><th>Loss</th></tr></thead><tbody>{}</tbody></table></section><section><h2>Run Logs</h2><div class="logs">{}</div></section></body></html>"#,
+            Local::now().format("%Y-%m-%d %H:%M:%S"),
+            escape_html(&config),
+            escape_html(&summary),
+            rows,
+            logs
+        )
+    } else {
+        format!(
+            r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>LinkGauge 测试报告</title><style>body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0}}pre{{background:#f6f8fb;padding:14px;white-space:pre-wrap}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}</style></head><body><h1>LinkGauge 测试报告</h1><p>生成时间：{}</p><section><h2>测试配置</h2><pre>{}</pre></section><section><h2>统计结果</h2><pre>{}</pre></section><section><h2>测试数据</h2><table><thead><tr><th>时间(s)</th><th>带宽(Mbps)</th><th>传输(MB)</th><th>抖动(ms)</th><th>丢包率</th></tr></thead><tbody>{}</tbody></table></section><section><h2>执行日志</h2><div class="logs">{}</div></section></body></html>"#,
+            Local::now().format("%Y-%m-%d %H:%M:%S"),
+            escape_html(&config),
+            escape_html(&summary),
+            rows,
+            logs
+        )
+    };
     fs::write(&path, html)
         .await
         .map_err(|e| format!("写入 HTML 报告失败：{e}"))?;

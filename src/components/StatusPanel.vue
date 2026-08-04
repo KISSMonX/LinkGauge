@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import type { LogEntry, TestItem } from '../types'
-import { useI18n } from '../i18n'
+import { useI18n, type MessageKey } from '../i18n'
 import Icon from './Icon.vue'
 
 const props = defineProps<{ items: TestItem[]; logs: LogEntry[]; serverRunning: boolean; mode?: 'full' | 'logs' }>()
 const emit = defineEmits<{ clear: []; 'open-log-dir': []; report: [] }>()
 const { t } = useI18n()
+const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 /** logs 模式（服务端分离窗口）只显示日志，隐藏客户端执行队列与报告区 */
 const showQueue = computed(() => props.mode !== 'logs')
 const filter = ref<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL')
@@ -26,7 +27,7 @@ watch(() => props.logs.length, async () => { await nextTick(); if (logBox.value)
     <section class="queue-section">
       <div class="section-title"><h3>⌄ {{ t('st.queue') }}</h3><span>{{ selected.filter(i => i.status === 'success').length }}/{{ selected.length }}</span></div>
       <div v-if="serverRunning" class="server-badge"><Icon name="monitor" />{{ t('st.serverRunning') }}</div>
-      <div class="task-row" v-for="(item, index) in selected" :key="item.id" :class="item.status"><Icon :name="iconName(item.status)" /><span>{{ index + 1 }}. {{ item.label }}</span><b>{{ statusText(item.status) }}</b></div>
+      <div class="task-row" v-for="(item, index) in selected" :key="item.id" :class="item.status"><Icon :name="iconName(item.status)" /><span>{{ index + 1 }}. {{ itemLabel(item.id) }}</span><b>{{ statusText(item.status) }}</b></div>
       <div v-if="!selected.length" class="empty">{{ t('st.emptyQueue') }}</div>
     </section>
     </template>

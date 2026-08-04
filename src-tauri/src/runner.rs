@@ -22,6 +22,22 @@ use tokio::{
 };
 use uuid::Uuid;
 
+/// 按界面语言选择消息文案（locale 为空时默认中文）
+fn tr<'a>(locale: &str, zh: &'a str, en: &'a str) -> &'a str {
+    if locale == "en" { en } else { zh }
+}
+
+/// 按界面语言选择格式化模板（模板必须是字面量，format! 才能编译期检查）
+macro_rules! tr_format {
+    ($locale:expr, $zh:literal, $en:literal $(, $arg:expr)* $(,)?) => {{
+        if $locale == "en" {
+            format!($en $(, $arg)*)
+        } else {
+            format!($zh $(, $arg)*)
+        }
+    }};
+}
+
 /// 每个会话的中断信号：ping 走进程取消标志，riperf3 走 watch 通道（优雅终止）
 pub(crate) enum SessionSignal {
     Ping(Arc<AtomicBool>),
@@ -235,8 +251,10 @@ async fn run_engine_client(
     let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
         return;
     };
-    let header = format!(
+    let header = tr_format!(
+        &request.locale,
         "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: {}, 端口 {}, 时长 {}s, 并发 {}, 带宽 {}, 报文长度 {}, 输出周期 {}s\n\n",
+        "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: {}, port {}, duration {}s, streams {}, bandwidth {}, packet length {}, interval {}s\n\n",
         riperf3::VERSION,
         if client_params_for(&request).protocol == TransportProtocol::Udp { "UDP" } else { "TCP" },
         request.port,
@@ -245,7 +263,7 @@ async fn run_engine_client(
         if request.bandwidth > 0 {
             format!("{}M", request.bandwidth)
         } else {
-            "不限制".into()
+            tr(&request.locale, "不限制", "unlimited").into()
         },
         if client_params_for(&request).protocol == TransportProtocol::Udp {
             request.udp_packet_length
@@ -260,7 +278,12 @@ async fn run_engine_client(
         &session_id,
         &request.task_id,
         "INFO",
-        format!("执行：riperf3 -c {}（内嵌引擎）", request.server_ip),
+        tr_format!(
+            &request.locale,
+            "执行：riperf3 -c {}（内嵌引擎）",
+            "Running: riperf3 -c {} (embedded engine)",
+            request.server_ip
+        ),
     );
 
     let params = client_params_for(&request);
@@ -269,6 +292,7 @@ async fn run_engine_client(
     let hook_session = session_id.clone();
     let hook_task = request.task_id.clone();
     let hook_log = log.clone();
+    let hook_locale = request.locale.clone();
     let on_interval = move |interval: &riperf3::json_report::Interval| {
         if interval.sum.omitted {
             return;
@@ -286,7 +310,7 @@ async fn run_engine_client(
         emit_metric(&hook_app, &hook_session, &hook_task, metric);
         append_log(
             &hook_log,
-            &format!("[INFO] {}", format_interval_line(second, sum)),
+            &format!("[INFO] {}", format_interval_line(&hook_locale, second, sum)),
         );
     };
 
@@ -345,7 +369,13 @@ async fn run_engine_client(
                 &session_id,
                 &request.task_id,
                 &log,
-                &format!("测试配置无效：{error}"),
+                &request.locale,
+                &tr_format!(
+                    &request.locale,
+                    "测试配置无效：{}",
+                    "Invalid test configuration: {}",
+                    error
+                ),
             )
             .await;
             return;
@@ -397,8 +427,10 @@ async fn run_engine_server(
     };
     append_log(
         &log,
-        &format!(
+        &tr_format!(
+            &request.locale,
             "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务\n\n",
+            "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: bind {}, listen port {}, serving continuously\n\n",
             riperf3::VERSION,
             bind_display,
             request.port
@@ -438,17 +470,19 @@ async fn run_engine_server(
         let session_id = session_id.clone();
         let task_id = request.task_id.clone();
         let log = log.clone();
+        let locale = request.locale.clone();
         move |addr| {
             let host = addr.ip().to_canonical().to_string();
             let port = addr.port();
-            append_log(&log, &format!("[INFO] 客户端 {host}:{port} 已连接"));
-            emit_log(
-                &app,
-                &session_id,
-                &task_id,
-                "INFO",
-                format!("客户端 {host}:{port} 已连接"),
+            let connected = tr_format!(
+                &locale,
+                "客户端 {}:{} 已连接",
+                "Client {}:{} connected",
+                host,
+                port
             );
+            append_log(&log, &format!("[INFO] {connected}"));
+            emit_log(&app, &session_id, &task_id, "INFO", connected);
             let payload = format!(r#"{{"serving":true,"peerIp":"{}","peerPort":{}}}"#, host, port);
             let _ = app.emit(
                 "test-event",
@@ -480,7 +514,13 @@ async fn run_engine_server(
                 &session_id,
                 &request.task_id,
                 &log,
-                &format!("服务端配置无效：{error}"),
+                &request.locale,
+                &tr_format!(
+                    &request.locale,
+                    "服务端配置无效：{}",
+                    "Invalid server configuration: {}",
+                    error
+                ),
             )
             .await;
             return;
@@ -494,7 +534,14 @@ async fn run_engine_server(
                 &session_id,
                 &request.task_id,
                 &log,
-                &format!("无法监听端口 {}：{error}", request.port),
+                &request.locale,
+                &tr_format!(
+                    &request.locale,
+                    "无法监听端口 {}：{}",
+                    "Cannot listen on port {}: {}",
+                    request.port,
+                    error
+                ),
             )
             .await;
             return;
@@ -502,14 +549,29 @@ async fn run_engine_server(
     };
     append_log(
         &log,
-        &format!("[INFO] 服务端已就绪，监听 {bind_display}:{}", request.port),
+        &format!(
+            "[INFO] {}",
+            tr_format!(
+                &request.locale,
+                "服务端已就绪，监听 {}:{}",
+                "Server ready, listening on {}:{}",
+                bind_display,
+                request.port
+            )
+        ),
     );
     emit_log(
         &app,
         &session_id,
         &request.task_id,
         "INFO",
-        format!("服务端已就绪，监听 {bind_display}:{}", request.port),
+        tr_format!(
+            &request.locale,
+            "服务端已就绪，监听 {}:{}",
+            "Server ready, listening on {}:{}",
+            bind_display,
+            request.port
+        ),
     );
 
     // 周期状态输出：按「日志输出间隔」每隔 N 秒写一次运行日志与统计信息（并发于监听循环）
@@ -529,6 +591,7 @@ async fn run_engine_server(
         let completed = completed.clone();
         let serving = serving.clone();
         let latest = latest.clone();
+        let locale = request.locale.clone();
         tauri::async_runtime::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
             ticker.tick().await; // 跳过立即触发的第一次
@@ -540,9 +603,20 @@ async fn run_engine_server(
                 let done = completed.load(Ordering::Relaxed);
                 let snapshot = latest.lock().unwrap().clone();
                 // 文本日志行（写文件 + 广播）
-                let status_text = if is_serving { "测试进行中" } else { "空闲" };
-                let message = format!(
-                    "运行状态：监听 {bind_short}:{port}，已运行 {uptime}s，累计完成 {done} 次测试，当前{status_text}"
+                let status_text = if is_serving {
+                    tr(&locale, "测试进行中", "test in progress")
+                } else {
+                    tr(&locale, "空闲", "idle")
+                };
+                let message = tr_format!(
+                    &locale,
+                    "运行状态：监听 {}:{}，已运行 {}s，累计完成 {} 次测试，当前{}",
+                    "Status: listening on {}:{}, up {}s, {} tests completed, currently {}",
+                    bind_short,
+                    port,
+                    uptime,
+                    done,
+                    status_text
                 );
                 append_log(&log, &format!("[INFO] {message}"));
                 emit_log(&app, &session_id, &task_id, "INFO", message);
@@ -603,13 +677,19 @@ async fn run_engine_server(
                 };
                 if outcome.termination == Termination::Interrupted {
                     heartbeat.abort();
-                    append_log(&log, "\n测试结果: 服务端已停止（手动停止）");
+                    append_log(
+                        &log,
+                        &format!(
+                            "\n{}",
+                            tr(&request.locale, "测试结果: 服务端已停止（手动停止）", "Result: server stopped (manual stop)")
+                        ),
+                    );
                     emit_log(
                         &app,
                         &session_id,
                         &request.task_id,
                         "INFO",
-                        "服务端已停止（手动停止）".into(),
+                        tr(&request.locale, "服务端已停止（手动停止）", "Server stopped (manual stop)").into(),
                     );
                     finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
                     return;
@@ -618,15 +698,31 @@ async fn run_engine_server(
                 let peer_text = peer
                     .as_ref()
                     .map(|(ip, p)| format!("{ip}:{p}"))
-                    .unwrap_or_else(|| "未知地址".to_string());
-                append_log(&log, &format!("\n[INFO] 客户端 {peer_text} 完成测试，汇总如下："));
-                append_engine_summary(&log, &outcome.report);
+                    .unwrap_or_else(|| tr(&request.locale, "未知地址", "unknown address").to_string());
+                append_log(
+                    &log,
+                    &format!(
+                        "\n[INFO] {}",
+                        tr_format!(
+                            &request.locale,
+                            "客户端 {} 完成测试，汇总如下：",
+                            "Client {} finished a test, summary:",
+                            peer_text
+                        )
+                    ),
+                );
+                append_engine_summary(&log, &outcome.report, &request.locale);
                 emit_log(
                     &app,
                     &session_id,
                     &request.task_id,
                     "INFO",
-                    format!("一次测试完成（客户端 {peer_text}），继续监听…"),
+                    tr_format!(
+                        &request.locale,
+                        "一次测试完成（客户端 {}），继续监听…",
+                        "Test finished (client {}), still listening…",
+                        peer_text
+                    ),
                 );
             }
             Err(error) => {
@@ -635,25 +731,31 @@ async fn run_engine_server(
                 // 空闲时收到停止信号返回 Aborted，正常退出
                 if matches!(error, riperf3::RiperfError::Aborted(_)) {
                     heartbeat.abort();
-                    append_log(&log, "\n测试结果: 服务端已停止（手动停止）");
+                    append_log(
+                        &log,
+                        &format!(
+                            "\n{}",
+                            tr(&request.locale, "测试结果: 服务端已停止（手动停止）", "Result: server stopped (manual stop)")
+                        ),
+                    );
                     emit_log(
                         &app,
                         &session_id,
                         &request.task_id,
                         "INFO",
-                        "服务端已停止（手动停止）".into(),
+                        tr(&request.locale, "服务端已停止（手动停止）", "Server stopped (manual stop)").into(),
                     );
                     finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
                     return;
                 }
-                append_log(&log, &format!("[WARN] 一次连接处理失败：{error}，继续监听"));
-                emit_log(
-                    &app,
-                    &session_id,
-                    &request.task_id,
-                    "WARN",
-                    format!("一次连接处理失败：{error}，继续监听"),
+                let warn = tr_format!(
+                    &request.locale,
+                    "一次连接处理失败：{}，继续监听",
+                    "Failed to handle a connection: {}, still listening",
+                    error
                 );
+                append_log(&log, &format!("[WARN] {warn}"));
+                emit_log(&app, &session_id, &request.task_id, "WARN", warn);
             }
         }
     }
@@ -692,7 +794,12 @@ async fn run_ping(
         &session_id,
         &request.task_id,
         "INFO",
-        format!("执行：ping {}", args.join(" ")),
+        tr_format!(
+            &request.locale,
+            "执行：ping {}",
+            "Running: ping {}",
+            args.join(" ")
+        ),
     );
 
     let mut command = Command::new("ping");
@@ -706,9 +813,14 @@ async fn run_ping(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let message = format!("启动 ping 失败：{error}");
+            let message = tr_format!(
+                &request.locale,
+                "启动 ping 失败：{}",
+                "Failed to start ping: {}",
+                error
+            );
             append_log(&log, &format!("[ERROR] {message}"));
-            fail_engine(&app, &session_id, &request.task_id, &log, &message).await;
+            fail_engine(&app, &session_id, &request.task_id, &log, &request.locale, &message).await;
             return;
         }
     };
@@ -760,8 +872,13 @@ async fn run_ping(
     append_log(
         &log,
         &format!(
-            "\n测试结果: {}",
-            if final_success { "完成" } else { "未完成" }
+            "\n{}: {}",
+            tr(&request.locale, "测试结果", "Result"),
+            if final_success {
+                tr(&request.locale, "完成", "completed")
+            } else {
+                tr(&request.locale, "未完成", "incomplete")
+            }
         ),
     );
     if final_stopped {
@@ -769,8 +886,8 @@ async fn run_ping(
     } else if final_success {
         finish_ok(&app, &session_id, &request.task_id, &log, "success").await;
     } else {
-        let message = "ping 测试进程异常退出".to_string();
-        fail_engine(&app, &session_id, &request.task_id, &log, &message).await;
+        let message = tr(&request.locale, "ping 测试进程异常退出", "Ping process exited unexpectedly").to_string();
+        fail_engine(&app, &session_id, &request.task_id, &log, &request.locale, &message).await;
     }
 }
 
@@ -830,7 +947,7 @@ async fn setup_log(
             app,
             session_id,
             &request.task_id,
-            format!("无法创建日志目录：{error}"),
+            tr_format!(&request.locale, "无法创建日志目录：{}", "Cannot create log directory: {}", error),
             None,
         );
         return None;
@@ -849,14 +966,16 @@ async fn setup_log(
                 app,
                 session_id,
                 &request.task_id,
-                format!("无法创建日志文件：{error}"),
+                tr_format!(&request.locale, "无法创建日志文件：{}", "Cannot create log file: {}", error),
                 None,
             );
             return None;
         }
     };
-    let header = format!(
+    let header = tr_format!(
+        &request.locale,
         "测试时间: {}\n客户端IP: {}\n服务端IP: {}\n测试模式: {}\n测试项目: {}\n",
+        "Test time: {}\nClient IP: {}\nServer IP: {}\nMode: {}\nTest item: {}\n",
         Local::now().format("%Y-%m-%d %H:%M:%S"),
         local_ip,
         request.server_ip,
@@ -890,34 +1009,67 @@ async fn finish_engine(
 ) {
     match outcome {
         Err(error) => {
-            let message = format!("测试失败：{error}");
-            fail_engine(app, session_id, task_id, log, &message).await;
+            let message = tr_format!(
+                &request.locale,
+                "测试失败：{}",
+                "Test failed: {}",
+                error
+            );
+            fail_engine(app, session_id, task_id, log, &request.locale, &message).await;
         }
         Ok(outcome) => {
             let report = &outcome.report;
-            append_log(log, "\n[INFO] 测试结束，最终汇总：");
-            append_engine_summary(log, report);
+            append_log(
+                log,
+                &format!(
+                    "\n[INFO] {}",
+                    tr(&request.locale, "测试结束，最终汇总：", "Test finished, final summary:")
+                ),
+            );
+            append_engine_summary(log, report, &request.locale);
             emit_final_metric(app, session_id, task_id, report, request.duration as i64);
             match outcome.termination {
                 Termination::Completed => {
-                    append_log(log, "\n测试结果: 完成");
+                    append_log(
+                        log,
+                        &format!(
+                            "\n{}",
+                            tr(&request.locale, "测试结果: 完成", "Result: completed")
+                        ),
+                    );
                     finish_ok(app, session_id, task_id, log, "success").await;
                 }
                 Termination::Interrupted => {
-                    append_log(log, "\n测试结果: 手动停止");
+                    append_log(
+                        log,
+                        &format!(
+                            "\n{}",
+                            tr(&request.locale, "测试结果: 手动停止", "Result: manual stop")
+                        ),
+                    );
                     finish_ok(app, session_id, task_id, log, "stopped").await;
                 }
                 Termination::ServerTerminated => {
-                    let message = "服务端主动终止了测试".to_string();
-                    fail_engine(app, session_id, task_id, log, &message).await;
+                    let message = tr(&request.locale, "服务端主动终止了测试", "The server terminated the test").to_string();
+                    fail_engine(app, session_id, task_id, log, &request.locale, &message).await;
                 }
                 Termination::ServerError(msg) => {
-                    let message = format!("服务端返回错误：{msg}");
-                    fail_engine(app, session_id, task_id, log, &message).await;
+                    let message = tr_format!(
+                        &request.locale,
+                        "服务端返回错误：{}",
+                        "Server returned an error: {}",
+                        msg
+                    );
+                    fail_engine(app, session_id, task_id, log, &request.locale, &message).await;
                 }
                 other => {
-                    let message = format!("测试异常结束：{other:?}");
-                    fail_engine(app, session_id, task_id, log, &message).await;
+                    let message = tr_format!(
+                        &request.locale,
+                        "测试异常结束：{:?}",
+                        "Test ended abnormally: {:?}",
+                        other
+                    );
+                    fail_engine(app, session_id, task_id, log, &request.locale, &message).await;
                 }
             }
         }
@@ -925,27 +1077,33 @@ async fn finish_engine(
 }
 
 /// 追加最终汇总（发送/接收方向的传输量与平均带宽，UDP 附抖动丢包）
-fn append_engine_summary(log: &SessionLog, report: &riperf3::Report) {
+fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &str) {
     if let Some(sent) = &report.end.sum_sent {
-        let mut line = format!(
+        let mut line = tr_format!(
+            locale,
             "发送方向: {:.2} MBytes, 平均 {:.2} Mbits/sec",
+            "Sent: {:.2} MBytes, average {:.2} Mbits/sec",
             sent.bytes as f64 / 1_000_000.0,
             sent.bits_per_second / 1_000_000.0
         );
         if let Some(retransmits) = sent.retransmits {
-            line.push_str(&format!(", 重传 {retransmits}"));
+            line.push_str(&tr_format!(locale, ", 重传 {}", ", retransmits {}", retransmits));
         }
         append_log(log, &format!("[INFO] {line}"));
     }
     if let Some(received) = &report.end.sum_received {
-        let mut line = format!(
+        let mut line = tr_format!(
+            locale,
             "接收方向: {:.2} MBytes, 平均 {:.2} Mbits/sec",
+            "Received: {:.2} MBytes, average {:.2} Mbits/sec",
             received.bytes as f64 / 1_000_000.0,
             received.bits_per_second / 1_000_000.0
         );
         if let Some(jitter) = received.jitter_ms {
-            line.push_str(&format!(
+            line.push_str(&tr_format!(
+                locale,
                 ", 抖动 {:.3} ms, 丢包 {}/{} ({:.2}%)",
+                ", jitter {:.3} ms, loss {}/{} ({:.2}%)",
                 jitter,
                 received.lost_packets.unwrap_or(0),
                 received.packets.unwrap_or(0),
@@ -996,15 +1154,20 @@ fn emit_final_metric(
 }
 
 /// 逐秒指标行的日志格式（近似 iperf3 文本输出）
-fn format_interval_line(second: i64, sum: &riperf3::json_report::IntervalSum) -> String {
-    let mut line = format!(
-        "第 {second} 秒: {:.2} MBytes, {:.2} Mbits/sec",
+fn format_interval_line(locale: &str, second: i64, sum: &riperf3::json_report::IntervalSum) -> String {
+    let mut line = tr_format!(
+        locale,
+        "第 {} 秒: {:.2} MBytes, {:.2} Mbits/sec",
+        "Second {}: {:.2} MBytes, {:.2} Mbits/sec",
+        second,
         sum.bytes as f64 / 1_000_000.0,
         sum.bits_per_second / 1_000_000.0
     );
     if let Some(jitter) = sum.jitter_ms {
-        line.push_str(&format!(
+        line.push_str(&tr_format!(
+            locale,
             ", 抖动 {:.3} ms, 丢包 {}/{} ({:.2}%)",
+            ", jitter {:.3} ms, loss {}/{} ({:.2}%)",
             jitter,
             sum.lost_packets.unwrap_or(0),
             sum.packets.unwrap_or(0),
@@ -1012,7 +1175,7 @@ fn format_interval_line(second: i64, sum: &riperf3::json_report::IntervalSum) ->
         ));
     }
     if let Some(retransmits) = sum.retransmits {
-        line.push_str(&format!(", 重传 {retransmits}"));
+        line.push_str(&tr_format!(locale, ", 重传 {}", ", retransmits {}", retransmits));
     }
     line
 }
@@ -1034,11 +1197,15 @@ async fn fail_engine(
     session_id: &str,
     task_id: &str,
     log: &SessionLog,
+    locale: &str,
     message: &str,
 ) {
     append_log(log, &format!("[ERROR] {message}"));
     let log_path = finish_log(log, false).await;
-    let full = format!("{message}\n详细日志：{log_path}");
+    let full = format!(
+        "{message}\n{}",
+        tr_format!(locale, "详细日志：{}", "Detailed log: {}", log_path)
+    );
     emit_error(app, session_id, task_id, full, Some(log_path));
 }
 
