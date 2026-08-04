@@ -51,6 +51,40 @@ async fn create_side_window(app: tauri::AppHandle, side: String) -> Result<(), S
     Ok(())
 }
 
+/// 「关于」页信息：应用版本号（tauri.conf.json）+ 构建时的 Git commit id（build.rs 注入）
+#[tauri::command]
+fn get_app_info(app: tauri::AppHandle) -> serde_json::Value {
+    serde_json::json!({
+        "version": app.package_info().version.to_string(),
+        "commit": env!("LINKGAUGE_COMMIT"),
+    })
+}
+
+/// 用系统默认浏览器打开外部链接（「关于」页的项目地址 / 提交反馈）。
+/// 与 runner::open_log_dir 相同的方式：调系统命令，不引入额外依赖。
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("仅允许打开 http(s) 链接".into());
+    }
+    let result = std::process::Command::new(if cfg!(windows) {
+        "cmd"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    })
+    .args(if cfg!(windows) {
+        vec!["/C", "start", "", url.as_str()]
+    } else {
+        vec![url.as_str()]
+    })
+    .spawn()
+    .map_err(|e| format!("无法打开链接：{e}"))?;
+    drop(result);
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -67,6 +101,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             exit_app,
             create_side_window,
+            get_app_info,
+            open_url,
             runner::start_test,
             runner::stop_test,
             runner::set_locale,

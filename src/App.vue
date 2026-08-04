@@ -4,7 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { save } from '@tauri-apps/plugin-dialog'
+import { open, save } from '@tauri-apps/plugin-dialog'
+import pkg from '../package.json'
 import ConfigPanel from './components/ConfigPanel.vue'
 import Dashboard from './components/Dashboard.vue'
 import ServerDashboard from './components/ServerDashboard.vue'
@@ -18,7 +19,7 @@ import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, Met
 const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 
-const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 8192, interval: 1 }
+const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
 const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1 }
 const config = ref<TestConfig>({ ...defaults })
 const serverConfig = ref<ServerConfig>({ ...serverDefaults })
@@ -73,6 +74,13 @@ const errorDialog = ref<{ title: string; message: string } | null>(null)
 const infoDialog = ref<{ title: string; message: string } | null>(null)
 /** 设置弹窗：语言 / 主题 */
 const settingsDialog = ref(false)
+/** 「关于」弹窗 */
+const aboutDialog = ref(false)
+/** 关于页信息：桌面端由后端 get_app_info 提供（tauri.conf.json 版本 + 构建时 commit id），预览模式用回退值 */
+const appInfo = ref<{ version: string; commit: string }>({ version: pkg.version, commit: 'dev' })
+/** 关于页外部链接 */
+const APP_PROJECT_URL = 'https://github.com/KISSMonX/LinkGauge'
+const APP_ISSUES_URL = 'https://github.com/KISSMonX/LinkGauge/issues'
 /** 停止确认弹窗：客户端停止测试 / 服务端停止服务 / 主窗口退出（中英文跟随界面语言） */
 const confirmDialog = ref<{ title: string; message: string; action: 'stop' | 'stop-server' | 'exit' } | null>(null)
 const interfaces = ref<InterfaceInfo[]>([])
@@ -156,8 +164,12 @@ watch(points, (value) => {
 }, { deep: true })
 
 watch(() => config.value.serverIp, (value) => { if (value && value !== local.value.ip) autoServerIp.value = false })
+/** 认证密码不落盘：localStorage 与导出的配置 JSON 都会被用户复制/分享，
+ *  明文密码不应留在里面。密码只在内存中、以及窗口间的 side-sync 里流转，
+ *  重启应用后需要重新输入（用户名与公钥路径不是机密，照常保存） */
+const withoutSecret = (value: TestConfig) => { const { authPassword: _omitted, ...rest } = value; return rest }
 /** 参数自动保存：任何修改即时写入本地存储，下次启动读取最近一次配置 */
-watch(config, (value) => { localStorage.setItem('linkgauge-config', JSON.stringify(value)); if (!syncing) emitSync() }, { deep: true })
+watch(config, (value) => { localStorage.setItem('linkgauge-config', JSON.stringify(withoutSecret(value))); if (!syncing) emitSync() }, { deep: true })
 /** 服务端参数本地持久化（与客户端配置分开保存） */
 watch(serverConfig, (value) => { localStorage.setItem('linkgauge-server-config', JSON.stringify(value)); if (!syncing) emitSync() }, { deep: true })
 
@@ -365,7 +377,27 @@ function validate() {
   if (config.value.mode === 'client' && !/^([a-z\d-]+\.)*[a-z\d-]+$/i.test(config.value.serverIp) && !/^\d{1,3}(\.\d{1,3}){3}$/.test(config.value.serverIp)) return t('err.serverIp')
   if (config.value.port < 1 || config.value.port > 65535) return t('err.port')
   if (config.value.duration < 1) return t('err.duration')
+  // 认证三要素缺一不可：iperf3 用服务端公钥加密「用户名+密码」，少任何一项都会被服务端拒绝
+  if (config.value.authEnabled && (!config.value.authUsername.trim() || !config.value.authPassword || !config.value.authPublicKeyPath.trim())) return t('err.authIncomplete')
   return ''
+}
+
+/** 未启用认证时清空凭据后再下发，避免此前填过的用户名/密码被意外发送 */
+const authPayload = () => (config.value.authEnabled ? {} : { authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false })
+
+/** 选择服务端 RSA 公钥文件（iperf3 认证用，对应 --rsa-public-key-path） */
+async function pickPublicKey() {
+  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
+  try {
+    const path = await open({ title: t('cfg.authKeyPick'), multiple: false, directory: false, filters: [{ name: t('cfg.authKeyFilter'), extensions: ['pem', 'crt', 'key', 'pub'] }] })
+    if (typeof path === 'string') { config.value = { ...config.value, authPublicKeyPath: path }; log('INFO', t('log.authKeyPicked', { path })) }
+  } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
+}
+
+/** 打开外部链接（「关于」页的项目地址 / 提交反馈）：桌面端经后端调系统默认浏览器，预览模式用 window.open */
+function openLink(url: string) {
+  if (isTauri()) invoke('open_url', { url }).catch((e) => log('WARN', String(e)))
+  else window.open(url, '_blank')
 }
 
 async function start() {
@@ -442,7 +474,7 @@ async function runNext() {
   log('INFO', t('log.startTask', { label: item ? itemLabel(item.id) : t('st.serverRunning') }))
   if (!isTauri()) { simulateTask(taskId); return }
   try {
-    clientSession.value = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, locale: locale.value, ...config.value } })
+    clientSession.value = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, locale: locale.value, ...config.value, ...authPayload() } })
   } catch (error) {
     failCurrent(String(error))
   }
@@ -587,7 +619,8 @@ async function exportConfig() {
     const dir = await invoke<string>('get_export_dir')
     const path = await save({ title: t('tb.exportConfig'), defaultPath: `${dir}\\config.json`, filters: [{ name: 'JSON', extensions: ['json'] }] })
     if (!path) return // 用户取消
-    const saved = await invoke<string>('export_config', { path, config: JSON.stringify(config.value, null, 2) })
+    // 导出的 JSON 常被复制/分享，认证密码不写进去（导入后需重新输入）
+    const saved = await invoke<string>('export_config', { path, config: JSON.stringify(withoutSecret(config.value), null, 2) })
     infoDialog.value = { title: t('report.exported'), message: saved }
   } catch (error) { errorDialog.value = { title: t('err.exportFailed'), message: String(error) } }
 }
@@ -605,7 +638,7 @@ function onThemeChange(event: Event) {
 }
 
 onMounted(async () => {
-  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
+  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; if (parsed.udpPacketLength === 8192) parsed.udpPacketLength = 1460 /* 旧默认 8KB 会触发 IP 分片，迁移为 iperf3 默认 1460 */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
   if (isTauri()) {
     try {
@@ -646,6 +679,7 @@ onMounted(async () => {
       local.value = info
       savedTcpLength.value = customTcpLen
       savedUdpLength.value = customUdpLen
+      invoke<{ version: string; commit: string }>('get_app_info').then((info) => { appInfo.value = info }).catch(() => {})
       interfaces.value = ifaces.length ? ifaces : [{ ip: info.ip, mac: info.mac, interfaceName: info.interfaceName, speedMbps: info.speedMbps }]
       // 服务端 IP 为空（或仍是旧版本内置默认值）时视为未手动设置，跟随所选网卡
       autoServerIp.value = !config.value.serverIp || config.value.serverIp === '192.168.1.100'
@@ -671,19 +705,19 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unliste
     <div class="titlebar">
       <div class="brand-icon">⌁</div>
       <h1>LinkGauge<template v-if="side !== 'hub'"> · {{ side === 'client' ? t('common.client') : t('common.server') }}</template></h1>
-      <nav v-if="side === 'hub'" class="toolbar-actions"><button @click="importConfig"><Icon name="download" />{{ t('tb.importConfig') }}</button><button @click="exportConfig"><Icon name="upload" />{{ t('tb.exportConfig') }}</button><button @click="settingsDialog = true"><Icon name="settings" />{{ t('tb.settings') }}</button><button @click="infoDialog = { title: t('tb.about'), message: t('about.message') }"><Icon name="info" />{{ t('tb.about') }}</button></nav>
+      <nav v-if="side === 'hub'" class="toolbar-actions"><button @click="importConfig"><Icon name="download" />{{ t('tb.importConfig') }}</button><button @click="exportConfig"><Icon name="upload" />{{ t('tb.exportConfig') }}</button><button @click="settingsDialog = true"><Icon name="settings" />{{ t('tb.settings') }}</button><button @click="aboutDialog = true"><Icon name="info" />{{ t('tb.about') }}</button></nav>
       <nav v-else class="toolbar-actions"><button :title="t('tb.dockBack')" @click="dockBack"><Icon name="monitor" />⇱ {{ t('tb.dockBack') }}</button></nav>
     </div>
     <div class="workspace">
       <ConfigPanel
         v-if="side === 'hub' && dockedTabs.length"
         :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength" @detach="detachTab"
+        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength" @detach="detachTab"
       />
       <ConfigPanel
         v-else-if="side === 'client'"
         detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength"
+        @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength"
       />
       <ConfigPanel
         v-else-if="side === 'server'"
@@ -710,5 +744,6 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unliste
     <div v-if="confirmDialog" class="modal-backdrop" @click.self="confirmDialog = null"><div class="modal"><button class="modal-close" @click="confirmDialog = null">×</button><h2>{{ confirmDialog.title }}</h2><div class="modal-body"><span class="modal-symbol info">i</span><p>{{ confirmDialog.message }}</p></div><div class="modal-actions"><button @click="confirmDialog = null">{{ t('common.cancel') }}</button><button class="danger" @click="confirmStop">{{ confirmDialog.action === 'exit' ? t('confirm.exitButton') : t('common.confirm') }}</button></div></div></div>
     <div v-if="settingsDialog" class="modal-backdrop" @click.self="settingsDialog = false"><div class="modal"><button class="modal-close" @click="settingsDialog = false">×</button><h2>{{ t('settings.title') }}</h2><div class="settings-form"><label><span>{{ t('settings.language') }}</span><select :value="locale" @change="onLocaleChange($event)"><option value="en">English</option><option value="zh">中文</option></select></label><label><span>{{ t('settings.theme') }}</span><select :value="theme" @change="onThemeChange($event)"><option value="light">{{ t('settings.light') }}</option><option value="dark">{{ t('settings.dark') }}</option></select></label></div><p class="settings-note">{{ t('settings.engineNote') }}</p><div class="modal-actions"><button class="primary" @click="settingsDialog = false">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false; applyNic(0)">{{ t('nic.cancel') }}</button></div></div></div>
+    <div v-if="aboutDialog" class="modal-backdrop" @click.self="aboutDialog = false"><div class="modal about-modal"><button class="modal-close" @click="aboutDialog = false">×</button><div class="about-header"><div class="about-logo">⌁</div><div><h2>LinkGauge</h2><p class="about-intro">{{ t('about.intro') }}</p></div></div><dl class="about-rows"><div class="about-row"><dt>{{ t('about.version') }}</dt><dd>v{{ appInfo.version }}</dd></div><div class="about-row"><dt>{{ t('about.commit') }}</dt><dd><code>{{ appInfo.commit }}</code></dd></div><div class="about-row"><dt>{{ t('about.author') }}</dt><dd>KISSMonX</dd></div><div class="about-row"><dt>{{ t('about.project') }}</dt><dd><button class="about-link" :title="APP_PROJECT_URL" @click="openLink(APP_PROJECT_URL)">github</button></dd></div></dl><div class="about-actions"><button class="primary" @click="openLink(APP_ISSUES_URL)">{{ t('about.feedback') }}</button></div><p class="about-engine">{{ t('about.engine') }}</p></div></div>
   </div>
 </template>
