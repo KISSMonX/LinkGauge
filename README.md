@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-A desktop network performance testing application built with Rust, Tauri 2, Vue 3, and TypeScript. It provides a structured GUI workflow for Ping, TCP, and UDP testing. TCP/UDP tests run on a pure-Rust, in-process [riperf3](https://github.com/therealevanhenry/riperf3) engine that speaks the iperf3 wire protocol — no iperf3 binary is installed, bundled, or spawned; only Ping uses the system command.
+A desktop network performance testing application built with Rust, Tauri 2, Vue 3, and TypeScript. It provides a structured GUI workflow for Ping, TCP, and UDP testing. TCP/UDP tests run on a pure-Rust, in-process [riperf3](https://github.com/therealevanhenry/riperf3) engine that speaks the iperf3 wire protocol — no iperf3 binary is installed, bundled, or spawned; only Ping uses the system command. A built-in SSH console (also pure Rust, in-process) can start and stop the peer's iperf3 server on a remote host without leaving the app.
 
 > Current release status: Windows x64 is fully packaged as an NSIS installer. Linux builds are supported from source. The installer contains no third-party network-testing binaries.
 
@@ -14,7 +14,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 | --- | --- |
 | ![Client UI (English)](doc/screenshot-client-EN.png) | ![客户端界面（中文）](doc/screenshot-client-CN.png) |
 
-**Server view** — listen configuration on the left, server overview (bind address, peer client, uptime, completed tests) with the server-observed bandwidth chart in the center, and server logs on the right.
+**Server view** — listen configuration and SSH connection settings on the left, server overview (bind address, peer client, uptime, completed tests) with the server-observed bandwidth chart in the center — switchable to the SSH remote console — and server logs on the right.
 
 | English | 简体中文 |
 | --- | --- |
@@ -63,6 +63,7 @@ flowchart LR
     end
     UI -->|Tauri invoke| API[Tauri commands]
     API --> RUNNER[Rust async task runner]
+    API --> SSH["SSH session (russh, in-process)"]
     RUNNER --> PING[System Ping]
     RUNNER --> ENGINE[riperf3 in-process engine]
     PING --> NETWORK[(Network peer)]
@@ -70,6 +71,10 @@ flowchart LR
     ENGINE -->|on_interval callback| RUNNER
     RUNNER -->|"test-event broadcast (metrics / logs / server status)"| UI
     RUNNER --> LOGS[Test log files]
+    SSH -->|"PTY shell (start / stop the peer iperf3 server)"| REMOTE[(Remote host)]
+    REMOTE -->|shell output| SSH
+    SSH -->|"ssh-event broadcast (console output / session status)"| UI
+    REMOTE -.->|"usually the peer under test"| NETWORK
     UI --> REPORT[Report command]
     REPORT --> OUTPUT[HTML / PDF reports]
 ```
@@ -79,7 +84,8 @@ The application uses Tauri's two-process model:
 - **Frontend:** Vue components render the configuration, dashboard, task queue, logs, chart, dialogs, and report summary. `src/App.vue` coordinates the test queue and persists settings.
 - **Multi-window:** Client and server are tabs that can be dragged out into their own windows for dual/split-screen monitoring. Windows synchronize parameters and running state via `side-sync` events; the backend broadcasts `test-event` to every window. The server window shows its own overview, bandwidth curve, and logs, fully independent of client data.
 - **Backend:** Rust validates requests, drives the in-process riperf3 engine, streams per-interval metrics through the `on_interval` callback, emits typed events, saves logs, and creates reports.
-- **IPC:** The frontend invokes a small command surface and receives `test-event` updates. Test execution and result aggregation remain entirely in Rust.
+- **IPC:** The frontend invokes a small command surface and receives `test-event` (and `ssh-event`) updates. Test execution and result aggregation remain entirely in Rust.
+- **Remote control:** The server view can open an SSH session to the peer host and drive its iperf3 server from an in-app console. The session, its PTY shell and the output decoding live in Rust ([`russh`](https://github.com/warp-tech/russh), also pure Rust and in-process); the frontend only renders the text stream and sends keystrokes.
 - **Engine:** [riperf3](https://github.com/therealevanhenry/riperf3) is a ground-up, wire-compatible Rust implementation of iperf3. It is vendored under `vendor/riperf3` with a small local patch (a live `on_interval` callback) — see [Test Engine](#test-engine-riperf3). Because the engine runs inside the application process, there is no external binary to resolve, spawn, or manage, and per-second metrics arrive through typed callbacks instead of output parsing.
 
 ### Backend commands
@@ -146,6 +152,7 @@ The host key is checked against your `known_hosts`: a changed key aborts the con
 | System information | hostname, local-ip-address, mac_address | Local network identity |
 | Utility | chrono, uuid | Timestamps, filenames, and session IDs |
 | Test engine | riperf3 (vendored, pure Rust) | TCP/UDP network performance measurement |
+| SSH client | russh (pure Rust, ring backend) | Remote console for operating the peer iperf3 server |
 
 Exact JavaScript and Rust dependency constraints are recorded in `package-lock.json` and `src-tauri/Cargo.lock`.
 
@@ -268,6 +275,17 @@ The current installer is not code-signed, so Windows SmartScreen may display a w
 5. Stop a test when necessary. Failed test items can be reviewed in the logs and the report.
 6. Generate an HTML or PDF report after one or more tasks finish.
 
+### Operating the peer server over SSH
+
+When the iperf3 server runs on another machine, you do not need a separate terminal:
+
+1. Open the **Server** tab and fill in the **SSH Remote Connection** form — host, port, username, and either a password or an OpenSSH private key (with its passphrase, if any).
+2. Click **Connect**. The center panel switches to the **SSH Console** tab; on first connection the host key fingerprint is printed for you to verify.
+3. Use the quick actions — **Start iperf3** (`iperf3 -s -p <port> -i <interval>`), **Start (daemon)** (`-D`), **Processes**, **Listen port**, **Stop all**, **Version** — or type any command. `^C` interrupts whatever runs in the foreground.
+4. Switch back to **Server Overview** at any time; the console keeps running and its output is preserved.
+
+Quick actions are built from the listen port and log interval configured on the same page, so the remote server and the client tab agree on the port by construction. The console is not a full terminal emulator: it renders text with `\r` / `\b` / `\t` cursor semantics (enough for `iperf3` interval statistics and shell echo) and strips ANSI escapes, so full-screen curses programs such as `top` will not display correctly.
+
 ### Split-screen dual windows
 
 - On launch, Client and Server are two tabs. **Drag a tab** (release after pulling it ~100px) to detach that side into its own window — handy for a second monitor or half-and-half split-screen setups.
@@ -285,6 +303,7 @@ The peer must be reachable, its firewall must allow the configured TCP/UDP port,
 - Test logs are written under the OS-specific Tauri application log directory in `tests/`.
 - Reports are written under the OS-specific Tauri application data directory in `reports/`.
 - The custom packet length is persisted to `settings.json` in the OS-specific Tauri application config directory.
+- SSH connection settings (host, port, username, auth method, private key path) are persisted alongside the other settings. The login password and the key passphrase are **not** — like the iperf3 auth password, they are held in memory only, excluded from exported configs, and must be re-entered after a restart.
 
 Log filenames follow this pattern (server and client logs are recorded separately):
 
@@ -349,12 +368,15 @@ An iperf3 server serves one test at a time. Between adjacent items in the queue 
 | Linux application does not start | Verify WebKitGTK 4.1 and distribution runtime dependencies |
 | Windows build cannot replace the EXE | Close any running `linkgauge.exe` instance and rebuild |
 | SmartScreen warning | Code-sign release installers with a trusted certificate |
+| SSH connection refused after reinstalling the peer | The host key no longer matches `known_hosts`; remove the stale entry for that host after confirming the change is expected |
+| SSH private key rejected | Provide the passphrase if the key is encrypted. OpenSSH, PKCS#1/PKCS#8 PEM and PuTTY `.ppk` keys are all accepted |
+| Remote `iperf3` reported as not found | The quick actions call `iperf3` from the login shell's `PATH`; install it on the peer or type the full path in the console |
 
 ## TODO
 
 ### Backlog
 
-- [ ] SSH support (start/deploy the peer server on a remote host over SSH)
+- [x] SSH support (operate the peer iperf3 server on a remote host over SSH)
 - [ ] Code-sign release installers to remove the Windows SmartScreen warning
 - [ ] Verify Linux AppImage / DEB builds and runtime on the oldest supported base distribution
 - [ ] Add a project-level LICENSE file and package metadata

@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-一款基于 Rust、Tauri 2、Vue 3 和 TypeScript 开发的桌面网络性能测试工具。软件为 Ping、TCP 和 UDP 测试提供工程化图形流程，TCP/UDP 测试由纯 Rust、进程内运行的 [riperf3](https://github.com/therealevanhenry/riperf3) 引擎执行——该引擎直接实现 iperf3 线协议，无需安装、捆绑或启动任何 iperf3 可执行文件；仅 Ping 仍调用系统命令。
+一款基于 Rust、Tauri 2、Vue 3 和 TypeScript 开发的桌面网络性能测试工具。软件为 Ping、TCP 和 UDP 测试提供工程化图形流程，TCP/UDP 测试由纯 Rust、进程内运行的 [riperf3](https://github.com/therealevanhenry/riperf3) 引擎执行——该引擎直接实现 iperf3 线协议，无需安装、捆绑或启动任何 iperf3 可执行文件；仅 Ping 仍调用系统命令。内置 SSH 控制台（同样是纯 Rust、进程内实现）可直接启停远端主机上的对端 iperf3 服务端，无需切出应用。
 
 > 当前发布状态：Windows x64 已支持生成 NSIS 安装包。Linux 支持从源码构建。安装包内不包含任何第三方网络测试二进制。
 
@@ -14,7 +14,7 @@
 | --- | --- |
 | ![Client UI (English)](doc/screenshot-client-EN.png) | ![客户端界面（中文）](doc/screenshot-client-CN.png) |
 
-**服务端视图** — 左侧为监听配置，中间为服务端概览（监听地址、对端客户端、运行时长、累计完成测试）与服务端观测的带宽曲线，右侧为服务端日志。
+**服务端视图** — 左侧为监听配置与 SSH 连接设置，中间为服务端概览（监听地址、对端客户端、运行时长、累计完成测试）与服务端观测的带宽曲线（可切换到 SSH 远程控制台），右侧为服务端日志。
 
 | English | 简体中文 |
 | --- | --- |
@@ -63,6 +63,7 @@ flowchart LR
     end
     UI -->|Tauri invoke| API[Tauri 命令]
     API --> RUNNER[Rust 异步任务执行器]
+    API --> SSH["SSH 会话（russh，进程内）"]
     RUNNER --> PING[系统 Ping]
     RUNNER --> ENGINE[riperf3 进程内引擎]
     PING --> NETWORK[(网络对端)]
@@ -70,6 +71,10 @@ flowchart LR
     ENGINE -->|on_interval 回调| RUNNER
     RUNNER -->|"test-event 广播（指标 / 日志 / 服务端状态）"| UI
     RUNNER --> LOGS[测试日志文件]
+    SSH -->|"PTY shell（启停对端 iperf3 服务端）"| REMOTE[(远端主机)]
+    REMOTE -->|shell 输出| SSH
+    SSH -->|"ssh-event 广播（控制台输出 / 会话状态）"| UI
+    REMOTE -.->|"通常即被测对端"| NETWORK
     UI --> REPORT[报告命令]
     REPORT --> OUTPUT[HTML / PDF 报告]
 ```
@@ -79,7 +84,8 @@ flowchart LR
 - **前端：** Vue 组件负责参数配置、数据面板、任务队列、日志、曲线、弹窗和报告概览。`src/App.vue` 负责任务编排和参数持久化。
 - **多窗口：** 客户端与服务端为可拖拽分离的标签页，分离成独立窗口后支持双屏 / 分屏观察。窗口间通过 `side-sync` 事件同步参数与运行状态，后端 `test-event` 广播到所有窗口；服务端窗口展示服务端自身独立的概览、实时曲线与日志，与客户端数据互不影响。
 - **后端：** Rust 负责校验请求、驱动进程内 riperf3 引擎、通过 `on_interval` 回调逐秒推送指标、发送事件、保存日志和生成报告。
-- **进程通信：** 前端仅调用有限的 Tauri 命令，并接收 `test-event` 更新。测试执行与结果聚合完全保留在 Rust 侧。
+- **进程通信：** 前端仅调用有限的 Tauri 命令，并接收 `test-event`（以及 `ssh-event`）更新。测试执行与结果聚合完全保留在 Rust 侧。
+- **远程操控：** 服务端视图可对对端主机建立 SSH 会话，在应用内的控制台里直接操作其 iperf3 服务端。会话、PTY shell 与输出解码都在 Rust 侧（[`russh`](https://github.com/warp-tech/russh)，同样是纯 Rust、进程内实现），前端只负责渲染文本流与发送按键。
 - **引擎：** [riperf3](https://github.com/therealevanhenry/riperf3) 是从零实现的、与 iperf3 线协议兼容的 Rust 实现，vendor 在 `vendor/riperf3` 下并带有一个小补丁（实时 `on_interval` 回调），详见[测试引擎](#测试引擎-riperf3)。引擎在应用进程内运行，无需解析、启动或管理外部二进制，逐秒指标通过类型化回调到达，不再解析文本输出。
 
 ### 后端命令
@@ -146,6 +152,7 @@ flowchart LR
 | 系统信息 | hostname、local-ip-address、mac_address | 本机网络标识 |
 | 工具库 | chrono、uuid | 时间戳、文件名和会话 ID |
 | 测试引擎 | riperf3（vendor，纯 Rust） | TCP/UDP 网络性能测量 |
+| SSH 客户端 | russh（纯 Rust，ring 后端） | 远程控制台，用于操作对端 iperf3 服务端 |
 
 JavaScript 和 Rust 依赖的确切约束分别记录在 `package-lock.json` 和 `src-tauri/Cargo.lock`。
 
@@ -268,6 +275,17 @@ Linux 产物应在计划支持的最旧基础发行版上构建，以避免引�
 5. 必要时停止测试。中途失败的测试项目可在日志和报告中查看原因。
 6. 一个或多个项目完成后，可生成 HTML 或 PDF 报告。
 
+### 通过 SSH 操作对端服务端
+
+当 iperf3 服务端跑在另一台机器上时，不必再单独开一个终端：
+
+1. 切到「服务端」标签，填写「SSH 远程连接」表单——主机、端口、用户名，以及密码或 OpenSSH 私钥（私钥带口令则一并填写）。
+2. 点击「连接」。中间栏会自动切到「SSH 控制台」标签；首次连接该主机时会打印主机密钥指纹供你核对。
+3. 使用快捷命令——「启动 iperf3」（`iperf3 -s -p <端口> -i <间隔>`）、「后台启动」（`-D`）、「查看进程」、「查看端口」、「停止全部」、「版本」——也可直接输入任意命令。`^C` 用于中断远端前台运行的命令。
+4. 随时可切回「服务端概览」，控制台会话继续运行，已有输出不会丢失。
+
+快捷命令按同一页面配置的监听端口与日志间隔拼接，因此远端服务端与客户端标签页的端口天然一致。控制台不是完整的终端模拟器：它按 `\r` / `\b` / `\t` 的光标语义渲染文本（足以正确显示 `iperf3` 的逐秒统计与 shell 回显）并剔除 ANSI 转义序列，因此 `top` 这类全屏 curses 程序无法正常显示。
+
 ### 双窗口分屏
 
 - 启动后客户端与服务端为两个标签页；**拖拽标签页**（拖出约 100px 后松开）即可将对应一侧分离为独立窗口，方便放到第二块屏幕或分屏各占一半。
@@ -285,6 +303,7 @@ Linux 产物应在计划支持的最旧基础发行版上构建，以避免引�
 - 测试日志保存在 Tauri 对应操作系统的应用日志目录下的 `tests/`。
 - 报告保存在 Tauri 对应操作系统的应用数据目录下的 `reports/`。
 - 自定义报文长度持久化到 Tauri 应用配置目录下的 `settings.json`。
+- SSH 连接参数（主机、端口、用户名、认证方式、私钥路径）与其他设置一同持久化；登录密码与私钥口令**不保存**——与 iperf3 认证密码一样只存在于内存，不写入导出的配置，重启后需重新输入。
 
 日志文件名格式（服务端与客户端分开记录）：
 
@@ -349,12 +368,15 @@ iperf3 服务端一次只服务一个测试。队列中相邻测试项之间，�
 | Linux 应用无法启动 | 检查 WebKitGTK 4.1 和发行版运行依赖 |
 | Windows 构建无法替换 EXE | 关闭正在运行的 `linkgauge.exe` 后重新构建 |
 | SmartScreen 告警 | 使用可信代码签名证书签署正式安装包 |
+| 对端重装系统后 SSH 拒绝连接 | 主机密钥与 `known_hosts` 记录不符；确认变更符合预期后，删除该主机的旧记录 |
+| SSH 私钥被拒绝 | 私钥带口令时需填写口令。OpenSSH、PKCS#1 / PKCS#8 PEM 与 PuTTY `.ppk` 格式均可识别 |
+| 远端提示找不到 `iperf3` | 快捷命令依赖登录 shell 的 `PATH`；请在对端安装 iperf3，或在控制台里输入完整路径 |
 
 ## TODO
 
 ### 待办事项
 
-- [ ] SSH 支持（通过 SSH 在远程主机启动/部署对端服务端）
+- [x] SSH 支持（通过 SSH 操作远程主机上的对端 iperf3 服务端）
 - [ ] 对正式安装包进行代码签名，消除 Windows SmartScreen 告警
 - [ ] 在受支持的最旧基础发行版上验证 Linux AppImage / DEB 的构建与运行
 - [ ] 补充项目级 LICENSE 文件及包元数据
