@@ -778,7 +778,11 @@ pub fn set_fq_rate(fd: &impl std::os::unix::io::AsFd, rate_bits_per_sec: u64) ->
         .map_err(|e| RiperfError::Io(std::io::Error::from(e)))
 }
 
+// (local LinkGauge patch) `allow(dead_code)` on the non-Linux stub: only the
+// Linux implementation above is ever called, so this arm is dead on every
+// other target and warns on an otherwise clean Windows build.
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub fn set_fq_rate<F>(_fd: &F, _rate: u64) -> Result<()> {
     Ok(())
 }

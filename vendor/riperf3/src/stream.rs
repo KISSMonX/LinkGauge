@@ -137,6 +137,10 @@ impl StreamCounters {
 
     /// Store the end-of-test retransmit total (#156; sender task only, while
     /// the socket is still open).
+    ///
+    /// (local LinkGauge patch) `allow(dead_code)`: `snapshot_final_retransmits`
+    /// only calls this on unix, so it is dead on Windows and warns there.
+    #[allow(dead_code)]
     pub fn set_final_retransmits(&self, n: i64) {
         self.final_retransmits.store(n, Ordering::Relaxed);
     }
@@ -151,6 +155,10 @@ impl StreamCounters {
     /// dropped). `OnceLock` encodes the documented set-once contract in the
     /// type (#292); a second call — which no path makes — would be ignored
     /// rather than overwrite.
+    ///
+    /// (local LinkGauge patch) `allow(dead_code)`: `snapshot_final_retransmits`
+    /// only calls this on unix, so it is dead on Windows and warns there.
+    #[allow(dead_code)]
     pub fn set_final_tcp_sample(&self, info: crate::tcp_info::TcpInfoSnapshot) {
         let _ = self.final_tcp_sample.set(info);
     }
