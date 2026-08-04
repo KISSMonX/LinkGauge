@@ -479,13 +479,17 @@ mod tests {
 
     /// 启动内嵌测试服务端，返回其监听端口
     async fn start_test_server() -> u16 {
-        let key = russh::keys::PrivateKey::random(&mut TestRng(0x5eed), russh::keys::Algorithm::Ed25519).unwrap();
+        let key =
+            russh::keys::PrivateKey::random(&mut TestRng(0x5eed), russh::keys::Algorithm::Ed25519)
+                .unwrap();
         let config = Arc::new(server::Config {
             auth_rejection_time: Duration::from_millis(50),
             keys: vec![key],
             ..Default::default()
         });
-        let socket = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let socket = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = socket.local_addr().unwrap().port();
         tokio::spawn(async move {
             let mut server = TestServer;
@@ -532,12 +536,22 @@ mod tests {
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             locale,
         ));
-        Harness { events, scrollback, input, task }
+        Harness {
+            events,
+            scrollback,
+            input,
+            task,
+        }
     }
 
     impl Harness {
         fn types(&self) -> Vec<String> {
-            self.events.lock().unwrap().iter().map(|e| e.event_type.clone()).collect()
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|e| e.event_type.clone())
+                .collect()
         }
         fn console(&self) -> String {
             self.scrollback.lock().unwrap().text.clone()
@@ -549,7 +563,11 @@ mod tests {
                     sleep(Duration::from_millis(20)).await;
                 }
             });
-            assert!(deadline.await.is_ok(), "未等到控制台输出 {needle:?}，当前内容：{:?}", self.console());
+            assert!(
+                deadline.await.is_ok(),
+                "未等到控制台输出 {needle:?}，当前内容：{:?}",
+                self.console()
+            );
         }
     }
 
@@ -564,7 +582,10 @@ mod tests {
         assert!(harness.types().iter().any(|t| t == "status"));
 
         // 在控制台里执行一条命令，远端响应实时回传
-        harness.input.send(SshInput::Data(b"iperf3 --version\n".to_vec())).unwrap();
+        harness
+            .input
+            .send(SshInput::Data(b"iperf3 --version\n".to_vec()))
+            .unwrap();
         harness.wait_for("iperf3 3.16").await;
         assert!(harness.console().contains("iperf3 --version"));
 
@@ -573,14 +594,31 @@ mod tests {
         harness.wait_for("^C").await;
 
         // 数据块的偏移量连续递增，前端据此与回放缓冲去重
-        let offsets: Vec<u64> = harness.events.lock().unwrap().iter().filter_map(|e| e.offset).collect();
-        assert!(offsets.windows(2).all(|w| w[0] < w[1]), "offsets: {offsets:?}");
+        let offsets: Vec<u64> = harness
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.offset)
+            .collect();
+        assert!(
+            offsets.windows(2).all(|w| w[0] < w[1]),
+            "offsets: {offsets:?}"
+        );
 
         // 主动断开：会话正常收尾并发出 closed 事件
         harness.input.send(SshInput::Close).unwrap();
         let Harness { task, events, .. } = harness;
-        timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
-        let types: Vec<String> = events.lock().unwrap().iter().map(|e| e.event_type.clone()).collect();
+        timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let types: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.event_type.clone())
+            .collect();
         assert_eq!(types.last().map(String::as_str), Some("closed"));
     }
 
@@ -588,13 +626,19 @@ mod tests {
     async fn reports_authentication_failure() {
         let port = start_test_server().await;
         let Harness { task, events, .. } = spawn_session(request(port, "wrong-password"));
-        timeout(Duration::from_secs(15), task).await.unwrap().unwrap();
+        timeout(Duration::from_secs(15), task)
+            .await
+            .unwrap()
+            .unwrap();
 
         let events = events.lock().unwrap();
         let last = events.last().expect("应至少产生一个事件");
         assert_eq!(last.event_type, "error");
         assert!(
-            last.message.as_deref().unwrap_or_default().contains("authentication failed"),
+            last.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("authentication failed"),
             "unexpected message: {:?}",
             last.message
         );
@@ -639,8 +683,19 @@ fn emit_log(sink: &Sink, session_id: &str, level: &str, message: String) {
 
 /// 会话结束（closed / error）
 fn emit_end(sink: &Sink, session_id: &str, event_type: &str, message: String) {
-    let level = if event_type == "error" { "ERROR" } else { "INFO" };
-    emit(sink, session_id, event_type, Some(level), Some(message), None);
+    let level = if event_type == "error" {
+        "ERROR"
+    } else {
+        "INFO"
+    };
+    emit(
+        sink,
+        session_id,
+        event_type,
+        Some(level),
+        Some(message),
+        None,
+    );
 }
 
 #[tauri::command]
@@ -655,14 +710,24 @@ pub async fn ssh_connect(
         return Err(tr(&locale, "请输入 SSH 主机地址", "Enter the SSH host").into());
     }
     if request.port == 0 {
-        return Err(tr(&locale, "SSH 端口应在 1–65535 之间", "SSH port must be between 1 and 65535").into());
+        return Err(tr(
+            &locale,
+            "SSH 端口应在 1–65535 之间",
+            "SSH port must be between 1 and 65535",
+        )
+        .into());
     }
     if request.username.trim().is_empty() {
         return Err(tr(&locale, "请输入 SSH 用户名", "Enter the SSH username").into());
     }
     if request.auth_method == "key" {
         if request.private_key_path.trim().is_empty() {
-            return Err(tr(&locale, "请选择用于登录的私钥文件", "Select the private key file to log in with").into());
+            return Err(tr(
+                &locale,
+                "请选择用于登录的私钥文件",
+                "Select the private key file to log in with",
+            )
+            .into());
         }
     } else if request.password.is_empty() {
         return Err(tr(&locale, "请输入 SSH 登录密码", "Enter the SSH password").into());
@@ -748,7 +813,11 @@ pub async fn ssh_scrollback(
     })
 }
 
-async fn send(state: &State<'_, SshState>, session_id: &str, input: SshInput) -> Result<(), String> {
+async fn send(
+    state: &State<'_, SshState>,
+    session_id: &str,
+    input: SshInput,
+) -> Result<(), String> {
     let map = state.sessions.lock().await;
     let session = map
         .get(session_id)
@@ -828,7 +897,12 @@ async fn run_session(
                     "The host key does not match the record in known_hosts; the connection was refused (possible man-in-the-middle attack, or the host was reinstalled)"
                 )
             } else {
-                tr_format!(locale, "SSH 连接失败：{}", "SSH connection failed: {}", error)
+                tr_format!(
+                    locale,
+                    "SSH 连接失败：{}",
+                    "SSH connection failed: {}",
+                    error
+                )
             };
             emit_end(&sink, &session_id, "error", message);
             return;
@@ -924,7 +998,19 @@ async fn run_session(
                     locale,
                     "SSH 认证失败，请检查用户名与{}",
                     "SSH authentication failed — check the username and {}",
-                    tr(&locale, if request.auth_method == "key" { "私钥" } else { "密码" }, if request.auth_method == "key" { "private key" } else { "password" })
+                    tr(
+                        &locale,
+                        if request.auth_method == "key" {
+                            "私钥"
+                        } else {
+                            "密码"
+                        },
+                        if request.auth_method == "key" {
+                            "private key"
+                        } else {
+                            "password"
+                        }
+                    )
                 ),
             );
             return;
@@ -934,7 +1020,12 @@ async fn run_session(
                 &sink,
                 &session_id,
                 "error",
-                tr_format!(locale, "SSH 认证出错：{}", "SSH authentication error: {}", error),
+                tr_format!(
+                    locale,
+                    "SSH 认证出错：{}",
+                    "SSH authentication error: {}",
+                    error
+                ),
             );
             return;
         }
@@ -948,7 +1039,12 @@ async fn run_session(
                 &sink,
                 &session_id,
                 "error",
-                tr_format!(locale, "打开 SSH 通道失败：{}", "Failed to open the SSH channel: {}", error),
+                tr_format!(
+                    locale,
+                    "打开 SSH 通道失败：{}",
+                    "Failed to open the SSH channel: {}",
+                    error
+                ),
             );
             return;
         }
@@ -963,7 +1059,12 @@ async fn run_session(
             &sink,
             &session_id,
             "error",
-            tr_format!(locale, "申请远端终端失败：{}", "Failed to request a remote terminal: {}", error),
+            tr_format!(
+                locale,
+                "申请远端终端失败：{}",
+                "Failed to request a remote terminal: {}",
+                error
+            ),
         );
         return;
     }
@@ -972,7 +1073,12 @@ async fn run_session(
             &sink,
             &session_id,
             "error",
-            tr_format!(locale, "启动远端 shell 失败：{}", "Failed to start the remote shell: {}", error),
+            tr_format!(
+                locale,
+                "启动远端 shell 失败：{}",
+                "Failed to start the remote shell: {}",
+                error
+            ),
         );
         return;
     }
