@@ -49,7 +49,11 @@ const activeTab = ref<'client' | 'server'>('client')
 const queue = ref<string[]>([])
 const queueIndex = ref(-1)
 const progress = ref(0)
-const elapsed = ref(0)
+/** 本轮测试开始时间戳（ms）：各窗口据此推算一致的已用时，随 side-sync 同步 */
+const startedAt = ref(0)
+/** 计时器心跳：每秒递增触发已用时重算（真正的计时来源是 startedAt） */
+const nowTick = ref(0)
+const elapsed = computed(() => { void nowTick.value; return startedAt.value ? Math.floor((Date.now() - startedAt.value) / 1000) : 0 })
 const connected = ref(false)
 /** 本次连接的客户端本地端口（控制连接建立时由后端广播） */
 const clientLocalPort = ref(0)
@@ -113,6 +117,8 @@ watch(points, (value) => {
   summary.minBandwidth = valid.length ? Math.min(...valid.map((p) => p.bandwidthMbps)) : 0
   summary.totalTransferMb = value.reduce((a, b) => a + b.transferMb, 0)
   const last = value.at(-1); if (last) { summary.lossPercent = last.lossPercent; summary.jitterMs = last.jitterMs }
+  // 实时曲线变化即时同步（整数组替换，各窗口内容一致），拖出的窗口持续跟上最新数据
+  emitSync()
 }, { deep: true })
 
 watch(() => config.value.serverIp, (value) => { if (value && value !== local.value.ip) autoServerIp.value = false })
@@ -140,6 +146,22 @@ function syncBundle(): SyncState {
     summary: { ...summary },
     locale: locale.value,
     theme: theme.value,
+    // 运行中的瞬时数据：拖出标签的新窗口据此恢复完整界面
+    points: points.value,
+    completedPoints: completedPoints.value,
+    completedLabel: completedLabel.value,
+    progress: progress.value,
+    startedAt: startedAt.value,
+    connected: connected.value,
+    clientLocalPort: clientLocalPort.value,
+    // 只同步引擎日志：各窗口自己的 UI 日志（module=UI）本地保留，不跨窗口传播
+    logs: logs.value.filter((l) => l.module !== 'UI'),
+    serverUptime: serverUptime.value,
+    serverCompleted: serverCompleted.value,
+    serverServing: serverServing.value,
+    serverPoints: serverPoints.value,
+    serverPeerIp: serverPeerIp.value,
+    serverPeerPort: serverPeerPort.value,
   }
 }
 function emitSync() {
@@ -162,6 +184,22 @@ async function applySync(payload: SyncState) {
   savedTcpLength.value = payload.savedTcpLength
   savedUdpLength.value = payload.savedUdpLength
   Object.assign(summary, payload.summary)
+  // 运行中的瞬时数据整体替换（引擎日志来自同一批事件，替换后内容一致，不会重复累加）；
+  // 本窗口自己的 UI 日志保留在队首，与远端引擎日志合并
+  points.value = payload.points
+  completedPoints.value = payload.completedPoints
+  completedLabel.value = payload.completedLabel
+  progress.value = payload.progress
+  startedAt.value = payload.startedAt
+  connected.value = payload.connected
+  clientLocalPort.value = payload.clientLocalPort
+  logs.value = [...logs.value.filter((l) => l.module === 'UI'), ...payload.logs]
+  serverUptime.value = payload.serverUptime
+  serverCompleted.value = payload.serverCompleted
+  serverServing.value = payload.serverServing
+  serverPoints.value = payload.serverPoints
+  serverPeerIp.value = payload.serverPeerIp
+  serverPeerPort.value = payload.serverPeerPort
   // 语言与主题跟随主窗口设置（持久化 + 应用到 DOM）
   setLocale(payload.locale)
   setTheme(payload.theme)
@@ -169,9 +207,9 @@ async function applySync(payload: SyncState) {
   await nextTick()
   syncing = false
 }
-/** 运行状态/会话等变化即时同步；计时器只在运行期间走动 */
+/** 运行状态/会话等变化即时同步；计时器只在运行期间走动（已用时由 startedAt 推算，ticker 只负责触发重算） */
 watch(clientRunning, (running) => {
-  if (running) { elapsed.value = 0; if (ticker === undefined) ticker = window.setInterval(() => { elapsed.value += 1 }, 1000) }
+  if (running) { if (ticker === undefined) ticker = window.setInterval(() => { nowTick.value += 1 }, 1000) }
   else if (ticker !== undefined) { clearInterval(ticker); ticker = undefined }
   if (!syncing) emitSync()
 })
@@ -188,6 +226,20 @@ watch(savedUdpLength, () => emitSync())
 watch(summary, () => emitSync(), { deep: true })
 watch(locale, () => emitSync())
 watch(theme, () => emitSync())
+// —— 运行中的瞬时数据：任何变化即时广播，所有窗口保持同一份数据 ——
+watch(completedPoints, () => emitSync())
+watch(completedLabel, () => emitSync())
+watch(progress, () => emitSync())
+watch(startedAt, () => emitSync())
+watch(connected, () => emitSync())
+watch(clientLocalPort, () => emitSync())
+watch(logs, () => emitSync(), { deep: true })
+watch(serverUptime, () => emitSync())
+watch(serverCompleted, () => emitSync())
+watch(serverServing, () => emitSync())
+watch(serverPoints, () => emitSync(), { deep: true })
+watch(serverPeerIp, () => emitSync())
+watch(serverPeerPort, () => emitSync())
 
 // —— 标签页分离 / 收回 ——
 /** 主窗口：标签被拖拽分离 → 创建独立窗口并从停靠列表移除 */
@@ -282,7 +334,7 @@ async function start() {
   const selected = items.value.filter((i) => i.enabled)
   if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg') }; return }
   items.value.forEach((i) => { if (i.enabled) i.status = 'waiting' })
-  points.value = []; progress.value = 0; elapsed.value = 0; connected.value = false
+  points.value = []; progress.value = 0; connected.value = false; startedAt.value = Date.now()
   summary.startedAt = new Date().toLocaleString('zh-CN', { hour12: false }); summary.completed = 0; summary.total = selected.length; summary.logPaths = []
   queue.value = selected.map((i) => i.id); queueIndex.value = -1; clientRunning.value = true
   // 本窗口成为队列驱动者：只有它会在任务结束后启动下一项

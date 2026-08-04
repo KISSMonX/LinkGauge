@@ -113,6 +113,28 @@ export interface SyncState {
   locale: 'zh' | 'en'
   /** 主题外观（默认亮色） */
   theme: 'light' | 'dark'
+  // —— 测试运行中的瞬时数据（测试进行中拖出标签时，新窗口据此恢复完整界面）——
+  /** 客户端实时曲线（各窗口从同一批事件维护同一份数据，整数组替换防止重复） */
+  points: MetricPoint[]
+  /** 最近一次已完成测试的图表数据缓存 */
+  completedPoints: MetricPoint[]
+  completedLabel: string
+  /** 客户端任务队列总体进度（0-100，仅驱动窗口修改） */
+  progress: number
+  /** 本轮测试开始时间戳（ms），各窗口据此推算已用时，避免逐秒同步 elapsed */
+  startedAt: number
+  connected: boolean
+  /** 本次连接的客户端本地端口（控制连接建立时由后端广播） */
+  clientLocalPort: number
+  /** 引擎日志（不含各窗口自己的 UI 日志；UI 日志本地保留，避免跨窗口污染） */
+  logs: LogEntry[]
+  // 服务端独立概览与曲线（心跳事件携带绝对值，各窗口维护同一份）
+  serverUptime: number
+  serverCompleted: number
+  serverServing: boolean
+  serverPoints: MetricPoint[]
+  serverPeerIp: string
+  serverPeerPort: number
 }
 
 /** 子窗口关闭（或点击「停靠回主窗口」）时通知主窗口把标签收回 */
