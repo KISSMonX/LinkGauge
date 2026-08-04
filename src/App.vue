@@ -13,7 +13,7 @@ import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
 import { useI18n, type Locale, type MessageKey } from './i18n'
 import { theme, setTheme, type Theme } from './theme'
-import type { BackendEvent, DockEvent, InterfaceInfo, LogEntry, MetricPoint, NetworkInfo, ServerConfig, SyncState, TestConfig, TestItem, TestSummary } from './types'
+import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, ServerConfig, SyncState, TestConfig, TestItem, TestSummary } from './types'
 
 const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
@@ -38,9 +38,20 @@ const points = ref<MetricPoint[]>([])
 /** 最近一次已完成测试的完整数据缓存（仅内存，退出后销毁），完成后图表显示它 */
 const completedPoints = ref<MetricPoint[]>([])
 const completedLabel = ref('')
-/** 图表显示数据：测试进行中显示实时数据，否则显示最近一次完整测试的数据 */
-const chartPoints = computed(() => (current.value ? points.value : completedPoints.value))
+/** 各测试项目完成后的历史数据缓存（仅内存，退出应用即销毁），key = 项目 id；
+ *  测试结束后点击队列中的项目，图表切换显示对应缓存的数据与曲线 */
+const itemHistory = ref<Record<string, ItemHistory>>({})
+/** 当前查看的历史项目 id（'' = 未选择，显示最近一次完成项） */
+const selectedHistoryId = ref('')
+/** 图表显示数据：测试进行中显示实时数据，否则显示所选历史项目（未选择时为最近一次完整测试）的数据 */
+const chartPoints = computed(() => {
+  if (current.value) return points.value
+  const selected = selectedHistoryId.value ? itemHistory.value[selectedHistoryId.value] : undefined
+  return selected ? selected.points : completedPoints.value
+})
 const chartLive = computed(() => !!current.value)
+/** 图表标题的项目名：查看历史时用所选项目名，否则用最近一次完成项 */
+const historyLabel = computed(() => selectedHistoryId.value ? itemLabel(selectedHistoryId.value) : completedLabel.value)
 const clientRunning = ref(false)
 const serverRunning = ref(false)
 const clientSession = ref('')
@@ -113,6 +124,25 @@ const current = computed(() => items.value.find((i) => i.status === 'running'))
 const summary = reactive<TestSummary>({ startedAt: '', completed: 0, total: 0, averageBandwidth: 0, maxBandwidth: 0, minBandwidth: 0, totalTransferMb: 0, pingAverage: 0, lossPercent: 0, jitterMs: 0, logPaths: [] })
 const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false })
 const log = (level: LogEntry['level'], message: string, module = 'UI') => logs.value.push({ time: now(), level, module, message })
+/** 图表旁指标区显示的汇总：查看某项目历史时按该项目数据推导（与实时 watch 同一套公式），否则用整体汇总 */
+const viewSummary = computed<TestSummary>(() => {
+  if (current.value || !selectedHistoryId.value) return summary
+  const cached = itemHistory.value[selectedHistoryId.value]
+  if (!cached) return summary
+  const pts = cached.points
+  const valid = pts.filter((p) => p.bandwidthMbps > 0)
+  const last = pts.at(-1)
+  return {
+    ...summary,
+    averageBandwidth: valid.length ? valid.reduce((a, b) => a + b.bandwidthMbps, 0) / valid.length : 0,
+    maxBandwidth: valid.length ? Math.max(...valid.map((p) => p.bandwidthMbps)) : 0,
+    minBandwidth: valid.length ? Math.min(...valid.map((p) => p.bandwidthMbps)) : 0,
+    totalTransferMb: pts.reduce((a, b) => a + b.transferMb, 0),
+    pingAverage: last?.jitterMs ?? 0,
+    lossPercent: last?.lossPercent ?? 0,
+    jitterMs: last?.jitterMs ?? 0,
+  }
+})
 
 watch(points, (value) => {
   const valid = value.filter((p) => p.bandwidthMbps > 0)
@@ -154,6 +184,8 @@ function syncBundle(): SyncState {
     points: points.value,
     completedPoints: completedPoints.value,
     completedLabel: completedLabel.value,
+    itemHistory: itemHistory.value,
+    selectedHistoryId: selectedHistoryId.value,
     progress: progress.value,
     startedAt: startedAt.value,
     connected: connected.value,
@@ -195,6 +227,8 @@ async function applySync(payload: SyncState) {
   points.value = payload.points
   completedPoints.value = payload.completedPoints
   completedLabel.value = payload.completedLabel
+  itemHistory.value = payload.itemHistory
+  selectedHistoryId.value = payload.selectedHistoryId
   progress.value = payload.progress
   startedAt.value = payload.startedAt
   connected.value = payload.connected
@@ -235,6 +269,8 @@ watch(theme, () => emitSync())
 // —— 运行中的瞬时数据：任何变化即时广播，所有窗口保持同一份数据 ——
 watch(completedPoints, () => emitSync())
 watch(completedLabel, () => emitSync())
+watch(itemHistory, () => emitSync(), { deep: true })
+watch(selectedHistoryId, () => emitSync())
 watch(progress, () => emitSync())
 watch(startedAt, () => emitSync())
 watch(connected, () => emitSync())
@@ -341,6 +377,7 @@ async function start() {
   if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg') }; return }
   items.value.forEach((i) => { if (i.enabled) i.status = 'waiting' })
   points.value = []; progress.value = 0; connected.value = false; startedAt.value = Date.now()
+  selectedHistoryId.value = '' // 新一轮测试开始：图表回到实时模式
   summary.startedAt = new Date().toLocaleString('zh-CN', { hour12: false }); summary.completed = 0; summary.total = selected.length; summary.logPaths = []
   queue.value = selected.map((i) => i.id); queueIndex.value = -1; clientRunning.value = true
   // 本窗口成为队列驱动者：只有它会在任务结束后启动下一项
@@ -474,11 +511,18 @@ function handleEvent(event: BackendEvent) {
   if (event.type === 'error') failCurrent(event.message || t('err.execFailed'))
 }
 
+/** 把当前实时数据按项目 id 快照进历史缓存（仅内存，退出应用即销毁）；
+ *  测试结束后点击队列中的项目即展示此缓存 */
+function snapshotItem(id: string, status: TestItem['status']) {
+  itemHistory.value = { ...itemHistory.value, [id]: { status, points: [...points.value] } }
+}
+
 function completeCurrent(status: TestItem['status']) {
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = status
   if (status === 'success') summary.completed++
   // 快照本次测试的完整数据到内存缓存（测试完成后图表显示；退出应用即销毁）
   completedPoints.value = [...points.value]
+  snapshotItem(queue.value[queueIndex.value], status)
   if (item) completedLabel.value = itemLabel(item.id)
   progress.value = Math.round(((queueIndex.value + 1) / queue.value.length) * 100)
   if (status === 'failed') { failCurrent(t('log.processExited')); return }
@@ -489,13 +533,14 @@ function completeCurrent(status: TestItem['status']) {
 function failCurrent(message: string) {
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = 'failed'
   completedPoints.value = [...points.value]
+  snapshotItem(queue.value[queueIndex.value], 'failed')
   if (item) completedLabel.value = itemLabel(item.id)
   log('ERROR', message); finishRun(false)
   const lastLog = summary.logPaths.at(-1)
   errorDialog.value = { title: t('err.alert'), message: lastLog ? `${message}\n\n${t('err.logFile', { path: lastLog })}` : message }
 }
 function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100 } log('INFO', t('log.finish')) }
-async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; finishRun(false) }
+async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); if (item) snapshotItem(item.id, 'stopped'); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; finishRun(false) }
 
 const reportStamp = () => {
   const n = new Date()
@@ -513,7 +558,11 @@ async function generateReport(format: 'html' | 'pdf' = 'html') {
       filters: [{ name: format.toUpperCase(), extensions: [format] }]
     })
     if (!path) return // 用户取消
-    const saved = await invoke<string>('generate_report', { request: { format, savePath: path, locale: locale.value, config: config.value, summary: { ...summary }, points: chartPoints.value, logs: logs.value } })
+    // 报告按测试项目分组：包含全部有历史缓存的项目（固定顺序），每项输出数据曲线与数据表
+    const reportItems = items.value
+      .filter((i) => itemHistory.value[i.id])
+      .map((i) => ({ label: itemLabel(i.id), status: itemHistory.value[i.id].status, points: itemHistory.value[i.id].points }))
+    const saved = await invoke<string>('generate_report', { request: { format, savePath: path, locale: locale.value, config: config.value, summary: { ...summary }, points: chartPoints.value, items: reportItems, logs: logs.value } })
     infoDialog.value = { title: t('report.generated'), message: saved }
   } catch (error) { errorDialog.value = { title: t('err.reportFailed'), message: String(error) } }
 }
@@ -650,11 +699,11 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unliste
         </div>
       </div>
       <!-- 客户端视角：概览 + 实时曲线（主窗口客户端标签 / 客户端分离窗口） -->
-      <Dashboard v-if="!showServerView" :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="summary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="completedLabel" :local-port="clientLocalPort" />
+      <Dashboard v-if="!showServerView" :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="viewSummary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="historyLabel" :local-port="clientLocalPort" />
       <!-- 服务端视角：服务端自身概览 + 服务端观测的实时曲线（与客户端数据独立），对端为客户端 -->
       <ServerDashboard v-else :bind-target="serverConfig.bindIp.trim() || t('sdash.allAdapters')" :port="serverConfig.port" :running="serverRunning" :uptime="serverUptime" :completed="serverCompleted" :serving="serverServing" :points="serverPoints" :peer-ip="serverPeerIp" :peer-port="serverPeerPort" />
       <!-- 客户端/服务端视角各自只显示自己的日志（引擎日志 + 本窗口 UI 日志） -->
-      <StatusPanel :mode="showServerView ? 'logs' : 'full'" :items="items" :logs="showServerView ? serverLogs : clientLogs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
+      <StatusPanel :mode="showServerView ? 'logs' : 'full'" :items="items" :logs="showServerView ? serverLogs : clientLogs" :server-running="serverRunning" :history="itemHistory" :history-selected="selectedHistoryId" :running="clientRunning" @select="selectedHistoryId = $event" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
     </div>
     <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
     <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><button v-if="!errorDialog" @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>

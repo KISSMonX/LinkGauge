@@ -262,6 +262,7 @@ const zh = {
   'st.clear': '清空',
   'st.report': '生成报告',
   'st.reportHint': '已完成项目可生成阶段性报告；中途停止也会生成已完成测试报告。',
+  'st.viewHistory': '点击查看该测试项的历史曲线',
 
   // 报告概览
   'rep.title': '测试报告概览',
@@ -521,6 +522,7 @@ const en: Record<MessageKey, string> = {
   'st.clear': 'Clear',
   'st.report': 'Generate Report',
   'st.reportHint': 'Generate a progress report from completed items; stopping mid-run also produces a report of the completed tests.',
+  'st.viewHistory': "Click to view this item's history",
 
   'rep.title': 'Report Summary',
   'rep.time': 'Started',

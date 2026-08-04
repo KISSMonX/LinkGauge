@@ -1379,6 +1379,8 @@ mod tests {
             protocol: protocol.into(),
             server_ip: "192.168.1.100".into(),
             local_ip: "192.168.1.50".into(),
+            bind_ip: String::new(),
+            locale: String::new(),
             port: 5201,
             duration: 10,
             parallel: 4,

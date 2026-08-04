@@ -90,6 +90,12 @@ export interface TestSummary {
   logPaths: string[]
 }
 
+/** 单个测试项目完成后的历史数据缓存（仅内存，退出应用即销毁），key 为测试项目 id */
+export interface ItemHistory {
+  status: TestItem['status']
+  points: MetricPoint[]
+}
+
 /** 多窗口（主窗口 + 分离的客户端/服务端窗口）间同步的完整状态包 */
 export interface SyncState {
   config: TestConfig
@@ -119,6 +125,10 @@ export interface SyncState {
   /** 最近一次已完成测试的图表数据缓存 */
   completedPoints: MetricPoint[]
   completedLabel: string
+  /** 各测试项目的历史数据缓存（key = 项目 id；查看历史曲线时展示） */
+  itemHistory: Record<string, ItemHistory>
+  /** 当前查看的历史项目 id（'' = 未选择，显示最近一次完成项） */
+  selectedHistoryId: string
   /** 客户端任务队列总体进度（0-100，仅驱动窗口修改） */
   progress: number
   /** 本轮测试开始时间戳（ms），各窗口据此推算已用时，避免逐秒同步 elapsed */

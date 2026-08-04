@@ -79,6 +79,17 @@ pub struct InterfaceInfo {
     pub speed_mbps: u64,
 }
 
+/// 单个测试项目的历史数据（报告按测试项目分组输出：数据表 + 曲线）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportItem {
+    /// 测试项目名称（前端按界面语言传入，报告直接展示）
+    pub label: String,
+    /// 项目结束状态（success / failed / stopped）
+    pub status: String,
+    pub points: Vec<MetricPoint>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportRequest {
@@ -90,6 +101,10 @@ pub struct ReportRequest {
     pub locale: String,
     pub config: serde_json::Value,
     pub summary: serde_json::Value,
+    /// 最近一次/当前展示的曲线数据（items 为空时的回退数据，兼容旧版调用）
     pub points: Vec<MetricPoint>,
+    /// 按测试项目分组的数据（非空时报告按项目输出曲线与数据表）
+    #[serde(default)]
+    pub items: Vec<ReportItem>,
     pub logs: Vec<serde_json::Value>,
 }
