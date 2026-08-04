@@ -2,6 +2,7 @@ mod models;
 mod report;
 mod runner;
 mod settings;
+mod ssh;
 mod system;
 
 use tauri::{Manager, RunEvent};
@@ -98,6 +99,7 @@ pub fn run() {
         }))
         .setup(|_app| Ok(()))
         .manage(runner::AppState::default())
+        .manage(ssh::SshState::default())
         .invoke_handler(tauri::generate_handler![
             exit_app,
             create_side_window,
@@ -107,6 +109,11 @@ pub fn run() {
             runner::stop_test,
             runner::set_locale,
             runner::open_log_dir,
+            ssh::ssh_connect,
+            ssh::ssh_send,
+            ssh::ssh_resize,
+            ssh::ssh_disconnect,
+            ssh::ssh_scrollback,
             system::get_network_info,
             system::get_network_interfaces,
             settings::get_custom_packet_length,

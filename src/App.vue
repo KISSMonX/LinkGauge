@@ -9,20 +9,24 @@ import pkg from '../package.json'
 import ConfigPanel from './components/ConfigPanel.vue'
 import Dashboard from './components/Dashboard.vue'
 import ServerDashboard from './components/ServerDashboard.vue'
+import SshConsole from './components/SshConsole.vue'
 import StatusPanel from './components/StatusPanel.vue'
 import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
 import { useI18n, type Locale, type MessageKey } from './i18n'
 import { theme, setTheme, type Theme } from './theme'
-import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, ServerConfig, SyncState, TestConfig, TestItem, TestSummary } from './types'
+import { clearTerminal, createTerminal, writeTerminal } from './terminal'
+import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, ServerConfig, SshConfig, SshEvent, SshSnapshot, SshStatus, SyncState, TestConfig, TestItem, TestSummary } from './types'
 
 const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 
 const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
 const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1 }
+const sshDefaults: SshConfig = { host: '', port: 22, username: '', authMethod: 'password', password: '', privateKeyPath: '', passphrase: '' }
 const config = ref<TestConfig>({ ...defaults })
 const serverConfig = ref<ServerConfig>({ ...serverDefaults })
+const sshConfig = ref<SshConfig>({ ...sshDefaults })
 const items = ref<TestItem[]>([
   { id: 'ping', label: 'Ping 连通性测试', protocol: 'ping', enabled: true, status: 'waiting' },
   { id: 'tcp-single', label: 'TCP 单向带宽', protocol: 'tcp', enabled: true, status: 'waiting' },
@@ -69,7 +73,9 @@ const elapsed = computed(() => { void nowTick.value; return startedAt.value ? Ma
 const connected = ref(false)
 /** 本次连接的客户端本地端口（控制连接建立时由后端广播） */
 const clientLocalPort = ref(0)
-const errorDialog = ref<{ title: string; message: string } | null>(null)
+/** 错误弹窗：retry=true 时才提供「重试」按钮（重试 = 重新开始客户端测试队列），
+ *  服务端 / SSH / 文件操作类错误重试无意义，只给关闭 */
+const errorDialog = ref<{ title: string; message: string; retry?: boolean } | null>(null)
 /** 信息弹窗（报告生成、预览模式等提示） */
 const infoDialog = ref<{ title: string; message: string } | null>(null)
 /** 设置弹窗：语言 / 主题 */
@@ -100,10 +106,25 @@ const serverPoints = ref<MetricPoint[]>([])
 /** 最近一次连接服务端的客户端地址（服务端概览「对端=客户端」） */
 const serverPeerIp = ref('')
 const serverPeerPort = ref(0)
-/** 服务端视角只显示服务端自身日志（引擎日志 + 本窗口 UI 日志），与客户端日志独立 */
-const serverLogs = computed(() => logs.value.filter((l) => l.module === 'server' || l.module === 'UI'))
+/** 服务端视角只显示服务端自身日志（引擎日志 + SSH 会话日志 + 本窗口 UI 日志），与客户端日志独立 */
+const serverLogs = computed(() => logs.value.filter((l) => l.module === 'server' || l.module === 'ssh' || l.module === 'UI'))
 /** 客户端视角只显示客户端自身日志（客户端任务 + 本窗口 UI 日志），与服务器日志独立 */
-const clientLogs = computed(() => logs.value.filter((l) => l.module !== 'server'))
+const clientLogs = computed(() => logs.value.filter((l) => l.module !== 'server' && l.module !== 'ssh'))
+// —— SSH 远程控制台（服务端视角）：在远端主机上操作 iperf3 服务端 ——
+const sshSession = ref('')
+const sshStatus = ref<SshStatus>('idle')
+/** 控制台行缓冲：切换到概览标签时不销毁，故由 App 持有而非控制台组件 */
+const sshTerminal = reactive(createTerminal())
+/** 回放缓冲的结束偏移：偏移小于它的实时数据块已包含在回放内容里，需丢弃 */
+const sshPrimed = ref(0)
+/** 拉取回放缓冲期间到达的实时数据块（拉取完成后按偏移去重补写） */
+let sshPending: SshEvent[] | null = null
+/** 远端 PTY 尺寸（由控制台组件按可视区域测算） */
+let sshCols = 120
+let sshRows = 24
+/** 服务端视角中间栏当前显示的视图（各窗口独立，不跨窗口同步） */
+const serverView = ref<'overview' | 'ssh'>('overview')
+let unlistenSsh: UnlistenFn | undefined
 let ticker: number | undefined
 let unlisten: UnlistenFn | undefined
 
@@ -168,10 +189,14 @@ watch(() => config.value.serverIp, (value) => { if (value && value !== local.val
  *  明文密码不应留在里面。密码只在内存中、以及窗口间的 side-sync 里流转，
  *  重启应用后需要重新输入（用户名与公钥路径不是机密，照常保存） */
 const withoutSecret = (value: TestConfig) => { const { authPassword: _omitted, ...rest } = value; return rest }
+/** SSH 登录密码与私钥口令同样不落盘：主机 / 端口 / 用户名 / 私钥路径不是机密，照常保存 */
+const withoutSshSecret = (value: SshConfig) => { const { password: _pwd, passphrase: _phrase, ...rest } = value; return rest }
 /** 参数自动保存：任何修改即时写入本地存储，下次启动读取最近一次配置 */
 watch(config, (value) => { localStorage.setItem('linkgauge-config', JSON.stringify(withoutSecret(value))); if (!syncing) emitSync() }, { deep: true })
 /** 服务端参数本地持久化（与客户端配置分开保存） */
 watch(serverConfig, (value) => { localStorage.setItem('linkgauge-server-config', JSON.stringify(value)); if (!syncing) emitSync() }, { deep: true })
+/** SSH 连接参数本地持久化（不含密码与私钥口令） */
+watch(sshConfig, (value) => { localStorage.setItem('linkgauge-ssh-config', JSON.stringify(withoutSshSecret(value))); if (!syncing) emitSync() }, { deep: true })
 
 // —— 跨窗口状态同步：任何本地变更广播 side-sync，其他窗口应用（syncing 标志防回声循环） ——
 function syncBundle(): SyncState {
@@ -210,6 +235,10 @@ function syncBundle(): SyncState {
     serverPoints: serverPoints.value,
     serverPeerIp: serverPeerIp.value,
     serverPeerPort: serverPeerPort.value,
+    // SSH 只同步参数与会话状态；控制台正文输出量大，各窗口自行监听 ssh-event 并拉取回放缓冲
+    sshConfig: sshConfig.value,
+    sshSession: sshSession.value,
+    sshStatus: sshStatus.value,
   }
 }
 function emitSync() {
@@ -252,6 +281,10 @@ async function applySync(payload: SyncState) {
   serverPoints.value = payload.serverPoints
   serverPeerIp.value = payload.serverPeerIp
   serverPeerPort.value = payload.serverPeerPort
+  sshConfig.value = payload.sshConfig
+  sshStatus.value = payload.sshStatus
+  // 会话 id 变化会触发回放缓冲拉取，本窗口据此补齐连接建立以来的控制台内容
+  sshSession.value = payload.sshSession
   // 语言与主题跟随主窗口设置（持久化 + 应用到 DOM）
   setLocale(payload.locale)
   setTheme(payload.theme)
@@ -294,6 +327,10 @@ watch(serverServing, () => emitSync())
 watch(serverPoints, () => emitSync(), { deep: true })
 watch(serverPeerIp, () => emitSync())
 watch(serverPeerPort, () => emitSync())
+watch(sshStatus, () => emitSync())
+/** 会话建立后（无论由哪个窗口发起）拉取回放缓冲：
+ *  既补齐 invoke 返回前就已到达的输出，也让后开的窗口拿到完整的控制台历史 */
+watch(sshSession, (id) => { emitSync(); if (id) void primeConsole(id) })
 
 // —— 标签页分离 / 收回 ——
 /** 主窗口：标签被拖拽分离 → 创建独立窗口并从停靠列表移除 */
@@ -394,6 +431,93 @@ async function pickPublicKey() {
   } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
 }
 
+// —— SSH 远程控制台：连接远端主机，在控制台里直接操作对端的 iperf3 服务端 ——
+
+/** 选择 SSH 登录用的私钥文件 */
+async function pickPrivateKey() {
+  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
+  try {
+    const path = await open({ title: t('ssh.keyPick'), multiple: false, directory: false })
+    if (typeof path === 'string') { sshConfig.value = { ...sshConfig.value, privateKeyPath: path }; log('INFO', t('ssh.log.keyPicked', { path }), 'ssh') }
+  } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
+}
+
+async function sshConnect() {
+  if (sshStatus.value !== 'idle') return
+  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.ssh') }; return }
+  // 新会话从空白控制台开始（断开后保留上一次输出，便于回看）
+  clearTerminal(sshTerminal)
+  sshPrimed.value = 0
+  serverView.value = 'ssh'
+  sshStatus.value = 'connecting'
+  try {
+    sshSession.value = await invoke<string>('ssh_connect', { request: { ...sshConfig.value, cols: sshCols, rows: sshRows } })
+  } catch (error) {
+    sshStatus.value = 'idle'
+    log('ERROR', String(error), 'ssh')
+    errorDialog.value = { title: t('ssh.failedTitle'), message: String(error) }
+  }
+}
+async function sshDisconnect() {
+  if (!sshSession.value) { sshStatus.value = 'idle'; return }
+  try { if (isTauri()) await invoke('ssh_disconnect', { sessionId: sshSession.value }) } catch (e) { log('WARN', String(e), 'ssh') }
+}
+/** 向远端 shell 写入数据（命令自带换行，Ctrl+C 为 \x03） */
+async function sshSend(data: string) {
+  if (!sshSession.value || !isTauri()) return
+  try { await invoke('ssh_send', { sessionId: sshSession.value, data }) } catch (e) { log('WARN', String(e), 'ssh') }
+}
+/** 控制台尺寸变化：同步远端 PTY 窗口大小，让远端命令按实际宽度换行 */
+function sshResize(cols: number, rows: number) {
+  if (cols === sshCols && rows === sshRows) return
+  sshCols = cols; sshRows = rows
+  if (sshSession.value && isTauri()) invoke('ssh_resize', { sessionId: sshSession.value, cols, rows }).catch(() => {})
+}
+
+/** 拉取会话快照写入控制台并对齐连接状态；拉取期间到达的实时数据先暂存，之后按偏移去重补写。
+ *  它同时兜住了「connected 事件早于 ssh_connect 返回」的竞态：那一刻事件因会话 id 未知被丢弃，
+ *  快照里的 connected 会把状态补回来 */
+async function primeConsole(sessionId: string) {
+  if (!isTauri()) return
+  sshPending = []
+  try {
+    const snapshot = await invoke<SshSnapshot>('ssh_scrollback', { sessionId })
+    if (sshSession.value !== sessionId) return
+    clearTerminal(sshTerminal)
+    writeTerminal(sshTerminal, snapshot.text)
+    sshPrimed.value = snapshot.endOffset
+    for (const event of sshPending) {
+      if (event.sessionId === sessionId && (event.offset ?? 0) >= snapshot.endOffset) writeTerminal(sshTerminal, event.message || '')
+    }
+    if (snapshot.connected) sshStatus.value = 'connected'
+  } catch {
+    // 会话已结束（结束事件也可能早于会话 id 到达）：控制台内容保留，状态复位
+    if (sshSession.value === sessionId) { sshSession.value = ''; sshStatus.value = 'idle' }
+  }
+  finally { sshPending = null }
+}
+
+function handleSshEvent(event: SshEvent) {
+  if (!sshSession.value || event.sessionId !== sshSession.value) return
+  if (event.type === 'data') {
+    if (sshPending) { sshPending.push(event); return }
+    // 回放缓冲已经包含的数据块直接丢弃，避免重复显示
+    if ((event.offset ?? 0) < sshPrimed.value) return
+    writeTerminal(sshTerminal, event.message || '')
+    return
+  }
+  if (event.type === 'status') { if (event.message === 'connected' || event.message === 'connecting') sshStatus.value = event.message; return }
+  if (event.type === 'log') { log(event.level || 'INFO', event.message || '', 'ssh'); return }
+  if (event.type === 'closed' || event.type === 'error') {
+    const message = event.message || ''
+    writeTerminal(sshTerminal, `\r\n[${message}]\r\n`)
+    log(event.type === 'error' ? 'ERROR' : 'INFO', message, 'ssh')
+    sshStatus.value = 'idle'
+    sshSession.value = ''
+    sshPrimed.value = 0
+  }
+}
+
 /** 打开外部链接（「关于」页的项目地址 / 提交反馈）：桌面端经后端调系统默认浏览器，预览模式用 window.open */
 function openLink(url: string) {
   if (isTauri()) invoke('open_url', { url }).catch((e) => log('WARN', String(e)))
@@ -403,10 +527,10 @@ function openLink(url: string) {
 async function start() {
   // 开始即全新一轮测试：以当前勾选的项目为队列，不涉及上次未完成测试的恢复
   if (config.value.bandwidth < 0) config.value.bandwidth = local.value.speedMbps > 0 ? local.value.speedMbps : 0
-  const invalid = validate(); if (invalid) { errorDialog.value = { title: t('err.paramError'), message: invalid }; return }
+  const invalid = validate(); if (invalid) { errorDialog.value = { title: t('err.paramError'), message: invalid, retry: true }; return }
   // TCP / UDP 测试项可同时勾选，按列表顺序逐个执行
   const selected = items.value.filter((i) => i.enabled)
-  if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg') }; return }
+  if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg'), retry: true }; return }
   items.value.forEach((i) => { if (i.enabled) i.status = 'waiting' })
   points.value = []; progress.value = 0; connected.value = false; startedAt.value = Date.now()
   selectedHistoryId.value = '' // 新一轮测试开始：图表回到实时模式
@@ -569,7 +693,7 @@ function failCurrent(message: string) {
   if (item) completedLabel.value = itemLabel(item.id)
   log('ERROR', message); finishRun(false)
   const lastLog = summary.logPaths.at(-1)
-  errorDialog.value = { title: t('err.alert'), message: lastLog ? `${message}\n\n${t('err.logFile', { path: lastLog })}` : message }
+  errorDialog.value = { title: t('err.alert'), message: lastLog ? `${message}\n\n${t('err.logFile', { path: lastLog })}` : message, retry: true }
 }
 function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100 } log('INFO', t('log.finish')) }
 async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); if (item) snapshotItem(item.id, 'stopped'); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; finishRun(false) }
@@ -640,6 +764,7 @@ function onThemeChange(event: Event) {
 onMounted(async () => {
   const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; if (parsed.udpPacketLength === 8192) parsed.udpPacketLength = 1460 /* 旧默认 8KB 会触发 IP 分片，迁移为 iperf3 默认 1460 */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
+  const savedSsh = localStorage.getItem('linkgauge-ssh-config'); if (savedSsh) try { sshConfig.value = { ...sshDefaults, ...JSON.parse(savedSsh), password: '', passphrase: '' } } catch { /* ignore */ }
   if (isTauri()) {
     try {
       // 启动时把界面语言同步给后端（引擎日志按当前语言输出；切换语言时 onLocaleChange 再次同步）
@@ -689,6 +814,7 @@ onMounted(async () => {
       // 网卡选择对话框只在主窗口弹出，避免多个窗口同时弹窗
       if (side.value === 'hub' && interfaces.value.length > 1) { nicSelected.value = 0; nicDialog.value = true }
       unlisten = await listen<BackendEvent>('test-event', (e) => handleEvent(e.payload))
+      unlistenSsh = await listen<SshEvent>('ssh-event', (e) => handleSshEvent(e.payload))
     } catch (e) { log('WARN', t('log.sysInfoFailed', { e: String(e) })) }
   } else {
     // 浏览器预览模式：无网卡信息，使用回退默认值
@@ -697,7 +823,7 @@ onMounted(async () => {
   }
   log('INFO', t('log.ready'))
 })
-onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unlistenDock?.(); unlistenClose?.(); unlistenExit?.(); if (ticker) clearInterval(ticker) })
+onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyncReq?.(); unlistenDock?.(); unlistenClose?.(); unlistenExit?.(); if (ticker) clearInterval(ticker) })
 </script>
 
 <template>
@@ -711,18 +837,18 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unliste
     <div class="workspace">
       <ConfigPanel
         v-if="side === 'hub' && dockedTabs.length"
-        :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength" @detach="detachTab"
+        :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength" @detach="detachTab" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
       />
       <ConfigPanel
         v-else-if="side === 'client'"
-        detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
         @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength"
       />
       <ConfigPanel
         v-else-if="side === 'server'"
-        detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="config = $event" @update:server-config="serverConfig = $event" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength"
+        detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        @update:config="config = $event" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
       />
       <div v-else class="panel config-panel dock-empty">
         <h2>{{ t('tab.detachedTitle') }}</h2>
@@ -732,15 +858,24 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unliste
           <button class="primary" @click="requestDock('server')"><Icon name="monitor" />{{ t('tab.dockServer') }}</button>
         </div>
       </div>
+      <!-- 服务端视角：概览（自身统计与观测曲线）与 SSH 远程控制台两个视图，用 v-show 保留各自状态 -->
+      <template v-if="showServerView">
+        <ServerDashboard
+          v-show="serverView === 'overview'" :view="serverView" :ssh-status="sshStatus" @update:view="serverView = $event"
+          :bind-target="serverConfig.bindIp.trim() || t('sdash.allAdapters')" :port="serverConfig.port" :running="serverRunning" :uptime="serverUptime" :completed="serverCompleted" :serving="serverServing" :points="serverPoints" :peer-ip="serverPeerIp" :peer-port="serverPeerPort"
+        />
+        <SshConsole
+          v-show="serverView === 'ssh'" :view="serverView" :lines="sshTerminal.lines" :status="sshStatus" :host="sshConfig.host" :username="sshConfig.username" :server-port="serverConfig.port" :interval="serverConfig.interval"
+          @update:view="serverView = $event" @send="sshSend" @clear="clearTerminal(sshTerminal)" @connect="sshConnect" @disconnect="sshDisconnect" @resize="sshResize"
+        />
+      </template>
       <!-- 客户端视角：概览 + 实时曲线（主窗口客户端标签 / 客户端分离窗口） -->
-      <Dashboard v-if="!showServerView" :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="viewSummary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="historyLabel" :local-port="clientLocalPort" />
-      <!-- 服务端视角：服务端自身概览 + 服务端观测的实时曲线（与客户端数据独立），对端为客户端 -->
-      <ServerDashboard v-else :bind-target="serverConfig.bindIp.trim() || t('sdash.allAdapters')" :port="serverConfig.port" :running="serverRunning" :uptime="serverUptime" :completed="serverCompleted" :serving="serverServing" :points="serverPoints" :peer-ip="serverPeerIp" :peer-port="serverPeerPort" />
+      <Dashboard v-else :local="local" :config="config" :server-config="serverConfig" :current="current" :points="chartPoints" :progress="progress" :elapsed="elapsed" :summary="viewSummary" :connected="connected" :server-running="serverRunning" :live="chartLive" :completed-label="historyLabel" :local-port="clientLocalPort" />
       <!-- 客户端/服务端视角各自只显示自己的日志（引擎日志 + 本窗口 UI 日志） -->
       <StatusPanel :mode="showServerView ? 'logs' : 'full'" :items="items" :logs="showServerView ? serverLogs : clientLogs" :server-running="serverRunning" :history="itemHistory" :history-selected="selectedHistoryId" :running="clientRunning" @select="selectedHistoryId = $event" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
     </div>
     <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
-    <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><button v-if="!errorDialog" @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
+    <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog?.retry" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><button v-else @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="confirmDialog" class="modal-backdrop" @click.self="confirmDialog = null"><div class="modal"><button class="modal-close" @click="confirmDialog = null">×</button><h2>{{ confirmDialog.title }}</h2><div class="modal-body"><span class="modal-symbol info">i</span><p>{{ confirmDialog.message }}</p></div><div class="modal-actions"><button @click="confirmDialog = null">{{ t('common.cancel') }}</button><button class="danger" @click="confirmStop">{{ confirmDialog.action === 'exit' ? t('confirm.exitButton') : t('common.confirm') }}</button></div></div></div>
     <div v-if="settingsDialog" class="modal-backdrop" @click.self="settingsDialog = false"><div class="modal"><button class="modal-close" @click="settingsDialog = false">×</button><h2>{{ t('settings.title') }}</h2><div class="settings-form"><label><span>{{ t('settings.language') }}</span><select :value="locale" @change="onLocaleChange($event)"><option value="en">English</option><option value="zh">中文</option></select></label><label><span>{{ t('settings.theme') }}</span><select :value="theme" @change="onThemeChange($event)"><option value="light">{{ t('settings.light') }}</option><option value="dark">{{ t('settings.dark') }}</option></select></label></div><p class="settings-note">{{ t('settings.engineNote') }}</p><div class="modal-actions"><button class="primary" @click="settingsDialog = false">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false; applyNic(0)">{{ t('nic.cancel') }}</button></div></div></div>

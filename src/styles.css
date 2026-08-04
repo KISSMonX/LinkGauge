@@ -177,6 +177,8 @@ h2,h3,p { margin-top: 0; }
 .panel-title { min-height: 35px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
 .section-title { display: flex; align-items: center; justify-content: space-between; }
 .config-panel { display: flex; flex-direction: column; overflow-y: auto; }
+/* 面板子区块不允许被压缩到内容以下（否则行会溢出覆盖下方区块），空间不足时面板整体滚动 */
+.config-panel > * { flex-shrink: 0; }
 .mode-tabs { display: flex; border-bottom: 1px solid var(--border); }
 .mode-tabs button { flex: 1; height: 38px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; font-weight: 600; color: var(--text-secondary); display: flex; align-items: center; justify-content: center; gap: 7px; user-select: none; }
 .mode-tabs button:hover:not(:disabled) { border-color: transparent; background: var(--blue-hover-bg); }
@@ -212,13 +214,25 @@ h2,h3,p { margin-top: 0; }
 .test-list input[type=checkbox], .log-option input { width: 17px; height: 17px; accent-color: var(--blue); }
 .test-list .drag { margin-left: auto; color: var(--text-dim); font-size: 18px; transform: rotate(90deg); }
 .text-button { border: 0; padding: 2px; color: var(--text-secondary); background: transparent; }
-.parameters { flex: 1; min-height: 0; }
+/* 参数区占满剩余高度（把底部操作按钮钉在面板底部）；空间不足时区内滚动，
+   避免行溢出到下方的认证区上造成覆盖 */
+.parameters { flex: 1; min-height: 0; overflow-y: auto; }
 .parameters > label { min-height: 32px; display: grid; grid-template-columns: 105px 1fr auto; align-items: center; gap: 8px; }
 .parameters input:not([type=checkbox]), .parameters select { width: 100%; height: 28px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); }
 .parameters input:focus, .parameters select:focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
 .parameters small { white-space: nowrap; color: var(--text-note); font-size: 12px; }
 .parameters .log-option { display: flex; gap: 8px; grid-template-columns: none; margin-top: 2px; font-size: 13px; }
 .runtime-state { margin: 4px 0 0; padding: 7px 9px; border-radius: 4px; font-size: 12px; }.runtime-state.available { color: var(--green); background: var(--green-bg); }.runtime-state.missing { color: var(--red-alert); background: var(--red-bg); }
+/* 认证区（用户名 / 密码 / RSA 公钥）与参数区同款网格布局，避免行内错乱 */
+.auth-section > label:not(.log-option) { min-height: 32px; display: grid; grid-template-columns: 105px 1fr auto; align-items: center; gap: 8px; }
+.auth-section > label input:not([type=checkbox]) { width: 100%; height: 28px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); }
+.auth-section > label input:not([type=checkbox]):focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
+.auth-section > label small { white-space: nowrap; color: var(--text-note); font-size: 12px; }
+/* 密码说明纵向排在输入框下方并允许换行（同服务端「输出间隔」说明的布局） */
+.auth-section > label .field { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.auth-section > label .field small { white-space: normal; }
+.auth-section .log-option { display: flex; align-items: center; gap: 8px; margin-top: 2px; font-size: 13px; }
+.auth-section .server-hint { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 .config-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px 12px; }
 .config-actions button, .modal-actions button { height: 35px; display: flex; align-items: center; justify-content: center; gap: 7px; font-weight: 600; }
 button.primary { color: white; border-color: var(--blue); background: linear-gradient(var(--blue-bright), var(--blue-strong)); }
@@ -287,4 +301,39 @@ dd { margin: 0; text-align: right; color: var(--text-strong); white-space: nowra
 .about-actions { display: flex; justify-content: center; margin: 4px 0 12px; }.about-actions button { min-width: 140px; }
 .about-engine { margin: 0; text-align: center; color: var(--text-faint); font-size: 12px; }
 .custom-length-form { display: flex; align-items: center; gap: 10px; }.custom-length-form input { width: 120px; height: 32px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; font-size: 14px; background: var(--input-bg); color: var(--text-input); }.custom-length-form select { height: 32px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 6px; background: var(--input-bg); color: var(--text-input); }.custom-length-result { margin: 12px 0 0; color: var(--text-muted); font-size: 12px; }.custom-length-result b { color: var(--blue); }
-@media(max-width:1400px){ body{font-size:13px}.workspace{grid-template-columns:330px minmax(520px,1.3fr) 400px}.toolbar-actions button{padding:0 6px}.protocol-switch button{min-width:130px}.mode-switch button{min-width:120px}.parameters>label{grid-template-columns:92px 1fr auto}.chart-content{grid-template-columns:1fr 170px} }
+/* —— SSH 远程连接（服务端配置区）：与服务端参数区同款网格布局 —— */
+.ssh-section > label { min-height: 32px; display: grid; grid-template-columns: 105px 1fr auto; align-items: center; gap: 8px; }
+.ssh-section > label input, .ssh-section > label select { width: 100%; height: 28px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); }
+.ssh-section > label input:focus, .ssh-section > label select:focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
+.ssh-section > label .field { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ssh-section > label .field small { white-space: normal; color: var(--text-note); font-size: 12px; }
+.ssh-section .status-pill { font-weight: 600; }
+.ssh-section .server-hint { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+/* —— 服务端视角中间栏：服务端概览 / SSH 控制台 视图切换 —— */
+.console-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 12px 0 0; }
+.view-tabs { display: flex; align-self: stretch; }
+.view-tabs button { height: 100%; min-height: 34px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; font-weight: 600; color: var(--text-secondary); display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.view-tabs button:hover:not(:disabled) { border-color: transparent; border-bottom-color: transparent; background: var(--blue-hover-bg); }
+.view-tabs button.active { color: var(--blue); border-bottom-color: var(--blue); background: var(--blue-faint); }
+.ssh-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+.ssh-dot.connecting { background: var(--orange); }
+.ssh-dot.connected { background: var(--green-strong); }
+/* —— SSH 控制台：工具条 + 输出区 + 命令输入行 —— */
+.ssh-console { position: relative; overflow: hidden; }
+.console-peer { color: var(--text-muted); font-size: 12px; font-family: Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.console-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.console-quick { display: flex; flex-wrap: wrap; gap: 5px; }
+.console-quick button { height: 26px; padding: 0 9px; font-size: 12px; }
+.console-quick button.warn { color: var(--orange); border-color: var(--orange); font-family: Consolas, monospace; }
+.console-actions { display: flex; gap: 5px; margin-left: auto; }
+.console-actions button { height: 26px; padding: 0 9px; font-size: 12px; display: flex; align-items: center; gap: 5px; }
+.console-output { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 8px 10px; background: var(--input-bg); color: var(--text-input); font: 12.5px/1.55 Consolas, "Microsoft YaHei UI", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.console-empty { color: var(--text-faint); }
+/* 字符尺寸标尺（10 个等宽 0）：据此把控制台像素宽高换算成远端 PTY 的列 / 行数 */
+.console-ruler { position: absolute; top: 0; left: 0; visibility: hidden; pointer-events: none; white-space: pre; font: 12.5px/1.55 Consolas, "Microsoft YaHei UI", monospace; }
+.console-input { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--border); }
+.console-prompt { color: var(--green-log); font: 600 14px Consolas, monospace; }
+.console-input input { flex: 1; min-width: 0; height: 30px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); font: 13px Consolas, "Microsoft YaHei UI", monospace; }
+.console-input input:focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
+.console-input button { height: 30px; padding: 0 14px; font-weight: 600; }
+@media(max-width:1400px){ body{font-size:13px}.workspace{grid-template-columns:330px minmax(520px,1.3fr) 400px}.toolbar-actions button{padding:0 6px}.protocol-switch button{min-width:130px}.mode-switch button{min-width:120px}.parameters>label{grid-template-columns:92px 1fr auto}.chart-content{grid-template-columns:1fr 170px}.view-tabs button{padding:0 10px} }

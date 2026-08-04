@@ -1,15 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import type { NetworkInfo, ServerConfig, TestConfig, TestItem } from '../types'
+import type { NetworkInfo, ServerConfig, SshConfig, SshStatus, TestConfig, TestItem } from '../types'
 import { useI18n, type MessageKey } from '../i18n'
 import Icon from './Icon.vue'
 
 /** tabs：主窗口已停靠的标签列表（undefined = 分离窗口，仅显示 detached 一侧） */
-const props = defineProps<{ tabs?: ('client' | 'server')[]; detached?: 'client' | 'server'; tab: 'client' | 'server'; config: TestConfig; serverConfig: ServerConfig; items: TestItem[]; clientRunning: boolean; serverRunning: boolean; local: NetworkInfo; savedCustomLength: number; savedCustomUdpLength: number }>()
+const props = defineProps<{ tabs?: ('client' | 'server')[]; detached?: 'client' | 'server'; tab: 'client' | 'server'; config: TestConfig; serverConfig: ServerConfig; sshConfig: SshConfig; sshStatus: SshStatus; items: TestItem[]; clientRunning: boolean; serverRunning: boolean; local: NetworkInfo; savedCustomLength: number; savedCustomUdpLength: number }>()
 const emit = defineEmits<{
   'update:tab': [value: 'client' | 'server']
   'update:config': [value: TestConfig]
   'update:server-config': [value: ServerConfig]
+  'update:ssh-config': [value: SshConfig]
+  /** SSH 远程控制台：连接 / 断开 / 选择私钥文件 */
+  'ssh-connect': []
+  'ssh-disconnect': []
+  'pick-private-key': []
   'toggle-item': [id: string]
   reset: []
   start: []
@@ -91,6 +96,9 @@ onUnmounted(() => { window.removeEventListener('blur', cancelTabDrag) })
 
 const set = <K extends keyof TestConfig>(key: K, value: TestConfig[K]) => emit('update:config', { ...props.config, [key]: value })
 const setServer = <K extends keyof ServerConfig>(key: K, value: ServerConfig[K]) => emit('update:server-config', { ...props.serverConfig, [key]: value })
+const setSsh = <K extends keyof SshConfig>(key: K, value: SshConfig[K]) => emit('update:ssh-config', { ...props.sshConfig, [key]: value })
+/** SSH 参数在连接建立后锁定，断开后才能修改 */
+const sshLocked = computed(() => props.sshStatus !== 'idle')
 
 /** 带宽限制选项：当前网卡速率（默认） + 100 / 1000 / 0（不限制），相同速率去重 */
 const bandwidthOptions = computed(() => {
@@ -232,6 +240,23 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
     <div class="config-actions">
       <button class="primary" :disabled="serverRunning" @click="emit('start-server')"><Icon name="play" />{{ t('srv.start') }}</button>
       <button class="danger" :disabled="!serverRunning" @click="emit('stop-server')"><Icon name="stop" />{{ t('srv.stop') }}</button>
+    </div>
+    <section class="config-section ssh-section">
+      <div class="section-title"><h2>{{ t('ssh.title') }}</h2><span :class="['status-pill', sshStatus === 'connected' ? 'ok' : 'idle']">{{ sshStatus === 'connected' ? t('ssh.connected') : sshStatus === 'connecting' ? t('ssh.connecting') : t('ssh.notConnected') }}</span></div>
+      <label><span>{{ t('ssh.host') }}</span><input :value="sshConfig.host" :disabled="sshLocked" :placeholder="t('ssh.hostPlaceholder')" @input="setSsh('host', ($event.target as HTMLInputElement).value)" /></label>
+      <label><span>{{ t('ssh.port') }}</span><input type="number" :value="sshConfig.port" min="1" max="65535" :disabled="sshLocked" @input="setSsh('port', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label><span>{{ t('ssh.user') }}</span><input :value="sshConfig.username" :disabled="sshLocked" autocomplete="off" @input="setSsh('username', ($event.target as HTMLInputElement).value)" /></label>
+      <label><span>{{ t('ssh.auth') }}</span><select :value="sshConfig.authMethod" :disabled="sshLocked" @change="setSsh('authMethod', ($event.target as HTMLSelectElement).value as SshConfig['authMethod'])"><option value="password">{{ t('ssh.authPassword') }}</option><option value="key">{{ t('ssh.authKey') }}</option></select></label>
+      <template v-if="sshConfig.authMethod === 'key'">
+        <label><span>{{ t('ssh.key') }}</span><span class="ip-row"><input :value="sshConfig.privateKeyPath" :disabled="sshLocked" :placeholder="t('ssh.keyPlaceholder')" @input="setSsh('privateKeyPath', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="sshLocked" @click="emit('pick-private-key')">{{ t('cfg.authKeyBrowse') }}</button></span></label>
+        <label><span>{{ t('ssh.passphrase') }}</span><span class="field"><input type="password" :value="sshConfig.passphrase" :disabled="sshLocked" autocomplete="off" @input="setSsh('passphrase', ($event.target as HTMLInputElement).value)" /><small>{{ t('ssh.secretNote') }}</small></span></label>
+      </template>
+      <label v-else><span>{{ t('ssh.password') }}</span><span class="field"><input type="password" :value="sshConfig.password" :disabled="sshLocked" autocomplete="off" @input="setSsh('password', ($event.target as HTMLInputElement).value)" /><small>{{ t('ssh.secretNote') }}</small></span></label>
+      <p class="server-hint">{{ t('ssh.hint') }}</p>
+    </section>
+    <div class="config-actions">
+      <button class="primary" :disabled="sshLocked" @click="emit('ssh-connect')"><Icon name="link" />{{ sshStatus === 'connecting' ? t('ssh.connecting') : t('ssh.connect') }}</button>
+      <button class="danger" :disabled="sshStatus === 'idle'" @click="emit('ssh-disconnect')"><Icon name="unlink" />{{ t('ssh.disconnect') }}</button>
     </div>
     </template>
     <div v-if="customDialog" class="modal-backdrop" @click.self="customDialog = false">

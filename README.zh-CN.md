@@ -26,6 +26,7 @@
 - 中英文界面（默认英文），可在「设置」中切换，跨窗口同步
 - 亮色 / 暗色主题（默认亮色），可在「设置」中切换，跨窗口同步
 - 服务端支持绑定指定 IP 与端口，并可设置日志 / 统计信息输出间隔（秒）
+- 服务端页内置 SSH 远程控制台：以密码或私钥连接远端主机，在应用内的控制台里直接操作对端 iperf3 服务端并实时查看输出；基于纯 Rust 的 [russh](https://github.com/warp-tech/russh)，无需系统安装 `ssh` 客户端
 - TCP、UDP 参数分离展示
 - Ping 连通性测试
 - TCP 单向、双向、多并发流、Reverse 和压力测试
@@ -92,6 +93,17 @@ flowchart LR
 | `get_custom_packet_length` | 从设置文件读取持久化的自定义报文长度 |
 | `save_custom_packet_length` | 校验并持久化自定义报文长度到设置文件 |
 | `generate_report` | 在应用数据目录中生成 HTML 或 PDF 报告 |
+| `ssh_connect` | 连接远端主机并打开带 PTY 的交互式 shell |
+| `ssh_send` | 向远端 shell 写入数据（命令文本、`Ctrl+C` 等） |
+| `ssh_resize` | 按控制台可视区域同步远端 PTY 尺寸 |
+| `ssh_disconnect` | 关闭 SSH 会话并释放通道 |
+| `ssh_scrollback` | 读取会话快照（控制台回放缓冲 + 连接状态） |
+
+### SSH 远程控制台
+
+服务端视角在「服务端概览」旁新增「SSH 控制台」标签。用密码或 OpenSSH 私钥连接后，既可用快捷命令——启动 `iperf3 -s`（前台或 `-D` 后台）、查看进程、查看端口占用、停止全部、查看版本——也可直接输入任意命令。快捷命令按同一页面配置的监听端口与日志间隔拼接。远端输出经 `ssh-event` 实时回传，由轻量行缓冲渲染（ANSI 转义序列在 Rust 侧剔除，`\r` / `\b` 由前端处理），因此 `iperf3` 的逐秒统计能就地刷新。
+
+主机密钥会与 `known_hosts` 比对：密钥变更时直接拒绝连接；首次连接的主机放行，并在控制台打印 SHA256 指纹供核对。登录密码与私钥口令只存在于内存，不写入 `localStorage`，也不随配置导出。
 
 ## 项目结构
 
@@ -101,6 +113,7 @@ flowchart LR
 ├── src/                         # Vue 3 前端
 │   ├── components/              # 面板、曲线、工具栏和通用图标
 │   ├── App.vue                  # 应用状态和测试队列编排
+│   ├── terminal.ts              # SSH 控制台行缓冲（回车 / 退格 / 制表位光标语义）
 │   ├── styles.css               # 桌面布局与视觉样式
 │   └── types.ts                 # 前端数据契约
 ├── src-tauri/
@@ -109,6 +122,7 @@ flowchart LR
 │   │   ├── runner.rs            # riperf3 客户端/服务端任务、Ping、日志、中止
 │   │   ├── report.rs            # HTML/PDF 报告生成
 │   │   ├── settings.rs          # 设置文件的读取与持久化
+│   │   ├── ssh.rs               # SSH 远程控制台：会话、PTY shell、输出解码
 │   │   └── system.rs            # 本机网络信息
 │   ├── Cargo.toml               # Rust 依赖
 │   └── tauri.conf.json          # 窗口与安装包配置
