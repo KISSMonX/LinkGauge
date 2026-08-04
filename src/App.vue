@@ -97,6 +97,7 @@ const dockedTabs = ref<('client' | 'server')[]>(['client', 'server'])
 const driver = ref('')
 let syncing = false
 let unlistenSync: UnlistenFn | undefined
+let unlistenSyncReq: UnlistenFn | undefined
 let unlistenDock: UnlistenFn | undefined
 let unlistenClose: UnlistenFn | undefined
 
@@ -285,7 +286,8 @@ async function start() {
   if (config.value.bandwidth < 0) config.value.bandwidth = local.value.speedMbps > 0 ? local.value.speedMbps : 0
   const invalid = validate(); if (invalid) { errorDialog.value = { title: t('err.paramError'), message: invalid }; return }
   const recoveredQueue = savedRecovery?.queue.slice(savedRecovery.nextIndex)
-  if (recoveredQueue) items.value.forEach((item) => { item.enabled = recoveredQueue.includes(item.id) })
+  // 恢复测试不覆盖用户当前勾选：启动时已按恢复队列初始化过勾选，
+  // 用户之后手动调整的勾选在恢复/重试时保持原样；恢复队列只决定执行顺序
   // TCP / UDP 测试项可同时勾选，按列表顺序逐个执行
   const selected = items.value.filter((i) => i.enabled)
   if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg') }; return }
@@ -404,7 +406,11 @@ function handleEvent(event: BackendEvent) {
   if (event.type === 'status' && event.message) {
     try {
       const s = JSON.parse(event.message) as { localPort?: number }
-      if (typeof s.localPort === 'number') clientLocalPort.value = s.localPort
+      // 控制连接建立即标记已连接（不必等第一个指标输出周期），本地端口同时更新
+      if (typeof s.localPort === 'number') {
+        clientLocalPort.value = s.localPort
+        if (!connected.value) { connected.value = true; log('INFO', t('log.connected')) }
+      }
     } catch { /* ignore */ }
   }
   if (event.type === 'metric' && event.metric) { points.value.push(event.metric); connected.value = true; if (event.taskId === 'ping' && event.metric.jitterMs) summary.pingAverage = event.metric.jitterMs }
@@ -418,7 +424,9 @@ function completeCurrent(status: TestItem['status']) {
   // 快照本次测试的完整数据到内存缓存（测试完成后图表显示；退出应用即销毁）
   completedPoints.value = [...points.value]
   if (item) completedLabel.value = itemLabel(item.id)
-  if (recovery.value) { recovery.value.nextIndex = queueIndex.value + 1; localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value)) }
+  // 恢复进度只在任务成功时推进；失败/停止的任务保持原位，重试或恢复时会重新包含它，
+  // 避免每次失败/恢复都吞掉一个测试项目
+  if (recovery.value && status === 'success') { recovery.value.nextIndex = queueIndex.value + 1; localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value)) }
   progress.value = Math.round(((queueIndex.value + 1) / queue.value.length) * 100)
   if (status === 'failed') { failCurrent(t('log.processExited')); return }
   // 仅驱动窗口启动下一项，避免多个窗口重复拉起同一个任务
@@ -434,7 +442,7 @@ function failCurrent(message: string) {
   errorDialog.value = { title: t('err.alert'), message: lastLog ? `${message}\n\n${t('err.logFile', { path: lastLog })}` : message }
 }
 function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100; recovery.value = null; localStorage.removeItem('linkgauge-recovery') } log('INFO', t('log.finish')) }
-async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; if (recovery.value) { recovery.value.nextIndex = Math.max(0, queueIndex.value); localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value)) } finishRun(false) }
+async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; /* 手动停止 = 主动结束本次测试：清除恢复状态，按钮回到「开始测试」，下次启动不再提示恢复（异常中断的恢复机制不受影响） */ recovery.value = null; localStorage.removeItem('linkgauge-recovery'); finishRun(false) }
 /** 放弃未完成的测试队列并恢复默认全选，重新开始新一轮测试 */
 function discardRecovery() {
   recovery.value = null
@@ -506,6 +514,8 @@ onMounted(async () => {
     try {
       // 跨窗口同步：状态包广播 + 主窗口收回标签通知 + 子窗口被请求关闭
       unlistenSync = await listen<SyncState>('side-sync', (e) => applySync(e.payload))
+      // 其他窗口请求当前状态（新分离的窗口启动时主动请求，避免错过状态变更而漏判事件）
+      unlistenSyncReq = await listen('side-sync-request', () => emitSync())
       if (side.value === 'hub') {
         unlistenDock = await listen<DockEvent>('side-dock', (e) => dockTab(e.payload.side))
       } else {
@@ -518,6 +528,8 @@ onMounted(async () => {
           await getCurrentWindow().destroy()
         })
         unlistenClose = await listen<DockEvent>('side-close', (e) => { if (e.payload.side === side.value) void dockBack() })
+        // 启动时请求一次完整状态（serverSession/clientRunning 等），随后的事件才能正确匹配会话
+        void emit('side-sync-request')
       }
       const [info, ifaces, customTcpLen, customUdpLen] = await Promise.all([
         invoke<NetworkInfo>('get_network_info'),
@@ -545,7 +557,7 @@ onMounted(async () => {
   }
   log('INFO', t('log.ready'))
 })
-onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenDock?.(); unlistenClose?.(); if (ticker) clearInterval(ticker) })
+onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unlistenDock?.(); unlistenClose?.(); if (ticker) clearInterval(ticker) })
 </script>
 
 <template>
