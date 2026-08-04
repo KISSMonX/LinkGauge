@@ -103,13 +103,10 @@ async fn write_html(path: PathBuf, request: &ReportRequest) -> Result<String, St
                     format!("测试项：{}（{status}）", escape_html(&item.label))
                 };
                 format!(
-                    "<section><h2>{heading}</h2>{}{}</section>",
+                    "<section><h2>{heading}</h2>{}<table>{}{}</table></section>",
                     svg_curve(&item.points, is_en),
-                    format!(
-                        "<table>{}{}</table>",
-                        table_head(is_en),
-                        table_rows(&item.points)
-                    )
+                    table_head(is_en),
+                    table_rows(&item.points)
                 )
             })
             .collect::<String>()
@@ -193,7 +190,7 @@ async fn write_pdf(path: PathBuf, request: &ReportRequest) -> Result<String, Str
             )
         })
         .collect::<String>();
-    let mut objects = vec![String::new(), "<< /Type /Catalog /Pages 2 0 R >>".into(), "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".into(), format!("<< /Length {} >>\nstream\n{}endstream", content.len(), content), "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into()];
+    let mut objects = [String::new(), "<< /Type /Catalog /Pages 2 0 R >>".into(), "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".into(), format!("<< /Length {} >>\nstream\n{}endstream", content.len(), content), "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into()];
     let mut pdf = "%PDF-1.4\n".to_string();
     let mut offsets = vec![0usize];
     for (i, obj) in objects.iter_mut().enumerate().skip(1) {
@@ -470,7 +467,7 @@ fn svg_curve(points: &[MetricPoint], is_en: bool) -> String {
     let t_max = points.last().map(|p| p.second).unwrap_or(0);
     let (mut v_min, mut v_max) = points
         .iter()
-        .map(|p| value(p))
+        .map(&value)
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
             (lo.min(v), hi.max(v))
         });

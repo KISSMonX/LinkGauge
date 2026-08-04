@@ -47,13 +47,15 @@ async fn client_server_roundtrip_with_live_intervals() {
         !outcome.report.intervals.is_empty(),
         "最终报告应包含区间数据"
     );
-    let live = intervals.lock().unwrap();
-    assert!(!live.is_empty(), "on_interval 实时回调未收到任何区间数据");
-    assert!(
-        live.iter().all(|bps| *bps > 0.0),
-        "区间带宽应大于 0：{live:?}"
-    );
-    drop(live);
+    // 锁在独立作用域内取用：guard 不能活到下面的 await（clippy::await_holding_lock）
+    {
+        let live = intervals.lock().unwrap();
+        assert!(!live.is_empty(), "on_interval 实时回调未收到任何区间数据");
+        assert!(
+            live.iter().all(|bps| *bps > 0.0),
+            "区间带宽应大于 0：{live:?}"
+        );
+    }
 
     let server_outcome = server_task.await.unwrap().unwrap();
     assert_eq!(server_outcome.termination, Termination::Completed);
@@ -118,7 +120,7 @@ async fn on_connect_hooks_fire_with_peer_address() {
     client.run().await.unwrap();
 
     // 服务端 on_connect 收到的应是客户端地址（回环测试中为 127.0.0.1）
-    let peer = server_peer.lock().unwrap().clone();
+    let peer = *server_peer.lock().unwrap();
     eprintln!("DEBUG server on_connect peer: {peer:?}");
     assert!(peer.is_some(), "服务端 on_connect 未触发");
     assert!(
@@ -126,7 +128,7 @@ async fn on_connect_hooks_fire_with_peer_address() {
         "服务端 on_connect 应收到回环对端地址"
     );
     // 客户端 on_connect 收到的是本机控制连接端口（localPort 数据源）
-    let local_port = client_local.lock().unwrap().clone();
+    let local_port = *client_local.lock().unwrap();
     assert!(local_port.is_some(), "客户端 on_connect 未触发");
 
     let server_outcome = server_task.await.unwrap().unwrap();
