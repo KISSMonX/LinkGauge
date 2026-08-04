@@ -211,7 +211,7 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <div class="section-title"><h2>{{ t('srv.title') }}</h2><span :class="['status-pill', serverRunning ? 'ok' : 'idle']">{{ serverRunning ? t('common.running') : t('common.notRunning') }}</span></div>
       <label><span>{{ t('srv.bindIp') }}</span><span class="ip-row"><input :value="serverConfig.bindIp" :disabled="serverRunning" :placeholder="t('srv.bindPlaceholder')" @input="setServer('bindIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="serverRunning" :title="t('nic.title')" @click="emit('pick-nic-server')">{{ t('cfg.nicBtn') }}</button></span></label>
       <label><span>{{ t('srv.port') }}</span><input type="number" :value="serverConfig.port" min="1" max="65535" :disabled="serverRunning" @input="setServer('port', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><span>{{ t('srv.interval') }}</span><input type="number" :value="serverConfig.interval" min="1" max="60" :disabled="serverRunning" @input="setServer('interval', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('srv.intervalNote') }}</small></label>
+      <label><span>{{ t('srv.interval') }}</span><span class="field"><input type="number" :value="serverConfig.interval" min="1" max="60" :disabled="serverRunning" @input="setServer('interval', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('srv.intervalNote') }}</small></span></label>
       <p class="server-hint">{{ t('srv.hint') }}</p>
       <p class="runtime-state available">{{ t('cfg.engineReady') }}</p>
     </section>
