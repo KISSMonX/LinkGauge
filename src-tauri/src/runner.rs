@@ -479,12 +479,16 @@ async fn run_engine_server(
         move |addr| {
             let host = addr.ip().to_canonical().to_string();
             let port = addr.port();
-            // 记录对端（客户端）地址到快照，后续心跳事件持续携带
-            if let Some(snapshot) = latest.lock().unwrap().as_mut() {
+            // 记录对端（客户端）地址到快照，后续心跳事件持续携带。
+            // 注意：锁必须在 if-let 外统一获取——if-let 的条件临时值（MutexGuard）
+            // 存活到整个 if-let 语句结束，在 else 分支里再次 lock 会对同一线程
+            // 重复获取 std Mutex 而死锁（客户端首次连接、快照为 None 时必现）
+            let mut snapshot_guard = latest.lock().unwrap();
+            if let Some(snapshot) = snapshot_guard.as_mut() {
                 snapshot.peer_ip = host.clone();
                 snapshot.peer_port = port;
             } else {
-                *latest.lock().unwrap() = Some(ServerInterval {
+                *snapshot_guard = Some(ServerInterval {
                     peer_ip: host.clone(),
                     peer_port: port,
                     ..Default::default()
