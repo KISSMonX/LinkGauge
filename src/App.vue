@@ -62,8 +62,8 @@ const errorDialog = ref<{ title: string; message: string } | null>(null)
 const infoDialog = ref<{ title: string; message: string } | null>(null)
 /** 设置弹窗：语言 / 主题 */
 const settingsDialog = ref(false)
-/** 停止确认弹窗：客户端停止测试 / 服务端停止服务（中英文跟随界面语言） */
-const confirmDialog = ref<{ title: string; message: string; action: 'stop' | 'stop-server' } | null>(null)
+/** 停止确认弹窗：客户端停止测试 / 服务端停止服务 / 主窗口退出（中英文跟随界面语言） */
+const confirmDialog = ref<{ title: string; message: string; action: 'stop' | 'stop-server' | 'exit' } | null>(null)
 const interfaces = ref<InterfaceInfo[]>([])
 const savedTcpLength = ref(0)
 const savedUdpLength = ref(0)
@@ -98,10 +98,14 @@ const dockedTabs = ref<('client' | 'server')[]>(['client', 'server'])
 /** 驱动客户端任务队列的窗口 label：谁点「开始测试」谁驱动，其他窗口只展示不重复启动 */
 const driver = ref('')
 let syncing = false
+/** 分离窗口启动后收到首个远端状态同步前，禁止对外广播：
+ *  否则启动瞬间会把空 points/logs/会话广播出去，覆盖其他窗口的实时数据 */
+let stateReady = side.value === 'hub'
 let unlistenSync: UnlistenFn | undefined
 let unlistenSyncReq: UnlistenFn | undefined
 let unlistenDock: UnlistenFn | undefined
 let unlistenClose: UnlistenFn | undefined
+let unlistenExit: UnlistenFn | undefined
 
 /** 当前展示的是服务端视角：服务端分离窗口，或主窗口激活「服务端」标签（右侧概览/曲线/日志随之切换） */
 const showServerView = computed(() => side.value === 'server' || (side.value === 'hub' && activeTab.value === 'server'))
@@ -165,11 +169,13 @@ function syncBundle(): SyncState {
   }
 }
 function emitSync() {
-  if (!isTauri() || syncing) return
+  if (!isTauri() || syncing || !stateReady) return
   void emit('side-sync', syncBundle())
 }
 async function applySync(payload: SyncState) {
   syncing = true
+  // 收到任何远端同步即视为已就绪（自己的广播在就绪前被抑制，此处收到的必为远端）
+  stateReady = true
   config.value = payload.config
   serverConfig.value = payload.serverConfig
   items.value = payload.items
@@ -357,6 +363,12 @@ async function confirmStop() {
   confirmDialog.value = null
   if (action === 'stop') await stop()
   else if (action === 'stop-server') await stopServer()
+  else if (action === 'exit') await exitApp()
+}
+
+/** 主窗口退出确认后：结束整个应用（后端 exit_app 退出主进程，子窗口一并关闭） */
+async function exitApp() {
+  try { if (isTauri()) await invoke('exit_app') } catch (e) { log('ERROR', String(e)) }
 }
 
 /** 启动 riperf3 服务端（独立于客户端任务队列，两者可同时运行） */
@@ -552,10 +564,17 @@ onMounted(async () => {
       invoke('set_locale', { locale: locale.value }).catch(() => {})
       // 跨窗口同步：状态包广播 + 主窗口收回标签通知 + 子窗口被请求关闭
       unlistenSync = await listen<SyncState>('side-sync', (e) => applySync(e.payload))
-      // 其他窗口请求当前状态（新分离的窗口启动时主动请求，避免错过状态变更而漏判事件）
-      unlistenSyncReq = await listen('side-sync-request', () => emitSync())
+      // 其他窗口请求当前状态（新分离的窗口启动时主动请求）：立即应答完整快照，
+      // 不受 syncing 阻塞——应答方正在应用状态时，其同步赋值已完成，快照内容一致
+      unlistenSyncReq = await listen('side-sync-request', () => { if (stateReady) void emit('side-sync', syncBundle()) })
       if (side.value === 'hub') {
         unlistenDock = await listen<DockEvent>('side-dock', (e) => dockTab(e.payload.side))
+        // 主窗口关闭（✕）= 弹退出确认框：确认后调用 exit_app 退出整个应用，取消则保持打开
+        unlistenExit = await getCurrentWindow().onCloseRequested((event) => {
+          event.preventDefault()
+          const runningNote = clientRunning.value || serverRunning.value ? '\n' + t('confirm.exitRunningNote') : ''
+          confirmDialog.value = { title: t('confirm.exitTitle'), message: t('confirm.exitMessage') + runningNote, action: 'exit' }
+        })
       } else {
         // 子窗口关闭（右上角 ✕）= 标签收回主窗口，而不是退出
         unlistenDock = await getCurrentWindow().onCloseRequested(async (event) => {
@@ -595,7 +614,7 @@ onMounted(async () => {
   }
   log('INFO', t('log.ready'))
 })
-onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unlistenDock?.(); unlistenClose?.(); if (ticker) clearInterval(ticker) })
+onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unlistenDock?.(); unlistenClose?.(); unlistenExit?.(); if (ticker) clearInterval(ticker) })
 </script>
 
 <template>
@@ -639,7 +658,7 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unliste
     </div>
     <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
     <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><button v-if="!errorDialog" @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
-    <div v-if="confirmDialog" class="modal-backdrop" @click.self="confirmDialog = null"><div class="modal"><button class="modal-close" @click="confirmDialog = null">×</button><h2>{{ confirmDialog.title }}</h2><div class="modal-body"><span class="modal-symbol info">i</span><p>{{ confirmDialog.message }}</p></div><div class="modal-actions"><button @click="confirmDialog = null">{{ t('common.cancel') }}</button><button class="danger" @click="confirmStop">{{ t('common.confirm') }}</button></div></div></div>
+    <div v-if="confirmDialog" class="modal-backdrop" @click.self="confirmDialog = null"><div class="modal"><button class="modal-close" @click="confirmDialog = null">×</button><h2>{{ confirmDialog.title }}</h2><div class="modal-body"><span class="modal-symbol info">i</span><p>{{ confirmDialog.message }}</p></div><div class="modal-actions"><button @click="confirmDialog = null">{{ t('common.cancel') }}</button><button class="danger" @click="confirmStop">{{ confirmDialog.action === 'exit' ? t('confirm.exitButton') : t('common.confirm') }}</button></div></div></div>
     <div v-if="settingsDialog" class="modal-backdrop" @click.self="settingsDialog = false"><div class="modal"><button class="modal-close" @click="settingsDialog = false">×</button><h2>{{ t('settings.title') }}</h2><div class="settings-form"><label><span>{{ t('settings.language') }}</span><select :value="locale" @change="onLocaleChange($event)"><option value="en">English</option><option value="zh">中文</option></select></label><label><span>{{ t('settings.theme') }}</span><select :value="theme" @change="onThemeChange($event)"><option value="light">{{ t('settings.light') }}</option><option value="dark">{{ t('settings.dark') }}</option></select></label></div><p class="settings-note">{{ t('settings.engineNote') }}</p><div class="modal-actions"><button class="primary" @click="settingsDialog = false">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false; applyNic(0)">{{ t('nic.cancel') }}</button></div></div></div>
   </div>

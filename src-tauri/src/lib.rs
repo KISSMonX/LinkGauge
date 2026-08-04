@@ -6,6 +6,14 @@ mod system;
 
 use tauri::{Manager, RunEvent};
 
+/// 前端「退出确认框」确认后调用：结束整个应用。
+/// 主窗口 ✕ 由前端 onCloseRequested 拦截弹确认框，确认后走这里退出，
+/// 分离的客户端/服务端子窗口随主进程一起退出，而非等到最后一个窗口关闭。
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 /// 将客户端 / 服务端标签页分离为独立窗口（窗口 label 即 side，前端按 label 渲染对应界面）。
 /// 已存在同名窗口时直接聚焦，避免重复创建。
 /// 注意：必须用 async 命令创建窗口——Windows 上在同步命令内调用 build() 会死锁
@@ -54,22 +62,10 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .setup(|app| {
-            // 主窗口关闭 = 整个应用退出：分离出来的客户端/服务端子窗口随主窗口一起退出，
-            // 而不是等到最后一个窗口关闭才退出
-            if let Some(main) = app.get_webview_window("main") {
-                let app_handle = app.handle().clone();
-                main.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        app_handle.exit(0);
-                    }
-                });
-            }
-            Ok(())
-        })
+        .setup(|_app| Ok(()))
         .manage(runner::AppState::default())
         .invoke_handler(tauri::generate_handler![
+            exit_app,
             create_side_window,
             runner::start_test,
             runner::stop_test,

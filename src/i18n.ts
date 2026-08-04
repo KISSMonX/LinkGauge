@@ -78,6 +78,10 @@ const zh = {
   'confirm.stopMessage': '确定要停止当前测试吗？已完成的测试结果会保留。',
   'confirm.stopServerTitle': '停止服务',
   'confirm.stopServerMessage': '确定要停止服务端吗？停止后端口将释放。',
+  'confirm.exitTitle': '退出 LinkGauge',
+  'confirm.exitMessage': '确定要退出 LinkGauge 吗？',
+  'confirm.exitRunningNote': '测试正在运行，退出将中断测试。',
+  'confirm.exitButton': '退出',
 
   // 报告 / 预览模式
   'report.generated': '报告已生成',
@@ -341,6 +345,10 @@ const en: Record<MessageKey, string> = {
   'confirm.stopMessage': 'Stop the current test? Completed results will be kept.',
   'confirm.stopServerTitle': 'Stop Server',
   'confirm.stopServerMessage': 'Stop the server? The port will be released.',
+  'confirm.exitTitle': 'Quit LinkGauge',
+  'confirm.exitMessage': 'Quit LinkGauge?',
+  'confirm.exitRunningNote': 'A test is running; exiting will interrupt it.',
+  'confirm.exitButton': 'Quit',
 
   'report.generated': 'Report generated',
   'report.saveTitle': 'Save Test Report',
