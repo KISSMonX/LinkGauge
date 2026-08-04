@@ -6,7 +6,19 @@
 
 > 当前发布状态：Windows x64 已支持生成 NSIS 安装包。Linux 支持从源码构建。安装包内不包含任何第三方网络测试二进制。
 
-![LinkGauge](doc/screenshot-CN.png)
+## 界面截图
+
+**客户端视图** — 左侧为测试项目勾选与参数配置，中间为实时带宽曲线及本机 / 对端 / 连接信息，右侧为任务队列与可筛选的实时日志，底部为报告概要。
+
+| English | 简体中文 |
+| --- | --- |
+| ![Client UI (English)](doc/screenshot-client-EN.png) | ![客户端界面（中文）](doc/screenshot-client-CN.png) |
+
+**服务端视图** — 左侧为监听配置，中间为服务端概览（监听地址、对端客户端、运行时长、累计完成测试）与服务端观测的带宽曲线，右侧为服务端日志。
+
+| English | 简体中文 |
+| --- | --- |
+| ![Server UI (English)](doc/screenshot-server-EN.png) | ![服务端界面（中文）](doc/screenshot-server-CN.png) |
 
 ## 功能特性
 

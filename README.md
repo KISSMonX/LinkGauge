@@ -6,7 +6,19 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 
 > Current release status: Windows x64 is fully packaged as an NSIS installer. Linux builds are supported from source. The installer contains no third-party network-testing binaries.
 
-![LinkGauge](doc/screenshot-EN.png)
+## Screenshots
+
+**Client view** — test selection and parameters on the left, live bandwidth chart with local / peer / connection info in the center, task queue and filterable logs on the right, report summary at the bottom.
+
+| English | 简体中文 |
+| --- | --- |
+| ![Client UI (English)](doc/screenshot-client-EN.png) | ![客户端界面（中文）](doc/screenshot-client-CN.png) |
+
+**Server view** — listen configuration on the left, server overview (bind address, peer client, uptime, completed tests) with the server-observed bandwidth chart in the center, and server logs on the right.
+
+| English | 简体中文 |
+| --- | --- |
+| ![Server UI (English)](doc/screenshot-server-EN.png) | ![服务端界面（中文）](doc/screenshot-server-CN.png) |
 
 ## Features
 
@@ -252,7 +264,6 @@ The peer must be reachable, its firewall must allow the configured TCP/UDP port,
 
 - Configuration can be imported or exported as JSON.
 - **Save Configuration** stores the current settings in the local WebView storage.
-- Recovery state is stored locally and removed after the complete queue succeeds.
 - Test logs are written under the OS-specific Tauri application log directory in `tests/`.
 - Reports are written under the OS-specific Tauri application data directory in `reports/`.
 - The custom packet length is persisted to `settings.json` in the OS-specific Tauri application config directory.
