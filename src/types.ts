@@ -20,9 +20,19 @@ export interface TestConfig {
   bandwidth: number
   /** TCP 报文长度（默认 128KB，最大 1MB） */
   packetLength: number
-  /** UDP 报文长度（默认 8KB，最大 64KB） */
+  /** UDP 报文长度（默认 1460 B，与 iperf3 的 DEFAULT_UDP_BLKSIZE 一致；最大 64KB）。
+   *  超过路径 MTU 会触发 IP 分片，丢包率将被分片放大而无法与原生 iperf3 结果对比 */
   udpPacketLength: number
   interval: number
+  /** 启用 iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path 启动时必需） */
+  authEnabled: boolean
+  authUsername: string
+  /** 认证密码：只在内存与窗口间同步，不写入 localStorage、不随配置导出 */
+  authPassword: string
+  /** 服务端 RSA 公钥文件路径，用于加密凭据 */
+  authPublicKeyPath: string
+  /** 对 iperf3 < 3.17 的服务端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP） */
+  authPkcs1Padding: boolean
 }
 
 /** 服务端独立配置（与服务端标签页绑定，与客户端参数互不影响） */

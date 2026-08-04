@@ -310,9 +310,89 @@ async fn run_engine_client(
     );
 
     let params = client_params_for(&request);
+    // iperf3 服务端一次只服务一个测试：队列里上一项刚结束时对端可能尚未回到监听
+    // 状态，此刻连上去会收到 ServerBusy。自动重试数次，避免整个测试项被误判为失败。
+    let mut attempt: u32 = 0;
+    let outcome = loop {
+        let builder = engine_client_builder(
+            &app,
+            &session_id,
+            &request,
+            &params,
+            &log,
+            &locale_handle,
+            rx.clone(),
+        );
+        let client = match builder.build() {
+            Ok(client) => client,
+            Err(error) => {
+                fail_engine(
+                    &app,
+                    &session_id,
+                    &request.task_id,
+                    &log,
+                    &locale,
+                    &tr_format!(
+                        &locale,
+                        "测试配置无效：{}",
+                        "Invalid test configuration: {}",
+                        error
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
+        match client.run().await {
+            // 已收到停止信号时不再重试（rx 非 None = 用户已点停止）
+            Err(riperf3::RiperfError::ServerBusy)
+                if attempt < BUSY_RETRY_MAX && rx.borrow().is_none() =>
+            {
+                attempt += 1;
+                let locale = current_locale(&locale_handle);
+                let message = tr_format!(
+                    &locale,
+                    "服务端正忙，{} 秒后重试（第 {}/{} 次）",
+                    "Server busy, retrying in {}s ({}/{})",
+                    BUSY_RETRY_DELAY.as_secs(),
+                    attempt,
+                    BUSY_RETRY_MAX
+                );
+                append_log(&log, &format!("[WARN] {message}"));
+                emit_log(&app, &session_id, &request.task_id, "WARN", message);
+                // 等待期间仍要响应「停止测试」，否则用户得干等完整个退避
+                let mut wait_rx = rx.clone();
+                tokio::select! {
+                    _ = sleep(BUSY_RETRY_DELAY) => {}
+                    _ = wait_rx.changed() => {}
+                }
+            }
+            other => break other,
+        }
+    };
+    finish_engine(&app, &session_id, &request.task_id, &log, &request, &locale, outcome).await;
+}
+
+/// 服务端忙时的重试次数与退避间隔（iperf3 服务端串行服务，队列相邻项之间常撞上）
+const BUSY_RETRY_MAX: u32 = 3;
+const BUSY_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// 构造一次 riperf3 客户端 builder。
+///
+/// 必须每次重试都重新构造：`build()` 会消费 builder，其中的回调闭包也随之被移走。
+#[allow(clippy::too_many_arguments)]
+fn engine_client_builder(
+    app: &AppHandle,
+    session_id: &str,
+    request: &TestRequest,
+    params: &ClientParams,
+    log: &SessionLog,
+    locale_handle: &Arc<RwLock<String>>,
+    rx: watch::Receiver<Option<String>>,
+) -> ClientBuilder {
     // 实时指标回调：每输出周期触发一次，发出 metric 事件并写入日志
     let hook_app = app.clone();
-    let hook_session = session_id.clone();
+    let hook_session = session_id.to_string();
     let hook_task = request.task_id.clone();
     let hook_log = log.clone();
     let hook_locale = locale_handle.clone();
@@ -350,7 +430,7 @@ async fn run_engine_client(
         .on_connect({
             // 控制连接建立即广播本地端口（客户端「连接状态」展示本次连接的本地端口）
             let app = app.clone();
-            let session_id = session_id.clone();
+            let session_id = session_id.to_string();
             let task_id = request.task_id.clone();
             move |addr| {
                 let payload = format!(r#"{{"localPort":{}}}"#, addr.port());
@@ -383,29 +463,22 @@ async fn run_engine_client(
     if let Some(addr) = &params.bind_address {
         builder = builder.bind_address(addr);
     }
-    let client = match builder.build() {
-        Ok(client) => client,
-        Err(error) => {
-            fail_engine(
-                &app,
-                &session_id,
-                &request.task_id,
-                &log,
-                &locale,
-                &tr_format!(
-                    &locale,
-                    "测试配置无效：{}",
-                    "Invalid test configuration: {}",
-                    error
-                ),
-            )
-            .await;
-            return;
-        }
-    };
-
-    let outcome = client.run().await;
-    finish_engine(&app, &session_id, &request.task_id, &log, &request, &locale, outcome).await;
+    // iperf3 认证：服务端以 --rsa-private-key-path + --authorized-users-path 启动时，
+    // 客户端须用服务端公钥加密「用户名+密码」。未启用时前端已把三项清空，这里自然跳过。
+    if !request.auth_username.trim().is_empty() {
+        builder = builder.username(request.auth_username.trim());
+    }
+    if !request.auth_password.is_empty() {
+        builder = builder.password(&request.auth_password);
+    }
+    if !request.auth_public_key_path.trim().is_empty() {
+        builder = builder.rsa_public_key_path(request.auth_public_key_path.trim());
+    }
+    // iperf3 3.17 起默认 OAEP 填充，更早的服务端只认 PKCS#1 v1.5
+    if request.auth_pkcs1_padding {
+        builder = builder.use_pkcs1_padding(true);
+    }
+    builder
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,12 +1145,22 @@ async fn finish_engine(
 ) {
     match outcome {
         Err(error) => {
-            let message = tr_format!(
-                locale,
-                "测试失败：{}",
-                "Test failed: {}",
-                error
-            );
+            // 两类可操作的失败给出具体排查方向，其余沿用引擎原文
+            let message = match &error {
+                riperf3::RiperfError::ServerBusy => tr_format!(
+                    locale,
+                    "服务端忙：iperf3 一次只服务一个测试，重试 {} 次后仍被拒绝。请确认没有其他客户端正在占用该服务端。",
+                    "Server busy: iperf3 serves one test at a time and still refused after {} retries. Check that no other client is using that server.",
+                    BUSY_RETRY_MAX
+                ),
+                riperf3::RiperfError::AccessDenied => tr(
+                    locale,
+                    "认证被服务端拒绝：请核对用户名、密码，以及 RSA 公钥是否与服务端 --authorized-users-path 中的条目匹配；若对端 iperf3 低于 3.17，需勾选「PKCS#1 填充」。",
+                    "Authentication rejected: verify the username, password, and that the RSA public key matches an entry in the server's --authorized-users-path. Tick \"PKCS#1 padding\" if the peer iperf3 is older than 3.17.",
+                )
+                .to_string(),
+                _ => tr_format!(locale, "测试失败：{}", "Test failed: {}", error),
+            };
             fail_engine(app, session_id, task_id, log, locale, &message).await;
         }
         Ok(outcome) => {
@@ -1391,6 +1474,10 @@ mod tests {
             packet_length: 1024,
             udp_packet_length: 8192,
             interval: 1,
+            auth_username: String::new(),
+            auth_password: String::new(),
+            auth_public_key_path: String::new(),
+            auth_pkcs1_padding: false,
         }
     }
 
