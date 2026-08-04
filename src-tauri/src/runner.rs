@@ -390,6 +390,16 @@ async fn run_engine_client(
 // riperf3 服务端任务：持续监听直到手动停止
 // ---------------------------------------------------------------------------
 
+/// 数值防护：NaN / Infinity 无法表示为 JSON 数字，直接格式化会产生非法 JSON
+/// （前端 JSON.parse 失败后整条 status 事件被丢弃，服务端概览全部不刷新），统一归零
+fn safe_f64(value: f64) -> f64 {
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
+}
+
 /// 服务端最近一个输出周期的统计快照（on_interval 回调写入，心跳任务读取并广播给前端）；
 /// 同时记录最近一次连接的客户端地址（服务端概览「对端=客户端」的数据源）
 #[derive(Default, Clone)]
@@ -458,10 +468,10 @@ async fn run_engine_server(
             let mut guard = latest.lock().unwrap();
             let peer = guard.as_ref().map(|s| (s.peer_ip.clone(), s.peer_port)).unwrap_or_default();
             *guard = Some(ServerInterval {
-                bandwidth_mbps: sum.bits_per_second / 1_000_000.0,
-                transfer_mb: sum.bytes as f64 / 1_000_000.0,
-                jitter_ms: sum.jitter_ms.unwrap_or(0.0),
-                loss_percent: sum.lost_percent.unwrap_or(0.0),
+                bandwidth_mbps: safe_f64(sum.bits_per_second / 1_000_000.0),
+                transfer_mb: safe_f64(sum.bytes as f64 / 1_000_000.0),
+                jitter_ms: safe_f64(sum.jitter_ms.unwrap_or(0.0)),
+                loss_percent: safe_f64(sum.lost_percent.unwrap_or(0.0)),
                 retransmits: sum.retransmits.unwrap_or(0).max(0) as u64,
                 peer_ip: peer.0,
                 peer_port: peer.1,
@@ -644,7 +654,11 @@ async fn run_engine_server(
                 let stats = match &snapshot {
                     Some(s) => format!(
                         r#","bandwidthMbps":{},"transferMb":{},"jitterMs":{},"lossPercent":{},"retransmits":{}"#,
-                        s.bandwidth_mbps, s.transfer_mb, s.jitter_ms, s.loss_percent, s.retransmits
+                        safe_f64(s.bandwidth_mbps),
+                        safe_f64(s.transfer_mb),
+                        safe_f64(s.jitter_ms),
+                        safe_f64(s.loss_percent),
+                        s.retransmits
                     ),
                     None => String::new(),
                 };

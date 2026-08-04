@@ -370,6 +370,20 @@ function simulateTask(taskId: string) {
 }
 
 function handleEvent(event: BackendEvent) {
+  // 客户端本地端口状态事件：必须在会话匹配之前处理——同机测试 connect 极快，
+  // 该事件可能早于 invoke('start_test') 的返回值（sessionId 尚未更新）到达，
+  // 按 sessionId 匹配会被丢弃，而端口只在连接时发出一次，错过就无法显示。
+  // 客户端任务的 taskId 不会是 'server'，据此与服务端心跳 status 区分。
+  if (event.type === 'status' && event.message && event.taskId !== 'server') {
+    try {
+      const s = JSON.parse(event.message) as { localPort?: number }
+      // 控制连接建立即标记已连接（不必等第一个指标输出周期），本地端口同时更新
+      if (typeof s.localPort === 'number') {
+        clientLocalPort.value = s.localPort
+        if (!connected.value) { connected.value = true; log('INFO', t('log.connected')) }
+      }
+    } catch { /* ignore */ }
+  }
   const isClient = event.sessionId === clientSession.value
   const isServer = event.sessionId === serverSession.value
   if (!isClient && !isServer) return
@@ -395,7 +409,7 @@ function handleEvent(event: BackendEvent) {
         if (s.serving && typeof s.bandwidthMbps === 'number') {
           serverPoints.value.push({ second: s.uptime ?? 0, bandwidthMbps: s.bandwidthMbps, transferMb: s.transferMb ?? 0, jitterMs: s.jitterMs ?? 0, lossPercent: s.lossPercent ?? 0, retransmits: s.retransmits ?? 0 })
         }
-      } catch { /* ignore */ }
+      } catch (e) { log('WARN', `服务端状态解析失败：${e}（${event.message}）`) }
     }
     if (event.type === 'complete') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; serverPeerIp.value = ''; serverPeerPort.value = 0; log('INFO', t('log.serverStopped', { reason: event.status === 'stopped' ? t('log.stoppedManual') : t('log.stoppedEnded') })) }
     if (event.type === 'error') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; serverPeerIp.value = ''; serverPeerPort.value = 0; log('ERROR', event.message || t('err.serverExited')); errorDialog.value = { title: t('err.serverError'), message: event.message || t('err.serverExited') } }
@@ -403,16 +417,6 @@ function handleEvent(event: BackendEvent) {
   }
   // 客户端事件：停止或结束后的事件忽略
   if (!clientRunning.value) return
-  if (event.type === 'status' && event.message) {
-    try {
-      const s = JSON.parse(event.message) as { localPort?: number }
-      // 控制连接建立即标记已连接（不必等第一个指标输出周期），本地端口同时更新
-      if (typeof s.localPort === 'number') {
-        clientLocalPort.value = s.localPort
-        if (!connected.value) { connected.value = true; log('INFO', t('log.connected')) }
-      }
-    } catch { /* ignore */ }
-  }
   if (event.type === 'metric' && event.metric) { points.value.push(event.metric); connected.value = true; if (event.taskId === 'ping' && event.metric.jitterMs) summary.pingAverage = event.metric.jitterMs }
   if (event.type === 'complete') completeCurrent(event.status || 'success')
   if (event.type === 'error') failCurrent(event.message || t('err.execFailed'))
