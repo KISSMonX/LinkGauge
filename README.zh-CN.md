@@ -6,7 +6,7 @@
 
 > 当前发布状态：Windows x64 已支持生成 NSIS 安装包。Linux 支持从源码构建。安装包内不包含任何第三方网络测试二进制。
 
-![LinkGauge](doc/GUI.png)
+![LinkGauge](doc/screenshot-CN.png)
 
 ## 功能特性
 

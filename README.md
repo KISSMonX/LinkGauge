@@ -6,7 +6,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 
 > Current release status: Windows x64 is fully packaged as an NSIS installer. Linux builds are supported from source. The installer contains no third-party network-testing binaries.
 
-![LinkGauge](doc/GUI.png)
+![LinkGauge](doc/screenshot-EN.png)
 
 ## Features
 
