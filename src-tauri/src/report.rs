@@ -76,15 +76,16 @@ pub async fn open_report_dir(app: AppHandle) -> Result<String, String> {
 }
 
 async fn write_html(path: PathBuf, request: &ReportRequest) -> Result<String, String> {
-    let config = serde_json::to_string_pretty(&request.config).unwrap_or_default();
-    let summary = serde_json::to_string_pretty(&request.summary).unwrap_or_default();
     let logs = request
         .logs
         .iter()
-        .map(|l| format!("<div>{}</div>", escape_html(&l.to_string())))
+        .map(|l| format!("<div>{}</div>", escape_html(&log_line(l))))
         .collect::<String>();
     // 报告语言跟随界面语言（默认中文）
     let is_en = request.locale == "en";
+    // 配置与统计以两列表格呈现（JSON 不适合作为报告内容），数值/枚举转可读文本
+    let config_section = config_section_html(request, is_en);
+    let stats_section = stats_section_html(request, is_en);
     // 数据区：按测试项目分组，每项一个 section（标题 + 曲线 + 数据表）；
     // 无分组数据时回退为单一数据表（兼容旧版调用）
     let data_section = if request.items.is_empty() {
@@ -115,18 +116,20 @@ async fn write_html(path: PathBuf, request: &ReportRequest) -> Result<String, St
     };
     let html = if is_en {
         format!(
-            r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>LinkGauge Test Report</title><style>body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0}}pre{{background:#f6f8fb;padding:14px;white-space:pre-wrap}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}</style></head><body><h1>LinkGauge Test Report</h1><p>Generated: {}</p><section><h2>Test Configuration</h2><pre>{}</pre></section><section><h2>Statistics</h2><pre>{}</pre></section>{data_section}<section><h2>Run Logs</h2><div class="logs">{}</div></section></body></html>"#,
+            r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>LinkGauge Test Report</title><style>body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}table.kv th,table.kv td{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}</style></head><body><h1>LinkGauge Test Report</h1><p>Generated: {}</p>{}{}{}<section><h2>Run Logs</h2><div class="logs">{}</div></section></body></html>"#,
             Local::now().format("%Y-%m-%d %H:%M:%S"),
-            escape_html(&config),
-            escape_html(&summary),
+            config_section,
+            stats_section,
+            data_section,
             logs
         )
     } else {
         format!(
-            r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>LinkGauge 测试报告</title><style>body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0}}pre{{background:#f6f8fb;padding:14px;white-space:pre-wrap}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}</style></head><body><h1>LinkGauge 测试报告</h1><p>生成时间：{}</p><section><h2>测试配置</h2><pre>{}</pre></section><section><h2>统计结果</h2><pre>{}</pre></section>{data_section}<section><h2>执行日志</h2><div class="logs">{}</div></section></body></html>"#,
+            r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>LinkGauge 测试报告</title><style>body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}table.kv th,table.kv td{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}</style></head><body><h1>LinkGauge 测试报告</h1><p>生成时间：{}</p>{}{}{}<section><h2>执行日志</h2><div class="logs">{}</div></section></body></html>"#,
             Local::now().format("%Y-%m-%d %H:%M:%S"),
-            escape_html(&config),
-            escape_html(&summary),
+            config_section,
+            stats_section,
+            data_section,
             logs
         )
     };
@@ -218,6 +221,124 @@ fn escape_html(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// 测试配置参数的显示顺序与本地化标签（(key, 中文, English)）
+const CONFIG_ORDER: [&str; 9] = ["mode", "serverIp", "port", "duration", "parallel", "bandwidth", "packetLength", "udpPacketLength", "interval"];
+const CONFIG_LABELS: [(&str, &str, &str); 9] = [
+    ("mode", "测试模式", "Mode"),
+    ("serverIp", "服务端地址", "Server IP"),
+    ("port", "端口", "Port"),
+    ("duration", "测试时长（秒）", "Duration (s)"),
+    ("parallel", "并发流数", "Parallel streams"),
+    ("bandwidth", "带宽限制（Mbps）", "Bandwidth limit (Mbps)"),
+    ("packetLength", "TCP 报文长度（字节）", "TCP packet length (B)"),
+    ("udpPacketLength", "UDP 报文长度（字节）", "UDP packet length (B)"),
+    ("interval", "采样间隔（秒）", "Sampling interval (s)"),
+];
+
+/// 统计结果的显示顺序与本地化标签
+const STATS_ORDER: [&str; 11] = ["startedAt", "completed", "total", "averageBandwidth", "maxBandwidth", "minBandwidth", "totalTransferMb", "pingAverage", "lossPercent", "jitterMs", "logPaths"];
+const STATS_LABELS: [(&str, &str, &str); 11] = [
+    ("startedAt", "测试时间", "Started at"),
+    ("completed", "已完成项目数", "Completed items"),
+    ("total", "总项目数", "Total items"),
+    ("averageBandwidth", "平均带宽（Mbps）", "Average bandwidth (Mbps)"),
+    ("maxBandwidth", "最大带宽（Mbps）", "Max bandwidth (Mbps)"),
+    ("minBandwidth", "最小带宽（Mbps）", "Min bandwidth (Mbps)"),
+    ("totalTransferMb", "总传输量（MB）", "Total transfer (MB)"),
+    ("pingAverage", "平均 Ping（ms）", "Average ping (ms)"),
+    ("lossPercent", "丢包率（%）", "Packet loss (%)"),
+    ("jitterMs", "抖动（ms）", "Jitter (ms)"),
+    ("logPaths", "日志文件", "Log files"),
+];
+
+/// 测试配置 section：两列表格（参数 / 值）
+fn config_section_html(request: &ReportRequest, is_en: bool) -> String {
+    format!(
+        "<section><h2>{}</h2>{}</section>",
+        if is_en { "Test Configuration" } else { "测试配置" },
+        kv_table(&request.config, &CONFIG_ORDER, &CONFIG_LABELS, is_en, if is_en { "Parameter" } else { "参数" })
+    )
+}
+
+/// 统计结果 section：两列表格（统计项 / 值）
+fn stats_section_html(request: &ReportRequest, is_en: bool) -> String {
+    format!(
+        "<section><h2>{}</h2>{}</section>",
+        if is_en { "Statistics" } else { "统计结果" },
+        kv_table(&request.summary, &STATS_ORDER, &STATS_LABELS, is_en, if is_en { "Metric" } else { "统计项" })
+    )
+}
+
+/// 通用两列表格：按 ORDER 顺序输出，键转本地化标签、值转可读文本；缺失的键跳过
+fn kv_table(obj: &serde_json::Value, order: &[&str], labels: &[(&str, &str, &str)], is_en: bool, head1: &str) -> String {
+    let rows = order
+        .iter()
+        .filter_map(|k| {
+            obj.get(*k).map(|v| {
+                let label = labels
+                    .iter()
+                    .find(|(key, _, _)| key == k)
+                    .map(|(_, zh, en)| if is_en { *en } else { *zh })
+                    .unwrap_or(k);
+                format!(
+                    "<tr><td>{}</td><td>{}</td></tr>",
+                    escape_html(label),
+                    cell_html(k, v, is_en)
+                )
+            })
+        })
+        .collect::<String>();
+    format!(
+        "<table class=\"kv\"><thead><tr><th>{head1}</th><th>{}</th></tr></thead>{rows}</table>",
+        if is_en { "Value" } else { "值" }
+    )
+}
+
+/// 单元格 HTML：普通值转可读文本并转义；数组（如日志文件列表）逐项转义后换行展示
+fn cell_html(key: &str, v: &serde_json::Value, is_en: bool) -> String {
+    match v {
+        serde_json::Value::Array(arr) => {
+            let joined = arr
+                .iter()
+                .filter_map(|x| x.as_str())
+                .map(escape_html)
+                .collect::<Vec<_>>()
+                .join("<br>");
+            if joined.is_empty() { "—".to_string() } else { joined }
+        }
+        _ => escape_html(&readable_value(key, v, is_en)),
+    }
+}
+
+/// 值可读化：mode 枚举转本地化文字；数字整数值不带小数、其余保留两位
+fn readable_value(key: &str, v: &serde_json::Value, is_en: bool) -> String {
+    match v {
+        serde_json::Value::String(s) => match (key, s.as_str()) {
+            ("mode", "client") => (if is_en { "Client" } else { "客户端" }).to_string(),
+            ("mode", "server") => (if is_en { "Server" } else { "服务端" }).to_string(),
+            _ => s.clone(),
+        },
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .map(|f| if f.fract() == 0.0 { format!("{f:.0}") } else { format!("{f:.2}") })
+            .unwrap_or_else(|| v.to_string()),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "—".to_string(),
+        _ => v.to_string(),
+    }
+}
+
+/// 日志条目（JSON）→ 可读文本行：[时间] [级别] [模块] 消息
+fn log_line(l: &serde_json::Value) -> String {
+    let get = |k: &str| l.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let (time, level, module, message) = (get("time"), get("level"), get("module"), get("message"));
+    if message.is_empty() {
+        l.to_string()
+    } else {
+        format!("[{time}] [{level}] [{module}] {message}")
+    }
 }
 
 /// 数据表列标题（随报告语言）
@@ -312,3 +433,4 @@ fn pdf_escape(value: &str) -> String {
         .replace('(', "\\(")
         .replace(')', "\\)")
 }
+
