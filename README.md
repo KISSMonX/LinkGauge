@@ -26,6 +26,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - English / 中文 UI (English by default), switchable in **Settings**, synced across windows
 - Light / dark theme (light by default), switchable in **Settings**, synced across windows
 - Server can bind a specific IP and port, with a configurable log/statistics output interval (seconds)
+- SSH remote console on the server view: connect to a remote host (password or private key) and drive its iperf3 server from an in-app console with live output — pure-Rust [russh](https://github.com/warp-tech/russh), no system `ssh` client required
 - Separate TCP and UDP configuration views
 - Ping connectivity checks
 - TCP single-direction, bidirectional, parallel-stream, reverse, and stress tests
@@ -92,6 +93,17 @@ The application uses Tauri's two-process model:
 | `get_custom_packet_length` | Read the persisted custom packet length from the settings file |
 | `save_custom_packet_length` | Validate and persist a custom packet length to the settings file |
 | `generate_report` | Generate an HTML or PDF report in the application data directory |
+| `ssh_connect` | Open an SSH session with a PTY-backed interactive shell on a remote host |
+| `ssh_send` | Write to the remote shell (command text, `Ctrl+C`, …) |
+| `ssh_resize` | Sync the remote PTY size with the console viewport |
+| `ssh_disconnect` | Close the SSH session and release the channel |
+| `ssh_scrollback` | Read the session snapshot (console scrollback + connection state) |
+
+### SSH remote console
+
+The server view has an **SSH Console** tab next to the server overview. Connect with a password or an OpenSSH private key, then use the quick actions — start `iperf3 -s` (foreground or `-D` daemon), list processes, check the listen port, stop all, print the version — or type any command. Quick actions are built from the listen port and log interval configured on the same page. Output streams back through `ssh-event` and is rendered in a lightweight line buffer (ANSI escapes stripped in Rust, `\r` / `\b` handled in the UI), so `iperf3` interval statistics update live.
+
+The host key is checked against your `known_hosts`: a changed key aborts the connection, while a first-time host is accepted with its SHA256 fingerprint printed in the console for you to verify. The login password and key passphrase live only in memory — they are never written to `localStorage` nor included in exported configs.
 
 ## Project Structure
 
@@ -101,6 +113,7 @@ The application uses Tauri's two-process model:
 ├── src/                         # Vue 3 frontend
 │   ├── components/              # UI panels, chart, toolbar, and shared icons
 │   ├── App.vue                  # Application state and task queue orchestration
+│   ├── terminal.ts              # SSH console line buffer (CR / BS / TAB cursor semantics)
 │   ├── styles.css               # Desktop layout and visual system
 │   └── types.ts                 # Frontend data contracts
 ├── src-tauri/
@@ -109,6 +122,7 @@ The application uses Tauri's two-process model:
 │   │   ├── runner.rs            # riperf3 client/server tasks, Ping, logs, cancellation
 │   │   ├── report.rs            # HTML/PDF report generation
 │   │   ├── settings.rs          # Settings file read and persistence
+│   │   ├── ssh.rs               # SSH remote console: session, PTY shell, output decoding
 │   │   └── system.rs            # Local network information
 │   ├── Cargo.toml               # Rust dependencies
 │   └── tauri.conf.json          # Desktop window and bundle configuration

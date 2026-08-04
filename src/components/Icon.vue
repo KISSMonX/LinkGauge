@@ -18,6 +18,9 @@ defineProps<{ name: string; size?: number }>()
     <template v-else-if="name === 'report'"><path d="M6 3h9l4 4v14H6zM15 3v5h4M9 17v-4m3 4V9m3 8v-6"/></template>
     <template v-else-if="name === 'menu'"><path d="M4 6h16M4 12h16M4 18h16"/></template>
     <template v-else-if="name === 'folder'"><path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></template>
+    <template v-else-if="name === 'terminal'"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></template>
+    <template v-else-if="name === 'link'"><path d="M10 13a4 4 0 0 0 5.66 0l2.83-2.83a4 4 0 0 0-5.66-5.66L11.4 5.94"/><path d="M14 11a4 4 0 0 0-5.66 0L5.5 13.83a4 4 0 0 0 5.66 5.66l1.4-1.4"/></template>
+    <template v-else-if="name === 'unlink'"><path d="M9.5 14.5 5.7 18.3a3.5 3.5 0 1 1-4.95-4.95l3.8-3.8M14.5 9.5l3.8-3.8a3.5 3.5 0 1 1 4.95 4.95l-3.8 3.8"/><path d="m3 3 18 18"/></template>
     <template v-else><circle cx="12" cy="12" r="9"/><path d="M12 8v4m0 4h.01"/></template>
   </svg>
 </template>

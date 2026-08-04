@@ -44,6 +44,40 @@ export interface ServerConfig {
   interval: number
 }
 
+/** 服务端页的 SSH 远程控制台连接参数（密码与私钥口令不落盘，仅在内存与窗口间流转） */
+export interface SshConfig {
+  host: string
+  port: number
+  username: string
+  /** 认证方式：密码 / 私钥 */
+  authMethod: 'password' | 'key'
+  password: string
+  privateKeyPath: string
+  passphrase: string
+}
+
+/** SSH 会话状态：未连接 / 连接中 / 已连接 */
+export type SshStatus = 'idle' | 'connecting' | 'connected'
+
+/** 后端 `ssh-event` 事件（远端输出、连接状态与生命周期日志） */
+export interface SshEvent {
+  sessionId: string
+  type: 'status' | 'log' | 'data' | 'closed' | 'error'
+  level?: LogLevel
+  message?: string
+  /** data 事件：本块文本在会话输出流中的起始偏移，用于与回放缓冲去重 */
+  offset?: number
+}
+
+/** 会话快照：回放缓冲 + 当前连接状态。
+ *  状态一并返回是必要的——同机连接时远端 shell 可能在 ssh_connect 返回会话 id 之前就已就绪，
+ *  那一刻广播的 connected 事件会因前端还不知道会话 id 而被丢弃 */
+export interface SshSnapshot {
+  text: string
+  endOffset: number
+  connected: boolean
+}
+
 export interface NetworkInfo {
   ip: string
   mac: string
@@ -155,6 +189,11 @@ export interface SyncState {
   serverPoints: MetricPoint[]
   serverPeerIp: string
   serverPeerPort: number
+  // SSH 远程控制台：连接参数与会话状态跨窗口同步；
+  // 控制台正文不进同步包（输出量大），各窗口自行监听 ssh-event 并按需拉取回放缓冲
+  sshConfig: SshConfig
+  sshSession: string
+  sshStatus: SshStatus
 }
 
 /** 子窗口关闭（或点击「停靠回主窗口」）时通知主窗口把标签收回 */

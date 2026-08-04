@@ -28,6 +28,9 @@ mac_address = "1"
 # 纯 Rust 的 iperf3 协议实现（vendor 自 https://github.com/therealevanhenry/riperf3，
 # 含本地 on_interval 补丁，详见 vendor/riperf3）
 riperf3 = { path = "../vendor/riperf3" }
+# 纯 Rust SSH 客户端（服务端页的远程控制台）。改用 ring 后端而非默认的 aws-lc-rs：
+# ring 的 crates.io 包自带 Windows 预编译汇编，无需额外安装 NASM / CMake
+russh = { version = "0.62", default-features = false, features = ["ring", "flate2", "rsa"] }
 
 # 发布构建体积优化：剥离调试符号 + 链接时优化 + 单代码单元 + abort 恐慌
 [profile.release]
