@@ -24,7 +24,11 @@ use uuid::Uuid;
 
 /// 按界面语言选择消息文案（locale 为空时默认中文）
 fn tr<'a>(locale: &str, zh: &'a str, en: &'a str) -> &'a str {
-    if locale == "en" { en } else { zh }
+    if locale == "en" {
+        en
+    } else {
+        zh
+    }
 }
 
 /// 按界面语言选择格式化模板（模板必须是字面量，format! 才能编译期检查）
@@ -102,7 +106,15 @@ pub async fn start_test(
             .await
             .insert(session_id.clone(), SessionSignal::Ping(cancelled.clone()));
         tauri::async_runtime::spawn(async move {
-            run_ping(app, spawned_id.clone(), request, cancelled, pids, locale_handle).await;
+            run_ping(
+                app,
+                spawned_id.clone(),
+                request,
+                cancelled,
+                pids,
+                locale_handle,
+            )
+            .await;
             sessions.lock().await.remove(&spawned_id);
         });
     } else if request.mode == "server" || request.task_id == "server" {
@@ -370,7 +382,16 @@ async fn run_engine_client(
             other => break other,
         }
     };
-    finish_engine(&app, &session_id, &request.task_id, &log, &request, &locale, outcome).await;
+    finish_engine(
+        &app,
+        &session_id,
+        &request.task_id,
+        &log,
+        &request,
+        &locale,
+        outcome,
+    )
+    .await;
 }
 
 /// 服务端忙时的重试次数与退避间隔（iperf3 服务端串行服务，队列相邻项之间常撞上）
@@ -413,7 +434,10 @@ fn engine_client_builder(
         emit_metric(&hook_app, &hook_session, &hook_task, metric);
         append_log(
             &hook_log,
-            &format!("[INFO] {}", format_interval_line(&current_locale(&hook_locale), second, sum)),
+            &format!(
+                "[INFO] {}",
+                format_interval_line(&current_locale(&hook_locale), second, sum)
+            ),
         );
     };
 
@@ -564,7 +588,10 @@ async fn run_engine_server(
             let sum = &interval.sum;
             // 只更新统计字段，保留对端（客户端）地址
             let mut guard = latest.lock().unwrap();
-            let peer = guard.as_ref().map(|s| (s.peer_ip.clone(), s.peer_port)).unwrap_or_default();
+            let peer = guard
+                .as_ref()
+                .map(|s| (s.peer_ip.clone(), s.peer_port))
+                .unwrap_or_default();
             *guard = Some(ServerInterval {
                 bandwidth_mbps: safe_f64(sum.bits_per_second / 1_000_000.0),
                 transfer_mb: safe_f64(sum.bytes as f64 / 1_000_000.0),
@@ -613,7 +640,10 @@ async fn run_engine_server(
             );
             append_log(&log, &format!("[INFO] {connected}"));
             emit_log(&app, &session_id, &task_id, "INFO", connected);
-            let payload = format!(r#"{{"serving":true,"peerIp":"{}","peerPort":{}}}"#, host, port);
+            let payload = format!(
+                r#"{{"serving":true,"peerIp":"{}","peerPort":{}}}"#,
+                host, port
+            );
             let _ = app.emit(
                 "test-event",
                 TestEvent {
@@ -813,7 +843,11 @@ async fn run_engine_server(
                         &log,
                         &format!(
                             "\n{}",
-                            tr(&locale, "测试结果: 服务端已停止（手动停止）", "Result: server stopped (manual stop)")
+                            tr(
+                                &locale,
+                                "测试结果: 服务端已停止（手动停止）",
+                                "Result: server stopped (manual stop)"
+                            )
                         ),
                     );
                     emit_log(
@@ -821,7 +855,12 @@ async fn run_engine_server(
                         &session_id,
                         &request.task_id,
                         "INFO",
-                        tr(&locale, "服务端已停止（手动停止）", "Server stopped (manual stop)").into(),
+                        tr(
+                            &locale,
+                            "服务端已停止（手动停止）",
+                            "Server stopped (manual stop)",
+                        )
+                        .into(),
                     );
                     finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
                     return;
@@ -867,7 +906,11 @@ async fn run_engine_server(
                         &log,
                         &format!(
                             "\n{}",
-                            tr(&locale, "测试结果: 服务端已停止（手动停止）", "Result: server stopped (manual stop)")
+                            tr(
+                                &locale,
+                                "测试结果: 服务端已停止（手动停止）",
+                                "Result: server stopped (manual stop)"
+                            )
                         ),
                     );
                     emit_log(
@@ -875,7 +918,12 @@ async fn run_engine_server(
                         &session_id,
                         &request.task_id,
                         "INFO",
-                        tr(&locale, "服务端已停止（手动停止）", "Server stopped (manual stop)").into(),
+                        tr(
+                            &locale,
+                            "服务端已停止（手动停止）",
+                            "Server stopped (manual stop)",
+                        )
+                        .into(),
                     );
                     finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
                     return;
@@ -929,12 +977,7 @@ async fn run_ping(
         &session_id,
         &request.task_id,
         "INFO",
-        tr_format!(
-            locale,
-            "执行：ping {}",
-            "Running: ping {}",
-            args.join(" ")
-        ),
+        tr_format!(locale, "执行：ping {}", "Running: ping {}", args.join(" ")),
     );
 
     let mut command = Command::new("ping");
@@ -1021,7 +1064,12 @@ async fn run_ping(
     } else if final_success {
         finish_ok(&app, &session_id, &request.task_id, &log, "success").await;
     } else {
-        let message = tr(&locale, "ping 测试进程异常退出", "Ping process exited unexpectedly").to_string();
+        let message = tr(
+            &locale,
+            "ping 测试进程异常退出",
+            "Ping process exited unexpectedly",
+        )
+        .to_string();
         fail_engine(&app, &session_id, &request.task_id, &log, &locale, &message).await;
     }
 }
@@ -1082,7 +1130,12 @@ async fn setup_log(
             app,
             session_id,
             &request.task_id,
-            tr_format!(&request.locale, "无法创建日志目录：{}", "Cannot create log directory: {}", error),
+            tr_format!(
+                &request.locale,
+                "无法创建日志目录：{}",
+                "Cannot create log directory: {}",
+                error
+            ),
             None,
         );
         return None;
@@ -1101,7 +1154,12 @@ async fn setup_log(
                 app,
                 session_id,
                 &request.task_id,
-                tr_format!(&request.locale, "无法创建日志文件：{}", "Cannot create log file: {}", error),
+                tr_format!(
+                    &request.locale,
+                    "无法创建日志文件：{}",
+                    "Cannot create log file: {}",
+                    error
+                ),
                 None,
             );
             return None;
@@ -1169,7 +1227,11 @@ async fn finish_engine(
                 log,
                 &format!(
                     "\n[INFO] {}",
-                    tr(locale, "测试结束，最终汇总：", "Test finished, final summary:")
+                    tr(
+                        locale,
+                        "测试结束，最终汇总：",
+                        "Test finished, final summary:"
+                    )
                 ),
             );
             append_engine_summary(log, report, locale);
@@ -1178,10 +1240,7 @@ async fn finish_engine(
                 Termination::Completed => {
                     append_log(
                         log,
-                        &format!(
-                            "\n{}",
-                            tr(locale, "测试结果: 完成", "Result: completed")
-                        ),
+                        &format!("\n{}", tr(locale, "测试结果: 完成", "Result: completed")),
                     );
                     finish_ok(app, session_id, task_id, log, "success").await;
                 }
@@ -1196,7 +1255,12 @@ async fn finish_engine(
                     finish_ok(app, session_id, task_id, log, "stopped").await;
                 }
                 Termination::ServerTerminated => {
-                    let message = tr(locale, "服务端主动终止了测试", "The server terminated the test").to_string();
+                    let message = tr(
+                        locale,
+                        "服务端主动终止了测试",
+                        "The server terminated the test",
+                    )
+                    .to_string();
                     fail_engine(app, session_id, task_id, log, locale, &message).await;
                 }
                 Termination::ServerError(msg) => {
@@ -1233,7 +1297,12 @@ fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &st
             sent.bits_per_second / 1_000_000.0
         );
         if let Some(retransmits) = sent.retransmits {
-            line.push_str(&tr_format!(locale, ", 重传 {}", ", retransmits {}", retransmits));
+            line.push_str(&tr_format!(
+                locale,
+                ", 重传 {}",
+                ", retransmits {}",
+                retransmits
+            ));
         }
         append_log(log, &format!("[INFO] {line}"));
     }
@@ -1300,7 +1369,11 @@ fn emit_final_metric(
 }
 
 /// 逐秒指标行的日志格式（近似 iperf3 文本输出）
-fn format_interval_line(locale: &str, second: i64, sum: &riperf3::json_report::IntervalSum) -> String {
+fn format_interval_line(
+    locale: &str,
+    second: i64,
+    sum: &riperf3::json_report::IntervalSum,
+) -> String {
     let mut line = tr_format!(
         locale,
         "第 {} 秒: {:.2} MBytes, {:.2} Mbits/sec",
@@ -1321,7 +1394,12 @@ fn format_interval_line(locale: &str, second: i64, sum: &riperf3::json_report::I
         ));
     }
     if let Some(retransmits) = sum.retransmits {
-        line.push_str(&tr_format!(locale, ", 重传 {}", ", retransmits {}", retransmits));
+        line.push_str(&tr_format!(
+            locale,
+            ", 重传 {}",
+            ", retransmits {}",
+            retransmits
+        ));
     }
     line
 }

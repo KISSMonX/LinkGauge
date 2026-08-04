@@ -17,17 +17,13 @@ pub async fn generate_report(app: AppHandle, request: ReportRequest) -> Result<S
         .map_err(|e| format!("无法创建报告目录：{e}"))?;
     // 用户通过保存对话框指定了完整路径时写入该路径，否则使用默认目录 + 时间戳文件名
     let stamp = Local::now().format("%Y%m%d%H%M%S");
-    let requested = request
-        .save_path
-        .as_deref()
-        .map(PathBuf::from)
-        .or_else(|| {
-            match request.format.to_lowercase().as_str() {
-                "html" => Some(dir.join(format!("linkgauge-report-{stamp}.html"))),
-                "pdf" => Some(dir.join(format!("linkgauge-report-{stamp}.pdf"))),
-                _ => None,
-            }
-        });
+    let requested = request.save_path.as_deref().map(PathBuf::from).or_else(|| {
+        match request.format.to_lowercase().as_str() {
+            "html" => Some(dir.join(format!("linkgauge-report-{stamp}.html"))),
+            "pdf" => Some(dir.join(format!("linkgauge-report-{stamp}.pdf"))),
+            _ => None,
+        }
+    });
     let Some(path) = requested else {
         return Err("报告格式仅支持 HTML 或 PDF".into());
     };
@@ -109,7 +105,11 @@ async fn write_html(path: PathBuf, request: &ReportRequest) -> Result<String, St
                 format!(
                     "<section><h2>{heading}</h2>{}{}</section>",
                     svg_curve(&item.points, is_en),
-                    format!("<table>{}{}</table>", table_head(is_en), table_rows(&item.points))
+                    format!(
+                        "<table>{}{}</table>",
+                        table_head(is_en),
+                        table_rows(&item.points)
+                    )
                 )
             })
             .collect::<String>()
@@ -224,7 +224,17 @@ fn escape_html(value: &str) -> String {
 }
 
 /// 测试配置参数的显示顺序与本地化标签（(key, 中文, English)）
-const CONFIG_ORDER: [&str; 9] = ["mode", "serverIp", "port", "duration", "parallel", "bandwidth", "packetLength", "udpPacketLength", "interval"];
+const CONFIG_ORDER: [&str; 9] = [
+    "mode",
+    "serverIp",
+    "port",
+    "duration",
+    "parallel",
+    "bandwidth",
+    "packetLength",
+    "udpPacketLength",
+    "interval",
+];
 const CONFIG_LABELS: [(&str, &str, &str); 9] = [
     ("mode", "测试模式", "Mode"),
     ("serverIp", "服务端地址", "Server IP"),
@@ -232,18 +242,42 @@ const CONFIG_LABELS: [(&str, &str, &str); 9] = [
     ("duration", "测试时长（秒）", "Duration (s)"),
     ("parallel", "并发流数", "Parallel streams"),
     ("bandwidth", "带宽限制（Mbps）", "Bandwidth limit (Mbps)"),
-    ("packetLength", "TCP 报文长度（字节）", "TCP packet length (B)"),
-    ("udpPacketLength", "UDP 报文长度（字节）", "UDP packet length (B)"),
+    (
+        "packetLength",
+        "TCP 报文长度（字节）",
+        "TCP packet length (B)",
+    ),
+    (
+        "udpPacketLength",
+        "UDP 报文长度（字节）",
+        "UDP packet length (B)",
+    ),
     ("interval", "采样间隔（秒）", "Sampling interval (s)"),
 ];
 
 /// 统计结果的显示顺序与本地化标签
-const STATS_ORDER: [&str; 11] = ["startedAt", "completed", "total", "averageBandwidth", "maxBandwidth", "minBandwidth", "totalTransferMb", "pingAverage", "lossPercent", "jitterMs", "logPaths"];
+const STATS_ORDER: [&str; 11] = [
+    "startedAt",
+    "completed",
+    "total",
+    "averageBandwidth",
+    "maxBandwidth",
+    "minBandwidth",
+    "totalTransferMb",
+    "pingAverage",
+    "lossPercent",
+    "jitterMs",
+    "logPaths",
+];
 const STATS_LABELS: [(&str, &str, &str); 11] = [
     ("startedAt", "测试时间", "Started at"),
     ("completed", "已完成项目数", "Completed items"),
     ("total", "总项目数", "Total items"),
-    ("averageBandwidth", "平均带宽（Mbps）", "Average bandwidth (Mbps)"),
+    (
+        "averageBandwidth",
+        "平均带宽（Mbps）",
+        "Average bandwidth (Mbps)",
+    ),
     ("maxBandwidth", "最大带宽（Mbps）", "Max bandwidth (Mbps)"),
     ("minBandwidth", "最小带宽（Mbps）", "Min bandwidth (Mbps)"),
     ("totalTransferMb", "总传输量（MB）", "Total transfer (MB)"),
@@ -257,8 +291,18 @@ const STATS_LABELS: [(&str, &str, &str); 11] = [
 fn config_section_html(request: &ReportRequest, is_en: bool) -> String {
     format!(
         "<section><h2>{}</h2>{}</section>",
-        if is_en { "Test Configuration" } else { "测试配置" },
-        kv_table(&request.config, &CONFIG_ORDER, &CONFIG_LABELS, is_en, if is_en { "Parameter" } else { "参数" })
+        if is_en {
+            "Test Configuration"
+        } else {
+            "测试配置"
+        },
+        kv_table(
+            &request.config,
+            &CONFIG_ORDER,
+            &CONFIG_LABELS,
+            is_en,
+            if is_en { "Parameter" } else { "参数" }
+        )
     )
 }
 
@@ -267,12 +311,24 @@ fn stats_section_html(request: &ReportRequest, is_en: bool) -> String {
     format!(
         "<section><h2>{}</h2>{}</section>",
         if is_en { "Statistics" } else { "统计结果" },
-        kv_table(&request.summary, &STATS_ORDER, &STATS_LABELS, is_en, if is_en { "Metric" } else { "统计项" })
+        kv_table(
+            &request.summary,
+            &STATS_ORDER,
+            &STATS_LABELS,
+            is_en,
+            if is_en { "Metric" } else { "统计项" }
+        )
     )
 }
 
 /// 通用两列表格：按 ORDER 顺序输出，键转本地化标签、值转可读文本；缺失的键跳过
-fn kv_table(obj: &serde_json::Value, order: &[&str], labels: &[(&str, &str, &str)], is_en: bool, head1: &str) -> String {
+fn kv_table(
+    obj: &serde_json::Value,
+    order: &[&str],
+    labels: &[(&str, &str, &str)],
+    is_en: bool,
+    head1: &str,
+) -> String {
     let rows = order
         .iter()
         .filter_map(|k| {
@@ -306,7 +362,11 @@ fn cell_html(key: &str, v: &serde_json::Value, is_en: bool) -> String {
                 .map(escape_html)
                 .collect::<Vec<_>>()
                 .join("<br>");
-            if joined.is_empty() { "—".to_string() } else { joined }
+            if joined.is_empty() {
+                "—".to_string()
+            } else {
+                joined
+            }
         }
         _ => escape_html(&readable_value(key, v, is_en)),
     }
@@ -322,7 +382,13 @@ fn readable_value(key: &str, v: &serde_json::Value, is_en: bool) -> String {
         },
         serde_json::Value::Number(n) => n
             .as_f64()
-            .map(|f| if f.fract() == 0.0 { format!("{f:.0}") } else { format!("{f:.2}") })
+            .map(|f| {
+                if f.fract() == 0.0 {
+                    format!("{f:.0}")
+                } else {
+                    format!("{f:.2}")
+                }
+            })
             .unwrap_or_else(|| v.to_string()),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => "—".to_string(),
@@ -365,7 +431,11 @@ fn table_rows(points: &[MetricPoint]) -> String {
 
 /// 测试项目结束状态词（随报告语言）
 fn status_word(status: &str, is_en: bool) -> String {
-    let (done, failed, stopped) = if is_en { ("Done", "Failed", "Stopped") } else { ("已完成", "失败", "已停止") };
+    let (done, failed, stopped) = if is_en {
+        ("Done", "Failed", "Stopped")
+    } else {
+        ("已完成", "失败", "已停止")
+    };
     match status {
         "success" => done.to_string(),
         "failed" => failed.to_string(),
@@ -389,17 +459,37 @@ fn svg_curve(points: &[MetricPoint], is_en: bool) -> String {
     }
     // 带宽全为 0（如 ping 项目）时改画抖动曲线
     let use_jitter = points.iter().all(|p| p.bandwidth_mbps <= 0.0);
-    let value = |p: &MetricPoint| if use_jitter { p.jitter_ms } else { p.bandwidth_mbps };
+    let value = |p: &MetricPoint| {
+        if use_jitter {
+            p.jitter_ms
+        } else {
+            p.bandwidth_mbps
+        }
+    };
     let t_min = points.first().map(|p| p.second).unwrap_or(0);
     let t_max = points.last().map(|p| p.second).unwrap_or(0);
     let (mut v_min, mut v_max) = points
         .iter()
         .map(|p| value(p))
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)));
-    if !v_min.is_finite() || !v_max.is_finite() { v_min = 0.0; v_max = 1.0 }
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        });
+    if !v_min.is_finite() || !v_max.is_finite() {
+        v_min = 0.0;
+        v_max = 1.0
+    }
     // 平坦数据（全同值）时上下各留 1 单位，避免除零
-    if v_min == v_max { v_min -= 1.0; v_max += 1.0 }
-    let x_of = |t: i64| if t_max == t_min { pad_l + plot_w / 2.0 } else { pad_l + (t - t_min) as f64 / (t_max - t_min) as f64 * plot_w };
+    if v_min == v_max {
+        v_min -= 1.0;
+        v_max += 1.0
+    }
+    let x_of = |t: i64| {
+        if t_max == t_min {
+            pad_l + plot_w / 2.0
+        } else {
+            pad_l + (t - t_min) as f64 / (t_max - t_min) as f64 * plot_w
+        }
+    };
     let y_of = |v: f64| pad_t + (1.0 - (v - v_min) / (v_max - v_min)) * plot_h;
     // 横向网格线与左侧刻度
     let mut grid = String::new();
@@ -433,4 +523,3 @@ fn pdf_escape(value: &str) -> String {
         .replace('(', "\\(")
         .replace(')', "\\)")
 }
-

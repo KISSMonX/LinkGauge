@@ -46,7 +46,11 @@ pub fn get_custom_packet_length(app: AppHandle, protocol: String) -> u32 {
 }
 
 #[tauri::command]
-pub fn save_custom_packet_length(app: AppHandle, protocol: String, length: u32) -> Result<(), String> {
+pub fn save_custom_packet_length(
+    app: AppHandle,
+    protocol: String,
+    length: u32,
+) -> Result<(), String> {
     // TCP 报文长度上限 1MB，UDP 上限 64KB
     let limit = if protocol == "udp" { 65_536 } else { 1_048_576 };
     if length == 0 || length > limit {
