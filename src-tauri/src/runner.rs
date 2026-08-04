@@ -199,8 +199,11 @@ struct ClientParams {
     blksize: Option<usize>,
     reverse: bool,
     bidir: bool,
-    /// 带宽限制（bps），None 表示不限制
-    bandwidth_bps: Option<u64>,
+    /// 带宽限制（bps），0 = 不限制。必须无条件下发给引擎，不能「为 0 就不设置」：
+    /// riperf3 未调用 bandwidth() 时 UDP 会套用 iperf3 的 UDP_RATE 默认值
+    /// （1 Mibit/s，见 vendor/riperf3 的 utils.rs），导致界面选「不限制」的 UDP
+    /// 测试实际被限速到约 1 Mbps；显式传 0 才是引擎语义下的不限制。
+    bandwidth_bps: u64,
     interval: f64,
     bind_address: Option<String>,
 }
@@ -229,7 +232,8 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
         },
         reverse: false,
         bidir: false,
-        bandwidth_bps: (request.bandwidth > 0).then_some(request.bandwidth * 1_000_000),
+        // 0（界面「不限制」）原样传递，交由引擎按 0 = 不限制处理
+        bandwidth_bps: request.bandwidth.saturating_mul(1_000_000),
         interval: request.interval as f64,
         bind_address: (!request.local_ip.trim().is_empty()).then(|| request.local_ip.clone()),
     };
@@ -374,9 +378,8 @@ async fn run_engine_client(
     if params.bidir {
         builder = builder.bidir(true);
     }
-    if let Some(bps) = params.bandwidth_bps {
-        builder = builder.bandwidth(bps);
-    }
+    // 无条件下发（0 = 不限制）：省略调用会让 UDP 落到引擎的 1 Mibit/s 默认值
+    builder = builder.bandwidth(params.bandwidth_bps);
     if let Some(addr) = &params.bind_address {
         builder = builder.bind_address(addr);
     }
@@ -1445,7 +1448,7 @@ mod tests {
     fn bandwidth_zero_means_unlimited() {
         assert_eq!(
             client_params_for(&request("tcp-single", "client", "tcp")).bandwidth_bps,
-            None
+            0
         );
     }
 
@@ -1453,7 +1456,24 @@ mod tests {
     fn bandwidth_mbps_to_bps() {
         let mut req = request("tcp-single", "client", "tcp");
         req.bandwidth = 100;
-        assert_eq!(client_params_for(&req).bandwidth_bps, Some(100_000_000));
+        assert_eq!(client_params_for(&req).bandwidth_bps, 100_000_000);
+    }
+
+    /// 回归：界面选「不限制」的 UDP 测试必须解析出 0 并显式下发。
+    /// 曾经映射为 None 且调用点「为 None 就不调用 bandwidth()」，
+    /// 于是 riperf3 套用 iperf3 的 UDP_RATE 默认值，把不限速的 UDP
+    /// 测试实际限到约 1 Mbps。
+    #[test]
+    fn udp_unlimited_bandwidth_stays_zero() {
+        for task in ["udp-bandwidth", "udp-loss"] {
+            let mut req = request(task, "client", "udp");
+            req.bandwidth = 0;
+            assert_eq!(
+                client_params_for(&req).bandwidth_bps,
+                0,
+                "{task}：不限制必须解析为 0，否则引擎会套用 1 Mibit/s 默认值"
+            );
+        }
     }
 
     #[test]
