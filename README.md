@@ -44,6 +44,8 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - JSON configuration import, export, and local persistence
 - HTML and PDF report generation
 - Pure-Rust riperf3 engine: interoperable with standard iperf3 servers, no runtime dependencies
+- iperf3 authentication (username / password / RSA public key, with PKCS#1 padding for pre-3.17 servers); the password is never persisted
+- Automatic retry when the server is busy, so adjacent queue items don't knock each other out
 - Windows and Linux build workflows
 
 ## Architecture
@@ -284,6 +286,45 @@ Client-<local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<completed|incomplete
 - **Local patch:** upstream exposes interval results only after a run completes, so a small `on_interval` callback was added (see `vendor/riperf3` — `IntervalReporterConfig`, `ClientBuilder::on_interval`, `ServerBuilder::on_interval`). The patch is marked with `local LinkGauge patch` comments; re-apply it after upgrading the vendored source.
 - Interop: the engine is interoperable with real iperf3 servers and clients (verified upstream against iperf 3.21).
 - Known platform difference: TCP retransmission counts depend on `TCP_INFO`, which is unavailable on Windows; the app reports 0 there.
+
+## Compatibility with iperf3 servers
+
+The client can test directly against a stock iperf3 server (`iperf3 -s`) — the peer does not need LinkGauge installed. riperf3 implements the iperf3 wire protocol: the 37-byte cookie, the single-byte state machine, and the 4-byte big-endian length-prefixed JSON parameter/result exchange. Parameter field order matches iperf3's `send_parameters`, and the older result format from iperf3 ≤ 3.12 is handled.
+
+### Server version required per test item
+
+| Test item | iperf3 equivalent | Minimum server version |
+| --- | --- | --- |
+| Ping connectivity | system `ping`, not iperf3 | none |
+| TCP single / parallel streams / stress | `-c` / `-P N` / `-t N` | any 3.x |
+| TCP reverse | `-R` | 3.1+ |
+| **TCP bidirectional** | `--bidir` | **3.7+** |
+| UDP bandwidth / jitter & loss | `-u` | any 3.x |
+
+Against servers older than 3.7 the `bidirectional` parameter is silently ignored: the server runs one-way while the client interprets the result as bidirectional. No error is raised, but the numbers are not trustworthy — use "TCP single" plus "TCP reverse" instead.
+
+### Defaults aligned with iperf3
+
+- **UDP packet length defaults to 1460 bytes**, matching iperf3's `DEFAULT_UDP_BLKSIZE`. Larger values (such as the previous 8 KB default) are IP-fragmented on a 1500-MTU path, which inflates the loss rate and makes results incomparable to a native `iperf3 -u -c` run. Both 1460 and 1472 in the preset list avoid fragmentation.
+  > When upgrading from an older version, a stored value of 8192 is migrated to 1460 automatically; pick a larger value from the dropdown if you genuinely need one.
+- **TCP packet length defaults to 128 KB**, matching iperf3.
+- **Choosing "unlimited" bandwidth really is unlimited** (equivalent to `-b 0`). Note that the iperf3 CLI defaults `-u` to 1 Mbit/s when `-b` is omitted; LinkGauge does not inherit that default.
+
+### Authentication
+
+If the peer iperf3 runs with `--rsa-private-key-path` and `--authorized-users-path`, enable authentication in the client's "Authentication" section and supply a username, password, and the path to the server's RSA public key.
+
+- iperf3 3.17 and later default to OAEP padding; tick "Use PKCS#1 padding" for older servers.
+- **The password is never written to local storage and is not included in exported config JSON** — re-enter it after restarting the app. The username and public key path are not secret and are saved normally.
+
+### Automatic retry when the server is busy
+
+An iperf3 server serves one test at a time. Between adjacent items in the queue the peer may not have returned to its listening state yet, which yields a "server busy" refusal. The client retries 3 times at 2-second intervals; "Stop test" takes effect immediately during the wait. The item is only marked failed if every retry is refused.
+
+### Other known differences
+
+- TCP retransmission counts are always 0 on Windows (`TCP_INFO` is unavailable there).
+- Server mode does not support authentication yet; it is configurable on the client side only.
 
 ## Troubleshooting
 

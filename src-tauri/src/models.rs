@@ -23,10 +23,24 @@ pub struct TestRequest {
     pub bandwidth: u64,
     /// TCP 报文长度（默认 128KB）
     pub packet_length: u32,
-    /// UDP 报文长度（默认 8KB，最大 64KB）
+    /// UDP 报文长度（默认 1460 B，与 iperf3 的 DEFAULT_UDP_BLKSIZE 一致；最大 64KB）
     #[serde(default)]
     pub udp_packet_length: u64,
     pub interval: u64,
+    // —— iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path
+    // 启动时必需）。全部 default，旧版前端不传时等价于不启用 ——
+    /// 认证用户名；为空表示不启用认证
+    #[serde(default)]
+    pub auth_username: String,
+    /// 认证密码（仅在内存中流转，前端不写入本地存储、不随配置导出）
+    #[serde(default)]
+    pub auth_password: String,
+    /// 服务端 RSA 公钥文件路径，用于加密凭据
+    #[serde(default)]
+    pub auth_public_key_path: String,
+    /// 对 iperf3 < 3.17 的服务端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP）
+    #[serde(default)]
+    pub auth_pkcs1_padding: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

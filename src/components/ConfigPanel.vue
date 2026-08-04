@@ -19,6 +19,8 @@ const emit = defineEmits<{
   clear: []
   'pick-nic': []
   'pick-nic-server': []
+  /** 选择 iperf3 认证用的服务端 RSA 公钥文件 */
+  'pick-public-key': []
   'save-custom-length': [protocol: 'tcp' | 'udp', value: number]
   /** 标签页被拖拽分离为独立窗口 */
   detach: [side: 'client' | 'server']
@@ -106,8 +108,9 @@ const bandwidthOptions = computed(() => {
 
 // TCP 报文长度预设（最大 1MB，默认 128KB）
 const TCP_PRESETS = [1024, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
-// UDP 报文长度预设（最大 64KB，默认 8KB）
-const UDP_PRESETS = [128, 512, 1024, 1472, 4096, 8192, 16384, 32768, 65536]
+// UDP 报文长度预设（最大 64KB，默认 1460 = iperf3 的 DEFAULT_UDP_BLKSIZE）。
+// 1460 与 1472 均不分片（1472 = 1500 MTU 上限），更大的值会触发 IP 分片
+const UDP_PRESETS = [128, 512, 1024, 1460, 1472, 4096, 8192, 16384, 32768, 65536]
 const formatLength = (value: number) => (value >= 1024 && value % 1024 === 0 ? `${value / 1024} KB` : `${value} bytes`)
 const isPreset = (presets: number[], value: number) => presets.includes(value)
 
@@ -145,7 +148,7 @@ function openCustomDialog(target: 'tcp' | 'udp') {
   // 预填当前报文长度（自定义值优先，否则默认值），按大小换算成最合适的单位
   const length = target === 'tcp'
     ? (props.config.packetLength > 0 && !isPreset(TCP_PRESETS, props.config.packetLength) ? props.config.packetLength : (props.savedCustomLength || 131072))
-    : (props.config.udpPacketLength > 0 && !isPreset(UDP_PRESETS, props.config.udpPacketLength) ? props.config.udpPacketLength : (props.savedCustomUdpLength || 8192))
+    : (props.config.udpPacketLength > 0 && !isPreset(UDP_PRESETS, props.config.udpPacketLength) ? props.config.udpPacketLength : (props.savedCustomUdpLength || 1460))
   if (length % (1024 * 1024) === 0) { customValue.value = length / (1024 * 1024); customUnit.value = 'mb' }
   else if (length % 1024 === 0) { customValue.value = length / 1024; customUnit.value = 'kb' }
   else { customValue.value = length; customUnit.value = 'bytes' }
@@ -200,6 +203,17 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <label><span>{{ t('cfg.direction') }}</span><select disabled><option>{{ t('cfg.directionValue') }}</option></select></label>
       <label class="log-option"><input type="checkbox" checked disabled /><span>{{ t('cfg.logOption') }}</span></label>
       <p class="runtime-state available">{{ t('cfg.engineReady') }}</p>
+    </section>
+    <section class="config-section auth-section">
+      <div class="section-title"><h2>{{ t('cfg.auth') }}</h2></div>
+      <label class="log-option"><input type="checkbox" :checked="config.authEnabled" :disabled="clientRunning" @change="set('authEnabled', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.authEnable') }}</span></label>
+      <template v-if="config.authEnabled">
+        <label><span>{{ t('cfg.authUser') }}</span><input :value="config.authUsername" :disabled="clientRunning" autocomplete="off" @input="set('authUsername', ($event.target as HTMLInputElement).value)" /></label>
+        <label><span>{{ t('cfg.authPassword') }}</span><span class="field"><input type="password" :value="config.authPassword" :disabled="clientRunning" autocomplete="off" @input="set('authPassword', ($event.target as HTMLInputElement).value)" /><small>{{ t('cfg.authPasswordNote') }}</small></span></label>
+        <label><span>{{ t('cfg.authKey') }}</span><span class="ip-row"><input :value="config.authPublicKeyPath" :disabled="clientRunning" :placeholder="t('cfg.authKeyPlaceholder')" @input="set('authPublicKeyPath', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="clientRunning" @click="emit('pick-public-key')">{{ t('cfg.authKeyBrowse') }}</button></span></label>
+        <label class="log-option"><input type="checkbox" :checked="config.authPkcs1Padding" :disabled="clientRunning" @change="set('authPkcs1Padding', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.authPkcs1') }}</span></label>
+        <p class="server-hint">{{ t('cfg.authHint') }}</p>
+      </template>
     </section>
     <div class="config-actions">
       <button class="primary" :disabled="clientRunning" @click="emit('start')"><Icon name="play" />{{ t('cfg.start') }}</button>
