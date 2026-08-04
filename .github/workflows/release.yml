@@ -1,6 +1,6 @@
 name: Release
 
-# 打 v* 标签时构建安装包并汇总到同一个 GitHub Release 草稿。
+# 打 v* 标签时构建各平台安装包，汇总到同一个 GitHub Release 草稿。
 # 标签版本应与 src-tauri/tauri.conf.json 的 version 保持一致。
 on:
   push:
@@ -9,18 +9,44 @@ on:
 
 jobs:
   bundle:
-    name: Bundle (${{ matrix.os }})
+    name: ${{ matrix.name }}
     permissions:
       contents: write
     strategy:
+      # 某个平台失败不影响其余平台继续产出
       fail-fast: false
       matrix:
         include:
-          # Windows 的打包目标已在 tauri.conf.json 中配置为 nsis
-          - os: windows-latest
-            args: ''
-          - os: ubuntu-22.04
-            args: '--bundles appimage,deb'
+          # tauri.conf.json 里的 bundle.targets 固定为 nsis（面向本地 Windows 构建），
+          # 因此每个平台都用 --bundles 显式覆盖成本平台的产物类型
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --bundles nsis
+
+          - name: macOS x64 (Intel)
+            os: macos-13
+            target: x86_64-apple-darwin
+            args: --bundles dmg,app
+
+          - name: macOS arm64 (Apple Silicon)
+            os: macos-14
+            target: aarch64-apple-darwin
+            args: --bundles dmg,app
+
+          # Linux 钉在 22.04：产物应在支持的最旧基础发行版上构建，避免抬高 glibc 门槛
+          - name: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            args: --bundles appimage,deb
+
+          # ubuntu-*-arm 是 GitHub 托管的 arm64 runner，公开仓库免费；
+          # 私有仓库需付费方案，否则改用自托管 runner
+          - name: Linux arm64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            args: --bundles appimage,deb
+
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -43,10 +69,13 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.target }}
 
       # tauri-action 会自行执行 tauri.conf.json 里的 beforeBuildCommand
       # （npm run build），这里只需装好依赖
@@ -60,4 +89,4 @@ jobs:
           releaseName: LinkGauge ${{ github.ref_name }}
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
+          args: --target ${{ matrix.target }} ${{ matrix.args }}
