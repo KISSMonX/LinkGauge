@@ -26,7 +26,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Packet-length presets from 128 bytes to 64 KB, with a custom length persisted to the config file
 - Real-time INFO, WARN, and ERROR logs with filtering
 - Per-test log files with completed/incomplete status in the filename
-- Graceful test cancellation and unfinished queue recovery
+- Graceful test cancellation (no queue recovery — every start is a fresh run)
 - JSON configuration import, export, and local persistence
 - HTML and PDF report generation
 - Pure-Rust riperf3 engine: interoperable with standard iperf3 servers, no runtime dependencies
@@ -59,7 +59,7 @@ flowchart LR
 
 The application uses Tauri's two-process model:
 
-- **Frontend:** Vue components render the configuration, dashboard, task queue, logs, chart, dialogs, and report summary. `src/App.vue` coordinates the test queue and persists recoverable state.
+- **Frontend:** Vue components render the configuration, dashboard, task queue, logs, chart, dialogs, and report summary. `src/App.vue` coordinates the test queue and persists settings.
 - **Multi-window:** Client and server are tabs that can be dragged out into their own windows for dual/split-screen monitoring. Windows synchronize parameters and running state via `side-sync` events; the backend broadcasts `test-event` to every window. The server window shows its own overview, bandwidth curve, and logs, fully independent of client data.
 - **Backend:** Rust validates requests, drives the in-process riperf3 engine, streams per-interval metrics through the `on_interval` callback, emits typed events, saves logs, and creates reports.
 - **IPC:** The frontend invokes a small command surface and receives `test-event` updates. Test execution and result aggregation remain entirely in Rust.
@@ -235,7 +235,7 @@ The current installer is not code-signed, so Windows SmartScreen may display a w
 2. Select TCP or UDP and enable the required test items.
 3. In client mode, enter the server address, port, duration, and protocol-specific parameters.
 4. Start the test and monitor the task queue, live chart, statistics, and logs.
-5. Stop a test when necessary. The partial log is retained, and the remaining queue can be recovered on the next launch.
+5. Stop a test when necessary. Failed test items can be reviewed in the logs and the report.
 6. Generate an HTML or PDF report after one or more tasks finish.
 
 ### Split-screen dual windows

@@ -54,14 +54,12 @@ const connected = ref(false)
 /** 本次连接的客户端本地端口（控制连接建立时由后端广播） */
 const clientLocalPort = ref(0)
 const errorDialog = ref<{ title: string; message: string } | null>(null)
-/** recovery 为 true 表示「发现未完成测试」弹窗，提供恢复/放弃两个选项 */
-const infoDialog = ref<{ title: string; message: string; recovery?: boolean } | null>(null)
+/** 信息弹窗（报告生成、预览模式等提示） */
+const infoDialog = ref<{ title: string; message: string } | null>(null)
 /** 设置弹窗：语言 / 主题 */
 const settingsDialog = ref(false)
 /** 停止确认弹窗：客户端停止测试 / 服务端停止服务（中英文跟随界面语言） */
 const confirmDialog = ref<{ title: string; message: string; action: 'stop' | 'stop-server' } | null>(null)
-interface RecoveryState { config: TestConfig; queue: string[]; nextIndex: number }
-const recovery = ref<RecoveryState | null>(null)
 const interfaces = ref<InterfaceInfo[]>([])
 const savedTcpLength = ref(0)
 const savedUdpLength = ref(0)
@@ -137,7 +135,6 @@ function syncBundle(): SyncState {
     queue: queue.value,
     queueIndex: queueIndex.value,
     driver: driver.value,
-    recovery: !!recovery.value,
     savedTcpLength: savedTcpLength.value,
     savedUdpLength: savedUdpLength.value,
     summary: { ...summary },
@@ -162,7 +159,6 @@ async function applySync(payload: SyncState) {
   queue.value = payload.queue
   queueIndex.value = payload.queueIndex
   driver.value = payload.driver
-  recovery.value = payload.recovery ? { config: payload.config, queue: [...payload.queue], nextIndex: payload.queueIndex } : null
   savedTcpLength.value = payload.savedTcpLength
   savedUdpLength.value = payload.savedUdpLength
   Object.assign(summary, payload.summary)
@@ -185,7 +181,6 @@ watch(serverSession, () => emitSync())
 watch(queue, () => emitSync())
 watch(queueIndex, () => emitSync())
 watch(driver, () => emitSync())
-watch(recovery, () => emitSync())
 watch(items, () => emitSync(), { deep: true })
 watch(local, () => emitSync())
 watch(savedTcpLength, () => emitSync())
@@ -280,26 +275,19 @@ function validate() {
 }
 
 async function start() {
-  const savedRecovery = recovery.value
-  // 恢复测试时参数以用户当前界面为准（应用启动时已从恢复状态加载过上次参数），
-  // 不再用开始测试时的快照覆盖，避免用户修改的端口等参数被回退
+  // 开始即全新一轮测试：以当前勾选的项目为队列，不涉及上次未完成测试的恢复
   if (config.value.bandwidth < 0) config.value.bandwidth = local.value.speedMbps > 0 ? local.value.speedMbps : 0
   const invalid = validate(); if (invalid) { errorDialog.value = { title: t('err.paramError'), message: invalid }; return }
-  const recoveredQueue = savedRecovery?.queue.slice(savedRecovery.nextIndex)
-  // 恢复测试不覆盖用户当前勾选：启动时已按恢复队列初始化过勾选，
-  // 用户之后手动调整的勾选在恢复/重试时保持原样；恢复队列只决定执行顺序
   // TCP / UDP 测试项可同时勾选，按列表顺序逐个执行
   const selected = items.value.filter((i) => i.enabled)
   if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg') }; return }
   items.value.forEach((i) => { if (i.enabled) i.status = 'waiting' })
   points.value = []; progress.value = 0; elapsed.value = 0; connected.value = false
   summary.startedAt = new Date().toLocaleString('zh-CN', { hour12: false }); summary.completed = 0; summary.total = selected.length; summary.logPaths = []
-  queue.value = recoveredQueue || selected.map((i) => i.id); queueIndex.value = -1; clientRunning.value = true
+  queue.value = selected.map((i) => i.id); queueIndex.value = -1; clientRunning.value = true
   // 本窗口成为队列驱动者：只有它会在任务结束后启动下一项
   driver.value = ownLabel
   config.value.mode = 'client'
-  recovery.value = { config: { ...config.value }, queue: [...queue.value], nextIndex: 0 }
-  localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value))
   await runNext()
 }
 
@@ -428,9 +416,6 @@ function completeCurrent(status: TestItem['status']) {
   // 快照本次测试的完整数据到内存缓存（测试完成后图表显示；退出应用即销毁）
   completedPoints.value = [...points.value]
   if (item) completedLabel.value = itemLabel(item.id)
-  // 恢复进度只在任务成功时推进；失败/停止的任务保持原位，重试或恢复时会重新包含它，
-  // 避免每次失败/恢复都吞掉一个测试项目
-  if (recovery.value && status === 'success') { recovery.value.nextIndex = queueIndex.value + 1; localStorage.setItem('linkgauge-recovery', JSON.stringify(recovery.value)) }
   progress.value = Math.round(((queueIndex.value + 1) / queue.value.length) * 100)
   if (status === 'failed') { failCurrent(t('log.processExited')); return }
   // 仅驱动窗口启动下一项，避免多个窗口重复拉起同一个任务
@@ -445,15 +430,8 @@ function failCurrent(message: string) {
   const lastLog = summary.logPaths.at(-1)
   errorDialog.value = { title: t('err.alert'), message: lastLog ? `${message}\n\n${t('err.logFile', { path: lastLog })}` : message }
 }
-function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100; recovery.value = null; localStorage.removeItem('linkgauge-recovery') } log('INFO', t('log.finish')) }
-async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; /* 手动停止 = 主动结束本次测试：清除恢复状态，按钮回到「开始测试」，下次启动不再提示恢复（异常中断的恢复机制不受影响） */ recovery.value = null; localStorage.removeItem('linkgauge-recovery'); finishRun(false) }
-/** 放弃未完成的测试队列并恢复默认全选，重新开始新一轮测试 */
-function discardRecovery() {
-  recovery.value = null
-  localStorage.removeItem('linkgauge-recovery')
-  items.value.forEach((item) => { item.enabled = true; item.status = 'waiting' })
-  log('INFO', t('log.discardRecovery'))
-}
+function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100 } log('INFO', t('log.finish')) }
+async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; finishRun(false) }
 
 const reportStamp = () => {
   const n = new Date()
@@ -513,7 +491,6 @@ function onThemeChange(event: Event) {
 onMounted(async () => {
   const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
-  const unfinished = localStorage.getItem('linkgauge-recovery'); if (unfinished) try { recovery.value = JSON.parse(unfinished); config.value = { ...defaults, ...recovery.value!.config }; const remaining = recovery.value!.queue.slice(recovery.value!.nextIndex); items.value.forEach((item) => { item.enabled = remaining.includes(item.id); item.status = 'waiting' }); /* 恢复确认弹窗只在主窗口弹出，分离窗口静默加载状态（运行中的状态随后由同步事件更新） */ if (side.value === 'hub') infoDialog.value = { title: t('recover.title'), message: t('recover.message'), recovery: true } } catch { localStorage.removeItem('linkgauge-recovery') }
   if (isTauri()) {
     try {
       // 跨窗口同步：状态包广播 + 主窗口收回标签通知 + 子窗口被请求关闭
@@ -575,17 +552,17 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unliste
     <div class="workspace">
       <ConfigPanel
         v-if="side === 'hub' && dockedTabs.length"
-        :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
         @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength" @detach="detachTab"
       />
       <ConfigPanel
         v-else-if="side === 'client'"
-        detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
         @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @save-custom-length="saveCustomLength"
       />
       <ConfigPanel
         v-else-if="side === 'server'"
-        detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :recovery="!!recovery" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
         @update:config="config = $event" @update:server-config="serverConfig = $event" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength"
       />
       <div v-else class="panel config-panel dock-empty">
@@ -604,7 +581,7 @@ onUnmounted(() => { unlisten?.(); unlistenSync?.(); unlistenSyncReq?.(); unliste
       <StatusPanel :mode="showServerView ? 'logs' : 'full'" :items="items" :logs="showServerView ? serverLogs : clientLogs" :server-running="serverRunning" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
     </div>
     <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
-    <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><template v-if="infoDialog?.recovery"><button class="primary" @click="infoDialog = null; start()">{{ t('recover.resume') }}</button><button class="danger" @click="infoDialog = null; discardRecovery()">{{ t('recover.discard') }}</button></template><button v-if="!infoDialog?.recovery" @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
+    <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><button v-if="!errorDialog" @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="confirmDialog" class="modal-backdrop" @click.self="confirmDialog = null"><div class="modal"><button class="modal-close" @click="confirmDialog = null">×</button><h2>{{ confirmDialog.title }}</h2><div class="modal-body"><span class="modal-symbol info">i</span><p>{{ confirmDialog.message }}</p></div><div class="modal-actions"><button @click="confirmDialog = null">{{ t('common.cancel') }}</button><button class="danger" @click="confirmStop">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="settingsDialog" class="modal-backdrop" @click.self="settingsDialog = false"><div class="modal"><button class="modal-close" @click="settingsDialog = false">×</button><h2>{{ t('settings.title') }}</h2><div class="settings-form"><label><span>{{ t('settings.language') }}</span><select :value="locale" @change="onLocaleChange($event)"><option value="en">English</option><option value="zh">中文</option></select></label><label><span>{{ t('settings.theme') }}</span><select :value="theme" @change="onThemeChange($event)"><option value="light">{{ t('settings.light') }}</option><option value="dark">{{ t('settings.dark') }}</option></select></label></div><p class="settings-note">{{ t('settings.engineNote') }}</p><div class="modal-actions"><button class="primary" @click="settingsDialog = false">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false; applyNic(0)">{{ t('nic.cancel') }}</button></div></div></div>

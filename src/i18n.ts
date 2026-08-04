@@ -73,12 +73,6 @@ const zh = {
   'err.execFailed': '测试执行失败',
   'err.logFile': '日志文件：{path}',
 
-  // 未完成恢复
-  'recover.title': '发现未完成测试',
-  'recover.message': '上次测试未正常完成，是否继续上次的测试队列？',
-  'recover.resume': '恢复测试',
-  'recover.discard': '停止并重新开始',
-
   // 停止确认
   'confirm.stopTitle': '停止测试',
   'confirm.stopMessage': '确定要停止当前测试吗？已完成的测试结果会保留。',
@@ -108,7 +102,6 @@ const zh = {
   'log.stoppedEnded': '已结束',
   'log.processExited': '测试进程异常退出',
   'log.finish': '测试流程结束，日志已保存',
-  'log.discardRecovery': '已放弃上次未完成的测试队列，可重新开始',
   'log.importOk': '配置导入成功',
   'log.connected': '已连接',
   'log.ready': 'LinkGauge 已就绪',
@@ -159,7 +152,6 @@ const zh = {
   'cfg.bandwidthUnlimited': '0 Mbps（不限制）',
   'cfg.engineReady': '● 内置 riperf3 引擎已就绪（无需安装 iperf3）',
   'cfg.start': '开始测试',
-  'cfg.resume': '恢复测试',
   'cfg.stop': '停止测试',
   'cfg.custom': '自定义…',
   'cfg.nicBtn': '本机',
@@ -344,11 +336,7 @@ const en: Record<MessageKey, string> = {
   'err.execFailed': 'Test execution failed',
   'err.logFile': 'Log file: {path}',
 
-  'recover.title': 'Unfinished test found',
-  'recover.message': 'The previous test did not finish normally. Resume the previous test queue?',
-  'recover.resume': 'Resume test',
-  'recover.discard': 'Stop and start over',
-
+  // 停止确认
   'confirm.stopTitle': 'Stop Test',
   'confirm.stopMessage': 'Stop the current test? Completed results will be kept.',
   'confirm.stopServerTitle': 'Stop Server',
@@ -375,7 +363,6 @@ const en: Record<MessageKey, string> = {
   'log.stoppedEnded': 'ended',
   'log.processExited': 'Test process exited unexpectedly',
   'log.finish': 'Test run finished; logs saved',
-  'log.discardRecovery': 'Discarded the previous unfinished queue; you can start over',
   'log.importOk': 'Config imported',
   'log.connected': 'Connected',
   'log.ready': 'LinkGauge ready',
@@ -424,7 +411,6 @@ const en: Record<MessageKey, string> = {
   'cfg.bandwidthUnlimited': '0 Mbps (unlimited)',
   'cfg.engineReady': '● Built-in riperf3 engine ready (no iperf3 install needed)',
   'cfg.start': 'Start Test',
-  'cfg.resume': 'Resume Test',
   'cfg.stop': 'Stop Test',
   'cfg.custom': 'Custom…',
   'cfg.nicBtn': 'Local',

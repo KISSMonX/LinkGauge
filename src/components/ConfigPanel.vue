@@ -5,7 +5,7 @@ import { useI18n, type MessageKey } from '../i18n'
 import Icon from './Icon.vue'
 
 /** tabs：主窗口已停靠的标签列表（undefined = 分离窗口，仅显示 detached 一侧） */
-const props = defineProps<{ tabs?: ('client' | 'server')[]; detached?: 'client' | 'server'; tab: 'client' | 'server'; config: TestConfig; serverConfig: ServerConfig; items: TestItem[]; clientRunning: boolean; serverRunning: boolean; recovery?: boolean; local: NetworkInfo; savedCustomLength: number; savedCustomUdpLength: number }>()
+const props = defineProps<{ tabs?: ('client' | 'server')[]; detached?: 'client' | 'server'; tab: 'client' | 'server'; config: TestConfig; serverConfig: ServerConfig; items: TestItem[]; clientRunning: boolean; serverRunning: boolean; local: NetworkInfo; savedCustomLength: number; savedCustomUdpLength: number }>()
 const emit = defineEmits<{
   'update:tab': [value: 'client' | 'server']
   'update:config': [value: TestConfig]
@@ -202,7 +202,7 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <p class="runtime-state available">{{ t('cfg.engineReady') }}</p>
     </section>
     <div class="config-actions">
-      <button class="primary" :disabled="clientRunning" @click="emit('start')"><Icon name="play" />{{ recovery ? t('cfg.resume') : t('cfg.start') }}</button>
+      <button class="primary" :disabled="clientRunning" @click="emit('start')"><Icon name="play" />{{ t('cfg.start') }}</button>
       <button class="danger" :disabled="!clientRunning" @click="emit('stop')"><Icon name="stop" />{{ t('cfg.stop') }}</button>
     </div>
     </template>
