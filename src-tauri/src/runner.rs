@@ -9,7 +9,7 @@ use std::{
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -49,6 +49,21 @@ pub struct AppState {
     pub(crate) sessions: Arc<AsyncMutex<HashMap<String, SessionSignal>>>,
     /// ping 子进程残留 PID 集合（riperf3 为进程内引擎，无子进程）
     pub(crate) child_pids: Arc<AsyncMutex<HashSet<u32>>>,
+    /// 界面语言（zh / en，空 = zh）：运行时可变，切换语言后运行中会话的引擎日志实时跟随
+    pub(crate) locale: Arc<RwLock<String>>,
+}
+
+/// 读取当前界面语言（日志输出时调用，避免使用会话启动时的快照）
+pub(crate) fn current_locale(handle: &Arc<RwLock<String>>) -> String {
+    handle.read().map(|v| v.clone()).unwrap_or_default()
+}
+
+/// 切换界面语言：运行中的客户端/服务端会话日志立即改用新语言输出
+#[tauri::command]
+pub fn set_locale(state: State<'_, AppState>, locale: String) {
+    if let Ok(mut guard) = state.locale.write() {
+        *guard = locale;
+    }
 }
 
 /// 应用退出时同步终止所有遗留 ping 测试进程
@@ -77,6 +92,7 @@ pub async fn start_test(
     let session_id = Uuid::new_v4().to_string();
     let sessions = state.sessions.clone();
     let pids = state.child_pids.clone();
+    let locale_handle = state.locale.clone();
     let spawned_id = session_id.clone();
     if request.task_id == "ping" {
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -86,7 +102,7 @@ pub async fn start_test(
             .await
             .insert(session_id.clone(), SessionSignal::Ping(cancelled.clone()));
         tauri::async_runtime::spawn(async move {
-            run_ping(app, spawned_id.clone(), request, cancelled, pids).await;
+            run_ping(app, spawned_id.clone(), request, cancelled, pids, locale_handle).await;
             sessions.lock().await.remove(&spawned_id);
         });
     } else if request.mode == "server" || request.task_id == "server" {
@@ -97,7 +113,7 @@ pub async fn start_test(
             .await
             .insert(session_id.clone(), SessionSignal::Engine(tx));
         tauri::async_runtime::spawn(async move {
-            run_engine_server(app, spawned_id.clone(), request, rx).await;
+            run_engine_server(app, spawned_id.clone(), request, rx, locale_handle).await;
             sessions.lock().await.remove(&spawned_id);
         });
     } else {
@@ -108,7 +124,7 @@ pub async fn start_test(
             .await
             .insert(session_id.clone(), SessionSignal::Engine(tx));
         tauri::async_runtime::spawn(async move {
-            run_engine_client(app, spawned_id.clone(), request, rx).await;
+            run_engine_client(app, spawned_id.clone(), request, rx, locale_handle).await;
             sessions.lock().await.remove(&spawned_id);
         });
     }
@@ -239,6 +255,7 @@ async fn run_engine_client(
     session_id: String,
     request: TestRequest,
     rx: watch::Receiver<Option<String>>,
+    locale_handle: Arc<RwLock<String>>,
 ) {
     let task_name = task_label(&request.task_id);
     let local_ip = if request.local_ip.trim().is_empty() {
@@ -251,8 +268,10 @@ async fn run_engine_client(
     let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
         return;
     };
+    // 界面语言运行时可变：日志输出点实时读取，切换语言后立即生效
+    let locale = current_locale(&locale_handle);
     let header = tr_format!(
-        &request.locale,
+        &locale,
         "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: {}, 端口 {}, 时长 {}s, 并发 {}, 带宽 {}, 报文长度 {}, 输出周期 {}s\n\n",
         "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: {}, port {}, duration {}s, streams {}, bandwidth {}, packet length {}, interval {}s\n\n",
         riperf3::VERSION,
@@ -263,7 +282,7 @@ async fn run_engine_client(
         if request.bandwidth > 0 {
             format!("{}M", request.bandwidth)
         } else {
-            tr(&request.locale, "不限制", "unlimited").into()
+            tr(&locale, "不限制", "unlimited").into()
         },
         if client_params_for(&request).protocol == TransportProtocol::Udp {
             request.udp_packet_length
@@ -279,7 +298,7 @@ async fn run_engine_client(
         &request.task_id,
         "INFO",
         tr_format!(
-            &request.locale,
+            &locale,
             "执行：riperf3 -c {}（内嵌引擎）",
             "Running: riperf3 -c {} (embedded engine)",
             request.server_ip
@@ -292,7 +311,7 @@ async fn run_engine_client(
     let hook_session = session_id.clone();
     let hook_task = request.task_id.clone();
     let hook_log = log.clone();
-    let hook_locale = request.locale.clone();
+    let hook_locale = locale_handle.clone();
     let on_interval = move |interval: &riperf3::json_report::Interval| {
         if interval.sum.omitted {
             return;
@@ -310,7 +329,7 @@ async fn run_engine_client(
         emit_metric(&hook_app, &hook_session, &hook_task, metric);
         append_log(
             &hook_log,
-            &format!("[INFO] {}", format_interval_line(&hook_locale, second, sum)),
+            &format!("[INFO] {}", format_interval_line(&current_locale(&hook_locale), second, sum)),
         );
     };
 
@@ -369,9 +388,9 @@ async fn run_engine_client(
                 &session_id,
                 &request.task_id,
                 &log,
-                &request.locale,
+                &locale,
                 &tr_format!(
-                    &request.locale,
+                    &locale,
                     "测试配置无效：{}",
                     "Invalid test configuration: {}",
                     error
@@ -383,7 +402,7 @@ async fn run_engine_client(
     };
 
     let outcome = client.run().await;
-    finish_engine(&app, &session_id, &request.task_id, &log, &request, outcome).await;
+    finish_engine(&app, &session_id, &request.task_id, &log, &request, &locale, outcome).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +437,7 @@ async fn run_engine_server(
     session_id: String,
     request: TestRequest,
     rx: watch::Receiver<Option<String>>,
+    locale_handle: Arc<RwLock<String>>,
 ) {
     let task_name = task_label(&request.task_id);
     let local_ip = if request.local_ip.trim().is_empty() {
@@ -435,10 +455,12 @@ async fn run_engine_server(
     } else {
         request.bind_ip.clone()
     };
+    // 界面语言运行时可变：头部日志用启动时语言，循环内每次迭代实时读取
+    let locale = current_locale(&locale_handle);
     append_log(
         &log,
         &tr_format!(
-            &request.locale,
+            locale,
             "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务\n\n",
             "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: bind {}, listen port {}, serving continuously\n\n",
             riperf3::VERSION,
@@ -484,9 +506,11 @@ async fn run_engine_server(
         let session_id = session_id.clone();
         let task_id = request.task_id.clone();
         let log = log.clone();
-        let locale = request.locale.clone();
+        let locale_handle = locale_handle.clone();
         let latest = latest.clone();
         move |addr| {
+            // 界面语言运行时可变：连接日志实时读取当前语言
+            let locale = current_locale(&locale_handle);
             let host = addr.ip().to_canonical().to_string();
             let port = addr.port();
             // 记录对端（客户端）地址到快照，后续心跳事件持续携带。
@@ -544,9 +568,9 @@ async fn run_engine_server(
                 &session_id,
                 &request.task_id,
                 &log,
-                &request.locale,
+                &locale,
                 &tr_format!(
-                    &request.locale,
+                    &locale,
                     "服务端配置无效：{}",
                     "Invalid server configuration: {}",
                     error
@@ -564,9 +588,9 @@ async fn run_engine_server(
                 &session_id,
                 &request.task_id,
                 &log,
-                &request.locale,
+                &locale,
                 &tr_format!(
-                    &request.locale,
+                    &locale,
                     "无法监听端口 {}：{}",
                     "Cannot listen on port {}: {}",
                     request.port,
@@ -582,7 +606,7 @@ async fn run_engine_server(
         &format!(
             "[INFO] {}",
             tr_format!(
-                &request.locale,
+                locale,
                 "服务端已就绪，监听 {}:{}",
                 "Server ready, listening on {}:{}",
                 bind_display,
@@ -596,7 +620,7 @@ async fn run_engine_server(
         &request.task_id,
         "INFO",
         tr_format!(
-            &request.locale,
+            locale,
             "服务端已就绪，监听 {}:{}",
             "Server ready, listening on {}:{}",
             bind_display,
@@ -621,13 +645,15 @@ async fn run_engine_server(
         let completed = completed.clone();
         let serving = serving.clone();
         let latest = latest.clone();
-        let locale = request.locale.clone();
+        let locale_handle = locale_handle.clone();
         tauri::async_runtime::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
             ticker.tick().await; // 跳过立即触发的第一次
             let started = std::time::Instant::now();
             loop {
                 ticker.tick().await;
+                // 界面语言运行时可变：心跳日志与状态事件实时读取当前语言
+                let locale = current_locale(&locale_handle);
                 let uptime = started.elapsed().as_secs();
                 let is_serving = serving.load(Ordering::Relaxed);
                 let done = completed.load(Ordering::Relaxed);
@@ -690,6 +716,8 @@ async fn run_engine_server(
     };
 
     loop {
+        // 每次迭代实时读取界面语言（切换语言后服务端日志立即跟随）
+        let locale = current_locale(&locale_handle);
         match bound.run_once().await {
             Ok(outcome) => {
                 serving.store(false, Ordering::Relaxed);
@@ -709,7 +737,7 @@ async fn run_engine_server(
                         &log,
                         &format!(
                             "\n{}",
-                            tr(&request.locale, "测试结果: 服务端已停止（手动停止）", "Result: server stopped (manual stop)")
+                            tr(&locale, "测试结果: 服务端已停止（手动停止）", "Result: server stopped (manual stop)")
                         ),
                     );
                     emit_log(
@@ -717,7 +745,7 @@ async fn run_engine_server(
                         &session_id,
                         &request.task_id,
                         "INFO",
-                        tr(&request.locale, "服务端已停止（手动停止）", "Server stopped (manual stop)").into(),
+                        tr(&locale, "服务端已停止（手动停止）", "Server stopped (manual stop)").into(),
                     );
                     finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
                     return;
@@ -726,27 +754,27 @@ async fn run_engine_server(
                 let peer_text = peer
                     .as_ref()
                     .map(|(ip, p)| format!("{ip}:{p}"))
-                    .unwrap_or_else(|| tr(&request.locale, "未知地址", "unknown address").to_string());
+                    .unwrap_or_else(|| tr(&locale, "未知地址", "unknown address").to_string());
                 append_log(
                     &log,
                     &format!(
                         "\n[INFO] {}",
                         tr_format!(
-                            &request.locale,
+                            locale,
                             "客户端 {} 完成测试，汇总如下：",
                             "Client {} finished a test, summary:",
                             peer_text
                         )
                     ),
                 );
-                append_engine_summary(&log, &outcome.report, &request.locale);
+                append_engine_summary(&log, &outcome.report, &locale);
                 emit_log(
                     &app,
                     &session_id,
                     &request.task_id,
                     "INFO",
                     tr_format!(
-                        &request.locale,
+                        locale,
                         "一次测试完成（客户端 {}），继续监听…",
                         "Test finished (client {}), still listening…",
                         peer_text
@@ -763,7 +791,7 @@ async fn run_engine_server(
                         &log,
                         &format!(
                             "\n{}",
-                            tr(&request.locale, "测试结果: 服务端已停止（手动停止）", "Result: server stopped (manual stop)")
+                            tr(&locale, "测试结果: 服务端已停止（手动停止）", "Result: server stopped (manual stop)")
                         ),
                     );
                     emit_log(
@@ -771,13 +799,13 @@ async fn run_engine_server(
                         &session_id,
                         &request.task_id,
                         "INFO",
-                        tr(&request.locale, "服务端已停止（手动停止）", "Server stopped (manual stop)").into(),
+                        tr(&locale, "服务端已停止（手动停止）", "Server stopped (manual stop)").into(),
                     );
                     finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
                     return;
                 }
                 let warn = tr_format!(
-                    &request.locale,
+                    locale,
                     "一次连接处理失败：{}，继续监听",
                     "Failed to handle a connection: {}, still listening",
                     error
@@ -799,8 +827,11 @@ async fn run_ping(
     request: TestRequest,
     cancelled: Arc<AtomicBool>,
     child_pids: Arc<AsyncMutex<HashSet<u32>>>,
+    locale_handle: Arc<RwLock<String>>,
 ) {
     let task_name = task_label(&request.task_id);
+    // 界面语言运行时可变：ping 日志实时读取当前语言
+    let locale = current_locale(&locale_handle);
     let local_ip = if request.local_ip.trim().is_empty() {
         local_ip_address::local_ip()
             .map(|ip| ip.to_string())
@@ -823,7 +854,7 @@ async fn run_ping(
         &request.task_id,
         "INFO",
         tr_format!(
-            &request.locale,
+            locale,
             "执行：ping {}",
             "Running: ping {}",
             args.join(" ")
@@ -842,13 +873,13 @@ async fn run_ping(
         Ok(child) => child,
         Err(error) => {
             let message = tr_format!(
-                &request.locale,
+                locale,
                 "启动 ping 失败：{}",
                 "Failed to start ping: {}",
                 error
             );
             append_log(&log, &format!("[ERROR] {message}"));
-            fail_engine(&app, &session_id, &request.task_id, &log, &request.locale, &message).await;
+            fail_engine(&app, &session_id, &request.task_id, &log, &locale, &message).await;
             return;
         }
     };
@@ -901,11 +932,11 @@ async fn run_ping(
         &log,
         &format!(
             "\n{}: {}",
-            tr(&request.locale, "测试结果", "Result"),
+            tr(&locale, "测试结果", "Result"),
             if final_success {
-                tr(&request.locale, "完成", "completed")
+                tr(&locale, "完成", "completed")
             } else {
-                tr(&request.locale, "未完成", "incomplete")
+                tr(&locale, "未完成", "incomplete")
             }
         ),
     );
@@ -914,8 +945,8 @@ async fn run_ping(
     } else if final_success {
         finish_ok(&app, &session_id, &request.task_id, &log, "success").await;
     } else {
-        let message = tr(&request.locale, "ping 测试进程异常退出", "Ping process exited unexpectedly").to_string();
-        fail_engine(&app, &session_id, &request.task_id, &log, &request.locale, &message).await;
+        let message = tr(&locale, "ping 测试进程异常退出", "Ping process exited unexpectedly").to_string();
+        fail_engine(&app, &session_id, &request.task_id, &log, &locale, &message).await;
     }
 }
 
@@ -1033,17 +1064,18 @@ async fn finish_engine(
     task_id: &str,
     log: &SessionLog,
     request: &TestRequest,
+    locale: &str,
     outcome: Result<riperf3::RunOutcome, riperf3::RiperfError>,
 ) {
     match outcome {
         Err(error) => {
             let message = tr_format!(
-                &request.locale,
+                locale,
                 "测试失败：{}",
                 "Test failed: {}",
                 error
             );
-            fail_engine(app, session_id, task_id, log, &request.locale, &message).await;
+            fail_engine(app, session_id, task_id, log, locale, &message).await;
         }
         Ok(outcome) => {
             let report = &outcome.report;
@@ -1051,10 +1083,10 @@ async fn finish_engine(
                 log,
                 &format!(
                     "\n[INFO] {}",
-                    tr(&request.locale, "测试结束，最终汇总：", "Test finished, final summary:")
+                    tr(locale, "测试结束，最终汇总：", "Test finished, final summary:")
                 ),
             );
-            append_engine_summary(log, report, &request.locale);
+            append_engine_summary(log, report, locale);
             emit_final_metric(app, session_id, task_id, report, request.duration as i64);
             match outcome.termination {
                 Termination::Completed => {
@@ -1062,7 +1094,7 @@ async fn finish_engine(
                         log,
                         &format!(
                             "\n{}",
-                            tr(&request.locale, "测试结果: 完成", "Result: completed")
+                            tr(locale, "测试结果: 完成", "Result: completed")
                         ),
                     );
                     finish_ok(app, session_id, task_id, log, "success").await;
@@ -1072,32 +1104,32 @@ async fn finish_engine(
                         log,
                         &format!(
                             "\n{}",
-                            tr(&request.locale, "测试结果: 手动停止", "Result: manual stop")
+                            tr(locale, "测试结果: 手动停止", "Result: manual stop")
                         ),
                     );
                     finish_ok(app, session_id, task_id, log, "stopped").await;
                 }
                 Termination::ServerTerminated => {
-                    let message = tr(&request.locale, "服务端主动终止了测试", "The server terminated the test").to_string();
-                    fail_engine(app, session_id, task_id, log, &request.locale, &message).await;
+                    let message = tr(locale, "服务端主动终止了测试", "The server terminated the test").to_string();
+                    fail_engine(app, session_id, task_id, log, locale, &message).await;
                 }
                 Termination::ServerError(msg) => {
                     let message = tr_format!(
-                        &request.locale,
+                        locale,
                         "服务端返回错误：{}",
                         "Server returned an error: {}",
                         msg
                     );
-                    fail_engine(app, session_id, task_id, log, &request.locale, &message).await;
+                    fail_engine(app, session_id, task_id, log, locale, &message).await;
                 }
                 other => {
                     let message = tr_format!(
-                        &request.locale,
+                        locale,
                         "测试异常结束：{:?}",
                         "Test ended abnormally: {:?}",
                         other
                     );
-                    fail_engine(app, session_id, task_id, log, &request.locale, &message).await;
+                    fail_engine(app, session_id, task_id, log, locale, &message).await;
                 }
             }
         }

@@ -73,6 +73,7 @@ pub fn run() {
             create_side_window,
             runner::start_test,
             runner::stop_test,
+            runner::set_locale,
             runner::open_log_dir,
             system::get_network_info,
             system::get_network_interfaces,

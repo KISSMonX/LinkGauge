@@ -482,7 +482,10 @@ function importConfig() { const input = document.createElement('input'); input.t
 
 /** 设置弹窗：切换界面语言（默认英文）与主题外观（默认亮色），变更随 side-sync 同步到所有窗口 */
 function onLocaleChange(event: Event) {
-  setLocale((event.target as HTMLSelectElement).value as Locale)
+  const value = (event.target as HTMLSelectElement).value as Locale
+  setLocale(value)
+  // 同步给后端：运行中会话的引擎日志（服务端心跳/客户端间隔等）立即改用新语言
+  if (isTauri()) invoke('set_locale', { locale: value }).catch(() => {})
 }
 function onThemeChange(event: Event) {
   setTheme((event.target as HTMLSelectElement).value as Theme)
@@ -493,6 +496,8 @@ onMounted(async () => {
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
   if (isTauri()) {
     try {
+      // 启动时把界面语言同步给后端（引擎日志按当前语言输出；切换语言时 onLocaleChange 再次同步）
+      invoke('set_locale', { locale: locale.value }).catch(() => {})
       // 跨窗口同步：状态包广播 + 主窗口收回标签通知 + 子窗口被请求关闭
       unlistenSync = await listen<SyncState>('side-sync', (e) => applySync(e.payload))
       // 其他窗口请求当前状态（新分离的窗口启动时主动请求，避免错过状态变更而漏判事件）
