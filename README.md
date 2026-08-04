@@ -1,10 +1,15 @@
 # LinkGauge
 
+[![CI](https://github.com/KISSMonX/LinkGauge/actions/workflows/ci.yml/badge.svg)](https://github.com/KISSMonX/LinkGauge/actions/workflows/ci.yml)
+[![Release](https://github.com/KISSMonX/LinkGauge/actions/workflows/release.yml/badge.svg)](https://github.com/KISSMonX/LinkGauge/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/KISSMonX/LinkGauge?display_name=tag&sort=semver)](https://github.com/KISSMonX/LinkGauge/releases)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20x64%20%7C%20macOS%20x64%2Farm64%20%7C%20Linux%20x64%2Farm64-blue)](#installation)
+
 [English](README.md) | [中文](README.zh-CN.md)
 
 A desktop network performance testing application built with Rust, Tauri 2, Vue 3, and TypeScript. It provides a structured GUI workflow for Ping, TCP, and UDP testing. TCP/UDP tests run on a pure-Rust, in-process [riperf3](https://github.com/therealevanhenry/riperf3) engine that speaks the iperf3 wire protocol — no iperf3 binary is installed, bundled, or spawned; only Ping uses the system command. A built-in SSH console (also pure Rust, in-process) can start and stop the peer's iperf3 server on a remote host without leaving the app.
 
-> Current release status: Windows x64 is fully packaged as an NSIS installer. Linux builds are supported from source. The installer contains no third-party network-testing binaries.
+> Current release status: pushing a `v*` tag builds five packages in CI — Windows x64 (NSIS), macOS x64 and arm64 (DMG), and Linux x64 and arm64 (AppImage + DEB). None of them are code-signed yet, so see the [Installation](#installation) notes for the SmartScreen / Gatekeeper prompts. No package contains a third-party network-testing binary.
 
 ## Screenshots
 
@@ -47,7 +52,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Pure-Rust riperf3 engine: interoperable with standard iperf3 servers, no runtime dependencies
 - iperf3 authentication (username / password / RSA public key, with PKCS#1 padding for pre-3.17 servers); the password is never persisted
 - Automatic retry when the server is busy, so adjacent queue items don't knock each other out
-- Windows and Linux build workflows
+- Automated CI checks and tagged release builds for Windows x64, macOS x64 / arm64, and Linux x64 / arm64
 
 ## Architecture
 
@@ -185,6 +190,13 @@ sudo apt install -y \
 
 Then install Node.js 20+ and Rust stable.
 
+### macOS development
+
+- macOS 11 or later (Intel or Apple Silicon)
+- Xcode Command Line Tools: `xcode-select --install`
+- Node.js 20 or later
+- Rust stable; add the target you are not running on natively to cross-build, e.g. `rustup target add x86_64-apple-darwin`
+
 ## Getting Started
 
 Clone the repository and install JavaScript dependencies:
@@ -222,11 +234,26 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 push to `master` and every pull request. The tests only use loopback sockets, so no runner
 network access is required.
 
-`.github/workflows/release.yml` builds the installers when a `v*` tag is pushed (or on manual
-dispatch) and collects the Windows NSIS, AppImage, and DEB artifacts into a single **draft**
-GitHub Release. It needs no configured secrets — the automatic `GITHUB_TOKEN` is enough — but
-the artifacts are unsigned, so the SmartScreen warning above still applies. Keep the tag
-version in sync with `version` in `src-tauri/tauri.conf.json`.
+`.github/workflows/release.yml` builds on a `v*` tag (or manual dispatch) and collects every
+artifact into a single **draft** GitHub Release:
+
+| Job | Runner | Rust target | Artifacts |
+| --- | --- | --- | --- |
+| Windows x64 | `windows-latest` | `x86_64-pc-windows-msvc` | NSIS `.exe` |
+| macOS x64 | `macos-13` | `x86_64-apple-darwin` | `.dmg`, `.app` |
+| macOS arm64 | `macos-14` | `aarch64-apple-darwin` | `.dmg`, `.app` |
+| Linux x64 | `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | AppImage, DEB |
+| Linux arm64 | `ubuntu-22.04-arm` | `aarch64-unknown-linux-gnu` | AppImage, DEB |
+
+Each job passes `--bundles` explicitly because `bundle.targets` in `tauri.conf.json` is pinned
+to `nsis` for local Windows builds. `fail-fast` is off, so one platform failing still produces
+the others. No secrets are required — the automatic `GITHUB_TOKEN` is enough — but nothing is
+code-signed, so the SmartScreen and Gatekeeper notes under [Installation](#installation)
+apply. Keep the tag version in sync with `version` in `src-tauri/tauri.conf.json`.
+
+> The Linux arm64 job uses a GitHub-hosted `ubuntu-22.04-arm` runner, which is free for public
+> repositories only. On a private repository it needs a paid plan with ARM runners, or a
+> self-hosted arm64 runner; otherwise remove that matrix entry.
 
 ### Windows NSIS installer
 
@@ -254,6 +281,16 @@ npm run tauri build -- --bundles appimage,deb
 
 Build Linux artifacts on the oldest supported base distribution to avoid introducing a newer glibc requirement. See the [Tauri AppImage guidance](https://v2.tauri.app/distribute/appimage/).
 
+### macOS DMG
+
+```bash
+npm ci
+npm run tauri build -- --target aarch64-apple-darwin --bundles dmg,app   # Apple Silicon
+npm run tauri build -- --target x86_64-apple-darwin  --bundles dmg,app   # Intel
+```
+
+`--bundles` is required on macOS and Linux because `bundle.targets` in `tauri.conf.json` is pinned to `nsis` for local Windows builds.
+
 ## Installation
 
 ### Windows
@@ -279,6 +316,18 @@ The current installer is not code-signed, so Windows SmartScreen may display a w
   ```bash
   sudo apt install ./linkgauge_*.deb
   ```
+
+Pick the artifact matching your architecture: `*_amd64.*` for x64, `*_arm64.*` / `*_aarch64.*` for arm64.
+
+### macOS
+
+1. Download the DMG for your architecture — `*_x64.dmg` for Intel, `*_aarch64.dmg` for Apple Silicon.
+2. Open it and drag **LinkGauge** into `Applications`.
+3. The app is not signed or notarized, so Gatekeeper will refuse the first launch. Either right-click the app and choose **Open**, or clear the quarantine attribute:
+
+   ```bash
+   xattr -cr /Applications/LinkGauge.app
+   ```
 
 ## Usage
 

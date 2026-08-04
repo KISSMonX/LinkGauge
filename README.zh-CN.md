@@ -1,10 +1,15 @@
 # LinkGauge
 
+[![CI](https://github.com/KISSMonX/LinkGauge/actions/workflows/ci.yml/badge.svg)](https://github.com/KISSMonX/LinkGauge/actions/workflows/ci.yml)
+[![Release](https://github.com/KISSMonX/LinkGauge/actions/workflows/release.yml/badge.svg)](https://github.com/KISSMonX/LinkGauge/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/KISSMonX/LinkGauge?display_name=tag&sort=semver)](https://github.com/KISSMonX/LinkGauge/releases)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20x64%20%7C%20macOS%20x64%2Farm64%20%7C%20Linux%20x64%2Farm64-blue)](#安装)
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 一款基于 Rust、Tauri 2、Vue 3 和 TypeScript 开发的桌面网络性能测试工具。软件为 Ping、TCP 和 UDP 测试提供工程化图形流程，TCP/UDP 测试由纯 Rust、进程内运行的 [riperf3](https://github.com/therealevanhenry/riperf3) 引擎执行——该引擎直接实现 iperf3 线协议，无需安装、捆绑或启动任何 iperf3 可执行文件；仅 Ping 仍调用系统命令。内置 SSH 控制台（同样是纯 Rust、进程内实现）可直接启停远端主机上的对端 iperf3 服务端，无需切出应用。
 
-> 当前发布状态：Windows x64 已支持生成 NSIS 安装包。Linux 支持从源码构建。安装包内不包含任何第三方网络测试二进制。
+> 当前发布状态：推送 `v*` 标签会在 CI 中构建五份安装包——Windows x64（NSIS）、macOS x64 与 arm64（DMG）、Linux x64 与 arm64（AppImage + DEB）。目前均未做代码签名，首次运行的 SmartScreen / Gatekeeper 提示见[安装](#安装)一节。所有安装包都不包含任何第三方网络测试二进制。
 
 ## 界面截图
 
@@ -47,7 +52,7 @@
 - 纯 Rust riperf3 引擎：与标准 iperf3 服务端互通，无运行时外部依赖
 - iperf3 认证支持（用户名 / 密码 / RSA 公钥，兼容 3.17 前的 PKCS#1 填充），密码不落盘
 - 服务端忙时自动重试，避免队列中相邻测试项相互挤占
-- Windows、Linux 构建流程
+- CI 自动检查与打标签发布：Windows x64、macOS x64 / arm64、Linux x64 / arm64
 
 ## 软件架构
 
@@ -185,6 +190,13 @@ sudo apt install -y \
 
 随后安装 Node.js 20+ 和 Rust stable。
 
+### macOS
+
+- macOS 11 或更高版本（Intel 或 Apple Silicon）
+- Xcode Command Line Tools：`xcode-select --install`
+- Node.js 20 或更高版本
+- Rust stable；交叉构建另一架构时需补装对应 target，例如 `rustup target add x86_64-apple-darwin`
+
 ## 快速开始
 
 克隆仓库并安装 JavaScript 依赖：
@@ -221,10 +233,26 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 与 `ubuntu-22.04` 两个平台执行前端构建（含 `vue-tsc`）、rustfmt、`-D warnings` 级别的
 clippy 以及 Rust 测试。测试只使用回环 socket，runner 无需外网访问。
 
-`.github/workflows/release.yml` 在推送 `v*` 标签（或手动触发）时构建安装包，把 Windows
-NSIS、AppImage 与 DEB 产物汇总到同一个 GitHub Release **草稿**。它不需要配置任何 secret
-——自动注入的 `GITHUB_TOKEN` 即可——但产物未经代码签名，上文的 SmartScreen 提示依然适用。
-标签版本请与 `src-tauri/tauri.conf.json` 中的 `version` 保持一致。
+`.github/workflows/release.yml` 在推送 `v*` 标签（或手动触发）时构建各平台安装包，全部产物
+汇总到同一个 GitHub Release **草稿**：
+
+| 任务 | Runner | Rust target | 产物 |
+| --- | --- | --- | --- |
+| Windows x64 | `windows-latest` | `x86_64-pc-windows-msvc` | NSIS `.exe` |
+| macOS x64 | `macos-13` | `x86_64-apple-darwin` | `.dmg`、`.app` |
+| macOS arm64 | `macos-14` | `aarch64-apple-darwin` | `.dmg`、`.app` |
+| Linux x64 | `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | AppImage、DEB |
+| Linux arm64 | `ubuntu-22.04-arm` | `aarch64-unknown-linux-gnu` | AppImage、DEB |
+
+每个任务都显式传 `--bundles`，因为 `tauri.conf.json` 的 `bundle.targets` 固定为 `nsis`
+（面向本地 Windows 构建）。`fail-fast` 已关闭，单个平台失败不影响其余平台出包。不需要配置
+任何 secret——自动注入的 `GITHUB_TOKEN` 即可——但产物未做代码签名，[安装](#安装)一节的
+SmartScreen / Gatekeeper 说明依然适用。标签版本请与 `src-tauri/tauri.conf.json` 中的
+`version` 保持一致。
+
+> Linux arm64 任务使用 GitHub 托管的 `ubuntu-22.04-arm` runner，**仅公开仓库免费**。私有
+> 仓库需要包含 ARM runner 的付费方案，或自建 arm64 self-hosted runner；都没有的话请删掉该
+> 矩阵条目。
 
 ### Windows NSIS 安装包
 
@@ -252,6 +280,16 @@ npm run tauri build -- --bundles appimage,deb
 
 Linux 产物应在计划支持的最旧基础发行版上构建，以避免引入过新的 glibc 要求。详见 [Tauri AppImage 指南](https://v2.tauri.app/distribute/appimage/)。
 
+### macOS DMG
+
+```bash
+npm ci
+npm run tauri build -- --target aarch64-apple-darwin --bundles dmg,app   # Apple Silicon
+npm run tauri build -- --target x86_64-apple-darwin  --bundles dmg,app   # Intel
+```
+
+macOS 与 Linux 上必须显式传 `--bundles`，因为 `tauri.conf.json` 的 `bundle.targets` 固定为 `nsis`（面向本地 Windows 构建）。
+
 ## 安装
 
 ### Windows
@@ -277,6 +315,18 @@ Linux 产物应在计划支持的最旧基础发行版上构建，以避免引�
   ```bash
   sudo apt install ./linkgauge_*.deb
   ```
+
+请按机器架构选择产物：x64 用 `*_amd64.*`，arm64 用 `*_arm64.*` / `*_aarch64.*`。
+
+### macOS
+
+1. 按架构下载 DMG——Intel 用 `*_x64.dmg`，Apple Silicon 用 `*_aarch64.dmg`。
+2. 打开后把 **LinkGauge** 拖入 `Applications`。
+3. 应用未做签名与公证，Gatekeeper 会拦截首次启动。可以右键点击应用选「打开」，或清除隔离属性：
+
+   ```bash
+   xattr -cr /Applications/LinkGauge.app
+   ```
 
 ## 使用方法
 
