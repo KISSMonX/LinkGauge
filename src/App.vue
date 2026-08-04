@@ -381,10 +381,13 @@ function handleEvent(event: BackendEvent) {
         if (typeof s.uptime === 'number') serverUptime.value = s.uptime
         if (typeof s.completed === 'number') serverCompleted.value = s.completed
         serverServing.value = !!s.serving
-        // 对端（客户端）地址：测试完成后由服务端携带，供概览展示
+        // 对端（客户端）地址：连接时携带；测试结束（客户端断开）后清除
         if (typeof s.peerIp === 'string' && s.peerIp) {
           serverPeerIp.value = s.peerIp
           serverPeerPort.value = s.peerPort ?? 0
+        } else if (!s.serving) {
+          serverPeerIp.value = ''
+          serverPeerPort.value = 0
         }
         // 测试进行中且带间隔统计时，追加到服务端自己的实时曲线
         if (s.serving && typeof s.bandwidthMbps === 'number') {
@@ -392,8 +395,8 @@ function handleEvent(event: BackendEvent) {
         }
       } catch { /* ignore */ }
     }
-    if (event.type === 'complete') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; log('INFO', t('log.serverStopped', { reason: event.status === 'stopped' ? t('log.stoppedManual') : t('log.stoppedEnded') })) }
-    if (event.type === 'error') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; log('ERROR', event.message || t('err.serverExited')); errorDialog.value = { title: t('err.serverError'), message: event.message || t('err.serverExited') } }
+    if (event.type === 'complete') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; serverPeerIp.value = ''; serverPeerPort.value = 0; log('INFO', t('log.serverStopped', { reason: event.status === 'stopped' ? t('log.stoppedManual') : t('log.stoppedEnded') })) }
+    if (event.type === 'error') { serverRunning.value = false; serverSession.value = ''; serverServing.value = false; serverPeerIp.value = ''; serverPeerPort.value = 0; log('ERROR', event.message || t('err.serverExited')); errorDialog.value = { title: t('err.serverError'), message: event.message || t('err.serverExited') } }
     return
   }
   // 客户端事件：停止或结束后的事件忽略

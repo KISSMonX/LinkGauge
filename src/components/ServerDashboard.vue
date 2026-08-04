@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { MetricPoint } from '../types'
 import { useI18n } from '../i18n'
+import { formatBandwidth, formatTransfer } from '../format'
 import BandwidthChart from './BandwidthChart.vue'
 
 /** 服务端独立概览：展示服务端自身的运行状态与观测统计，与客户端测试数据互不影响；
@@ -34,10 +35,10 @@ const last = computed(() => props.points.at(-1))
     <section class="chart-card">
       <h3>{{ running ? t('sdash.liveChart') : t('sdash.doneChart') }}</h3>
       <div class="chart-content"><div class="chart"><BandwidthChart :points="points" :live="running" /></div><dl class="metrics">
-        <dt>{{ t('dash.currentBw') }}</dt><dd class="blue">{{ currentBandwidth.toFixed(2) }} Mbps</dd>
-        <dt>{{ t('dash.avgBw') }}</dt><dd>{{ avgBandwidth.toFixed(2) }} Mbps</dd>
-        <dt>{{ t('dash.maxBw') }}</dt><dd>{{ maxBandwidth.toFixed(2) }} Mbps</dd>
-        <dt>{{ t('dash.totalTransfer') }}</dt><dd>{{ totalTransfer.toFixed(2) }} MB</dd>
+        <dt :title="t('dash.currentBwTitle')">{{ t('dash.currentBw') }}</dt><dd class="blue" :title="`${currentBandwidth.toFixed(2)} Mbps`">{{ formatBandwidth(currentBandwidth) }}</dd>
+        <dt :title="t('dash.avgBwTitle')">{{ t('dash.avgBw') }}</dt><dd :title="`${avgBandwidth.toFixed(2)} Mbps`">{{ formatBandwidth(avgBandwidth) }}</dd>
+        <dt :title="t('dash.maxBwTitle')">{{ t('dash.maxBw') }}</dt><dd :title="`${maxBandwidth.toFixed(2)} Mbps`">{{ formatBandwidth(maxBandwidth) }}</dd>
+        <dt :title="t('dash.totalTransferTitle')">{{ t('dash.totalTransfer') }}</dt><dd :title="`${totalTransfer.toFixed(2)} MB`">{{ formatTransfer(totalTransfer) }}</dd>
         <dt>{{ t('sdash.jitter') }}</dt><dd>{{ (last?.jitterMs ?? 0).toFixed(2) }} ms</dd>
         <dt>{{ t('dash.loss') }}</dt><dd>{{ (last?.lossPercent ?? 0).toFixed(2) }}%</dd>
       </dl></div>

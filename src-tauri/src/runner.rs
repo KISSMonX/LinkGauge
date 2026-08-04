@@ -454,13 +454,17 @@ async fn run_engine_server(
                 return;
             }
             let sum = &interval.sum;
-            *latest.lock().unwrap() = Some(ServerInterval {
+            // 只更新统计字段，保留对端（客户端）地址
+            let mut guard = latest.lock().unwrap();
+            let peer = guard.as_ref().map(|s| (s.peer_ip.clone(), s.peer_port)).unwrap_or_default();
+            *guard = Some(ServerInterval {
                 bandwidth_mbps: sum.bits_per_second / 1_000_000.0,
                 transfer_mb: sum.bytes as f64 / 1_000_000.0,
                 jitter_ms: sum.jitter_ms.unwrap_or(0.0),
                 loss_percent: sum.lost_percent.unwrap_or(0.0),
                 retransmits: sum.retransmits.unwrap_or(0).max(0) as u64,
-                ..Default::default()
+                peer_ip: peer.0,
+                peer_port: peer.1,
             });
         }
     });
@@ -471,9 +475,21 @@ async fn run_engine_server(
         let task_id = request.task_id.clone();
         let log = log.clone();
         let locale = request.locale.clone();
+        let latest = latest.clone();
         move |addr| {
             let host = addr.ip().to_canonical().to_string();
             let port = addr.port();
+            // 记录对端（客户端）地址到快照，后续心跳事件持续携带
+            if let Some(snapshot) = latest.lock().unwrap().as_mut() {
+                snapshot.peer_ip = host.clone();
+                snapshot.peer_port = port;
+            } else {
+                *latest.lock().unwrap() = Some(ServerInterval {
+                    peer_ip: host.clone(),
+                    peer_port: port,
+                    ..Default::default()
+                });
+            }
             let connected = tr_format!(
                 &locale,
                 "客户端 {}:{} 已连接",
@@ -667,14 +683,8 @@ async fn run_engine_server(
                     .connected
                     .first()
                     .map(|c| (c.remote_host.clone(), c.remote_port));
-                *latest.lock().unwrap() = match &peer {
-                    Some((ip, p)) => Some(ServerInterval {
-                        peer_ip: ip.clone(),
-                        peer_port: *p,
-                        ..Default::default()
-                    }),
-                    None => None,
-                };
+                // 测试结束（客户端已断开）：清空对端地址与统计，心跳事件不再携带
+                *latest.lock().unwrap() = None;
                 if outcome.termination == Termination::Interrupted {
                     heartbeat.abort();
                     append_log(
