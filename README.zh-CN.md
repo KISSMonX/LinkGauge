@@ -212,7 +212,19 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
+
+### 持续集成
+
+`.github/workflows/ci.yml` 在每次推送 `master` 和每个 Pull Request 上，于 `windows-latest`
+与 `ubuntu-22.04` 两个平台执行前端构建（含 `vue-tsc`）、rustfmt、`-D warnings` 级别的
+clippy 以及 Rust 测试。测试只使用回环 socket，runner 无需外网访问。
+
+`.github/workflows/release.yml` 在推送 `v*` 标签（或手动触发）时构建安装包，把 Windows
+NSIS、AppImage 与 DEB 产物汇总到同一个 GitHub Release **草稿**。它不需要配置任何 secret
+——自动注入的 `GITHUB_TOKEN` 即可——但产物未经代码签名，上文的 SmartScreen 提示依然适用。
+标签版本请与 `src-tauri/tauri.conf.json` 中的 `version` 保持一致。
 
 ### Windows NSIS 安装包
 
@@ -380,7 +392,7 @@ iperf3 服务端一次只服务一个测试。队列中相邻测试项之间，�
 - [ ] 对正式安装包进行代码签名，消除 Windows SmartScreen 告警
 - [ ] 在受支持的最旧基础发行版上验证 Linux AppImage / DEB 的构建与运行
 - [ ] 补充项目级 LICENSE 文件及包元数据
-- [ ] 建立 CI/CD（如 GitHub Actions）自动构建与发布
+- [x] 建立 CI/CD（GitHub Actions）自动检查与发布构建
 - [ ] 测试结果历史记录与多轮对比功能
 - [ ] 前端关键逻辑单元测试
 

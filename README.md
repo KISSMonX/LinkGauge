@@ -212,7 +212,21 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs the frontend build (including `vue-tsc`), rustfmt, clippy at
+`-D warnings`, and the Rust test suite on both `windows-latest` and `ubuntu-22.04` for every
+push to `master` and every pull request. The tests only use loopback sockets, so no runner
+network access is required.
+
+`.github/workflows/release.yml` builds the installers when a `v*` tag is pushed (or on manual
+dispatch) and collects the Windows NSIS, AppImage, and DEB artifacts into a single **draft**
+GitHub Release. It needs no configured secrets — the automatic `GITHUB_TOKEN` is enough — but
+the artifacts are unsigned, so the SmartScreen warning above still applies. Keep the tag
+version in sync with `version` in `src-tauri/tauri.conf.json`.
 
 ### Windows NSIS installer
 
@@ -380,7 +394,7 @@ An iperf3 server serves one test at a time. Between adjacent items in the queue 
 - [ ] Code-sign release installers to remove the Windows SmartScreen warning
 - [ ] Verify Linux AppImage / DEB builds and runtime on the oldest supported base distribution
 - [ ] Add a project-level LICENSE file and package metadata
-- [ ] Set up CI/CD (e.g. GitHub Actions) for automated builds and releases
+- [x] Set up CI/CD (GitHub Actions) for automated checks and release builds
 - [ ] Test result history and multi-run comparison
 - [ ] Unit tests for key frontend logic
 

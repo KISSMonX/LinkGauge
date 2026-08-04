@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# 同一分支的新推送取消上一次未跑完的检查
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu 固定在 22.04：Linux 产物需在支持的最旧基础发行版上构建，
+        # 避免把 glibc 门槛抬高（见 README 的 Linux 构建说明）
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri 2 的 Linux 系统依赖，与 README「开发环境要求」一致
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl wget file \
+            libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # russh 要求 rust-version 1.85，stable 满足
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # vue-tsc --noEmit + vite build：前端类型检查就在这一步
+      - name: Build frontend
+        run: npm run build
+
+      - name: Rustfmt
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # riperf3 冒烟测试与 SSH 会话测试都跑在 127.0.0.1，无需外部网络
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml

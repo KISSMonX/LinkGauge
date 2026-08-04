@@ -24,16 +24,18 @@ npm ci                       # install frontend deps
 npm run tauri dev            # run the desktop app
 npm run dev                  # browser-only preview (simulated data, see "Preview mode")
 npm run build                # vue-tsc --noEmit && vite build  — run before every commit
-cargo test  --manifest-path src-tauri/Cargo.toml
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo fmt   --manifest-path src-tauri/Cargo.toml -- --check
+cargo test   --manifest-path src-tauri/Cargo.toml
+cargo check  --manifest-path src-tauri/Cargo.toml
+cargo fmt    --manifest-path src-tauri/Cargo.toml -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 npm run tauri build          # NSIS installer (Windows) / add -- --bundles appimage,deb on Linux
 ```
 
-`npm run build` and `cargo test` must both pass before you commit. `cargo fmt --check`
-currently reports pre-existing diffs in `lib.rs`, `report.rs`, `runner.rs` and `settings.rs`;
-format the files **you** touch (`rustfmt --edition 2021 src-tauri/src/<file>.rs`) rather than
-reformatting the whole tree inside an unrelated change.
+All four checks — `npm run build`, `cargo fmt --check`, `cargo clippy -- -D warnings` and
+`cargo test` — must pass before you commit; CI runs exactly these on Windows and Linux
+(`.github/workflows/ci.yml`), so a local failure is a red build. The tree is currently clean
+on all four, and `clippy` is gated at `-D warnings`, so a new warning breaks the build rather
+than accumulating.
 
 ## Layout
 
