@@ -24,8 +24,12 @@ jobs:
             target: x86_64-pc-windows-msvc
             args: --bundles nsis
 
+          # Intel 包在 arm64 runner 上交叉编译：macos-13 的托管额度已被 GitHub 收紧，
+          # 实测两次都分配不到 runner（一次排队超过一天），而 Apple 工具链本身
+          # 支持在 arm64 上产出 x86_64，rust-toolchain 也已按 target 装好标准库。
+          # 代价是 Intel 包无法在 CI 内自测，只能靠 Intel 机器人工验证。
           - name: macOS x64 (Intel)
-            os: macos-13
+            os: macos-14
             target: x86_64-apple-darwin
             args: --bundles dmg,app
 

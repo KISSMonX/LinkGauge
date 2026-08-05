@@ -240,7 +240,7 @@ artifact into a single **draft** GitHub Release:
 | Job | Runner | Rust target | Artifacts |
 | --- | --- | --- | --- |
 | Windows x64 | `windows-latest` | `x86_64-pc-windows-msvc` | NSIS `.exe` |
-| macOS x64 | `macos-13` | `x86_64-apple-darwin` | `.dmg`, `.app` |
+| macOS x64 | `macos-14` (cross-compiled) | `x86_64-apple-darwin` | `.dmg`, `.app` |
 | macOS arm64 | `macos-14` | `aarch64-apple-darwin` | `.dmg`, `.app` |
 | Linux x64 | `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | AppImage, DEB |
 | Linux arm64 | `ubuntu-22.04-arm` | `aarch64-unknown-linux-gnu` | AppImage, DEB |

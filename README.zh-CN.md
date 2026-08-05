@@ -239,7 +239,7 @@ clippy 以及 Rust 测试。测试只使用回环 socket，runner 无需外网�
 | 任务 | Runner | Rust target | 产物 |
 | --- | --- | --- | --- |
 | Windows x64 | `windows-latest` | `x86_64-pc-windows-msvc` | NSIS `.exe` |
-| macOS x64 | `macos-13` | `x86_64-apple-darwin` | `.dmg`、`.app` |
+| macOS x64 | `macos-14`（交叉编译） | `x86_64-apple-darwin` | `.dmg`、`.app` |
 | macOS arm64 | `macos-14` | `aarch64-apple-darwin` | `.dmg`、`.app` |
 | Linux x64 | `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | AppImage、DEB |
 | Linux arm64 | `ubuntu-22.04-arm` | `aarch64-unknown-linux-gnu` | AppImage、DEB |
