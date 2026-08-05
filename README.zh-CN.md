@@ -9,7 +9,7 @@
 
 一款基于 Rust、Tauri 2、Vue 3 和 TypeScript 开发的桌面网络性能测试工具。软件为 Ping、TCP 和 UDP 测试提供工程化图形流程，TCP/UDP 测试由纯 Rust、进程内运行的 [riperf3](https://github.com/therealevanhenry/riperf3) 引擎执行——该引擎直接实现 iperf3 线协议，无需安装、捆绑或启动任何 iperf3 可执行文件；仅 Ping 仍调用系统命令。内置 SSH 控制台（同样是纯 Rust、进程内实现）可直接启停远端主机上的对端 iperf3 服务端，无需切出应用。
 
-> 当前发布状态：推送 `v*` 标签会在 CI 中构建五份安装包——Windows x64（NSIS）、macOS x64 与 arm64（DMG）、Linux x64 与 arm64（AppImage + DEB）。目前均未做代码签名，首次运行的 SmartScreen / Gatekeeper 提示见[安装](#安装)一节。所有安装包都不包含任何第三方网络测试二进制。
+> 当前发布状态：`v*` 标签（由 release-please 自动创建，见[持续集成](#持续集成)一节）会在 CI 中构建五份安装包——Windows x64（NSIS）、macOS x64 与 arm64（DMG）、Linux x64 与 arm64（AppImage + DEB）。目前均未做代码签名，首次运行的 SmartScreen / Gatekeeper 提示见[安装](#安装)一节。所有安装包都不包含任何第三方网络测试二进制。
 
 ## 界面截图
 
@@ -233,8 +233,16 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 与 `ubuntu-22.04` 两个平台执行前端构建（含 `vue-tsc`）、rustfmt、`-D warnings` 级别的
 clippy 以及 Rust 测试。测试只使用回环 socket，runner 无需外网访问。
 
-`.github/workflows/release.yml` 在推送 `v*` 标签（或手动触发）时构建各平台安装包，全部产物
-汇总到同一个 GitHub Release **草稿**：
+版本号与标签由 [release-please](https://github.com/googleapis/release-please) 自动管理：
+`.github/workflows/release-please.yml` 在自上个标签以来的提交包含 `feat:`、`fix:` 或破坏性
+变更时自动开 release PR——PR 会同步升级 `Cargo.toml`、`Cargo.lock`、`package.json`、
+`package-lock.json` 与 `tauri.conf.json` 中的版本号，并重写 `CHANGELOG.md`。合并该 PR 即自动
+创建 `v*` 标签和以 changelog 为正文的 **草稿** Release。版本语义遵循 Conventional Commits：
+`fix:` → patch、`feat:` → minor、破坏性变更（`!`）→ major。请勿手动推送 `v*` 标签或手改
+版本号文件——版本与标签均由 release-please 托管。
+
+`.github/workflows/release.yml` 在该标签（或手动触发）时构建各平台安装包，全部产物汇总到
+同一个 **草稿** Release：
 
 | 任务 | Runner | Rust target | 产物 |
 | --- | --- | --- | --- |
@@ -247,8 +255,7 @@ clippy 以及 Rust 测试。测试只使用回环 socket，runner 无需外网�
 每个任务都显式传 `--bundles`，因为 `tauri.conf.json` 的 `bundle.targets` 固定为 `nsis`
 （面向本地 Windows 构建）。`fail-fast` 已关闭，单个平台失败不影响其余平台出包。不需要配置
 任何 secret——自动注入的 `GITHUB_TOKEN` 即可——但产物未做代码签名，[安装](#安装)一节的
-SmartScreen / Gatekeeper 说明依然适用。标签版本请与 `src-tauri/tauri.conf.json` 中的
-`version` 保持一致。
+SmartScreen / Gatekeeper 说明依然适用。构建完成后在 Releases 页面手动发布该草稿即可。
 
 > Linux arm64 任务使用 GitHub 托管的 `ubuntu-22.04-arm` runner，**仅公开仓库免费**。私有
 > 仓库需要包含 ARM runner 的付费方案，或自建 arm64 self-hosted runner；都没有的话请删掉该

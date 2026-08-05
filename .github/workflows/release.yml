@@ -1,7 +1,8 @@
 name: Release
 
 # 打 v* 标签时构建各平台安装包，汇总到同一个 GitHub Release 草稿。
-# 标签版本应与 src-tauri/tauri.conf.json 的 version 保持一致。
+# 标签由 release-please 自动创建（见 release-please.yml），不要手动打标签；
+# 合并 release PR 时它已生成草稿 Release，tauri-action 会找到它并上传产物。
 on:
   push:
     tags: ['v*']

@@ -1,0 +1,27 @@
+name: Release Please
+
+# 合并到 master 后自动评估是否发版（release-please-action@v4，manifest 模式）：
+# - 自上个标签以来有 feat/fix/breaking 提交时，自动开 release PR
+#   （按 Conventional Commits 升版本号 + 生成/更新 CHANGELOG.md）
+# - 合并该 PR 时自动打 v* 标签并创建草稿 Release（正文即 changelog）
+# - 标签随后触发 release.yml 构建各平台安装包并上传到该草稿
+# 版本语义：fix→patch、feat→minor、breaking!→major（见 release-please-config.json）
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          # GITHUB_TOKEN 创建的 PR 不会触发 CI 工作流；若日后 master 加了
+          # 分支保护并要求检查通过，改用 PAT（secrets.RELEASE_PLEASE_TOKEN）
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

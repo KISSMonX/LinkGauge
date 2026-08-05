@@ -173,6 +173,18 @@ callbacks (upstream only reports intervals after a run finishes). The patch site
 with `local LinkGauge patch` comments. If you upgrade the vendored source, re-apply the patch
 and update the engine version notes in both READMEs.
 
+## Releases
+
+`release-please` (`.github/workflows/release-please.yml`) owns version numbers and tags. After
+a merge to `master` it opens a release PR when there are `feat:`/`fix:`/breaking commits; on
+merge of that PR it bumps the version in `Cargo.toml`, `Cargo.lock`, `package.json`,
+`package-lock.json` and `tauri.conf.json`, rewrites `CHANGELOG.md`, and creates the `v*` tag
+plus a draft GitHub Release that `release.yml` then populates with installers. **Never push a
+`v*` tag or bump versions by hand** — a manual tag will conflict with the next release PR, and
+a version bump commit in a normal PR is a merge-conflict mine for the automation. If a release
+must be cut immediately (no `feat:`/`fix:` commits), use `workflow_dispatch` on `release.yml`
+with an existing tag or a `release-as` in a release PR instead.
+
 ## Housekeeping
 
 - Both READMEs are maintained in parallel — a feature that changes behavior updates the

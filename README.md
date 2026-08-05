@@ -9,7 +9,7 @@
 
 A desktop network performance testing application built with Rust, Tauri 2, Vue 3, and TypeScript. It provides a structured GUI workflow for Ping, TCP, and UDP testing. TCP/UDP tests run on a pure-Rust, in-process [riperf3](https://github.com/therealevanhenry/riperf3) engine that speaks the iperf3 wire protocol — no iperf3 binary is installed, bundled, or spawned; only Ping uses the system command. A built-in SSH console (also pure Rust, in-process) can start and stop the peer's iperf3 server on a remote host without leaving the app.
 
-> Current release status: pushing a `v*` tag builds five packages in CI — Windows x64 (NSIS), macOS x64 and arm64 (DMG), and Linux x64 and arm64 (AppImage + DEB). None of them are code-signed yet, so see the [Installation](#installation) notes for the SmartScreen / Gatekeeper prompts. No package contains a third-party network-testing binary.
+> Current release status: a `v*` tag (created automatically by release-please, see [Continuous integration](#continuous-integration)) builds five packages in CI — Windows x64 (NSIS), macOS x64 and arm64 (DMG), and Linux x64 and arm64 (AppImage + DEB). None of them are code-signed yet, so see the [Installation](#installation) notes for the SmartScreen / Gatekeeper prompts. No package contains a third-party network-testing binary.
 
 ## Screenshots
 
@@ -234,8 +234,17 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 push to `master` and every pull request. The tests only use loopback sockets, so no runner
 network access is required.
 
-`.github/workflows/release.yml` builds on a `v*` tag (or manual dispatch) and collects every
-artifact into a single **draft** GitHub Release:
+Versions and tags are managed by [release-please](https://github.com/googleapis/release-please):
+`.github/workflows/release-please.yml` opens a release PR whenever commits since the last tag
+contain `feat:`, `fix:` or breaking changes — the PR bumps the version in `Cargo.toml`,
+`Cargo.lock`, `package.json`, `package-lock.json` and `tauri.conf.json`, and rewrites
+`CHANGELOG.md`. Merging that PR creates the `v*` tag and a **draft** GitHub Release whose body
+is the changelog. Versioning follows Conventional Commits: `fix:` → patch, `feat:` → minor,
+breaking changes (`!`) → major. Never push a `v*` tag or hand-edit the version files —
+release-please owns both.
+
+`.github/workflows/release.yml` builds on that tag (or manual dispatch) and uploads every
+artifact into the same **draft** Release:
 
 | Job | Runner | Rust target | Artifacts |
 | --- | --- | --- | --- |
@@ -249,7 +258,7 @@ Each job passes `--bundles` explicitly because `bundle.targets` in `tauri.conf.j
 to `nsis` for local Windows builds. `fail-fast` is off, so one platform failing still produces
 the others. No secrets are required — the automatic `GITHUB_TOKEN` is enough — but nothing is
 code-signed, so the SmartScreen and Gatekeeper notes under [Installation](#installation)
-apply. Keep the tag version in sync with `version` in `src-tauri/tauri.conf.json`.
+apply. When the build finishes, publish the draft from the Releases page.
 
 > The Linux arm64 job uses a GitHub-hosted `ubuntu-22.04-arm` runner, which is free for public
 > repositories only. On a private repository it needs a paid plan with ARM runners, or a
