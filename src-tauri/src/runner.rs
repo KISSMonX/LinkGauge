@@ -1419,9 +1419,17 @@ async fn setup_log<R: tauri::Runtime>(
     task_name: &str,
 ) -> Option<SessionLog> {
     let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
-    // 服务端与客户端日志分开记录：Server-{本机IP}-{端口}-{时间} / Client-{本机IP}-{对端IP}-{测试项}-{时间}
+    // 服务端与客户端日志分开记录：服务端-{本机IP}-{端口}-{时间} /
+    // Client-{本机IP}-{对端IP}-{测试项}-{时间}；服务端前缀随界面语言
+    // （服务端 / Server），与客户端汇总文件的本地化命名一致
     let base_name = if request.mode == "server" || request.task_id == "server" {
-        format!("Server-{}-{}-{}", safe_name(local_ip), request.port, stamp)
+        format!(
+            "{}-{}-{}-{}",
+            tr(&request.locale, "服务端", "Server"),
+            safe_name(local_ip),
+            request.port,
+            stamp
+        )
     } else {
         format!(
             "Client-{}-{}-{}-{}",
