@@ -559,3 +559,80 @@ async fn byte_limited_transfer_and_dscp_work_end_to_end() {
     let server_outcome = server_task.await.unwrap().unwrap();
     assert_eq!(server_outcome.termination, Termination::Completed);
 }
+
+/// UDP 禁止分片（--dont-fragment）端到端：IPv4 下设置 DF 标志，
+/// 测试须正常完成（Windows / Unix 均有实现，runner.rs 的 DF 接线）。
+/// 注意：UDP 测试不能用 port(Some(0))——控制监听与 UDP demux 分别拿
+/// 到不同的临时端口，魔数会打空（引擎限制，真实应用总是固定端口）
+#[tokio::test(flavor = "multi_thread")]
+async fn dont_fragment_works_end_to_end() {
+    // 探测一个空闲端口给服务端使用（UDP 下控制与 demux 必须同端口）
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(port))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Udp)
+        .duration(1)
+        .interval(1.0)
+        .bandwidth(100_000_000) // 100 Mbps，避免引擎的 1 Mibit/s 默认限速
+        .dont_fragment(true)
+        .json_output(true)
+        .emit_output(false)
+        .build()
+        .unwrap();
+    let outcome = client.run().await.unwrap();
+    assert_eq!(outcome.termination, Termination::Completed);
+
+    let server_outcome = server_task.await.unwrap().unwrap();
+    assert_eq!(server_outcome.termination, Termination::Completed);
+}
+
+/// 拥塞控制（-C）端到端：仅 Unix 平台（引擎在 Windows 的 build() 直接
+/// 拒绝，LinkGauge validate 同样拦截），Linux 上 cubic 真实生效
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn congestion_control_works_end_to_end() {
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Tcp)
+        .duration(1)
+        .interval(1.0)
+        .congestion("cubic")
+        .json_output(true)
+        .emit_output(false)
+        .build()
+        .unwrap();
+    let outcome = client.run().await.unwrap();
+    assert_eq!(outcome.termination, Termination::Completed);
+
+    let server_outcome = server_task.await.unwrap().unwrap();
+    assert_eq!(server_outcome.termination, Termination::Completed);
+}

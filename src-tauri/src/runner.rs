@@ -244,6 +244,12 @@ fn validate(request: &TestRequest) -> Result<(), String> {
     if request.dscp > 63 {
         return Err("DSCP 值应在 0-63 之间".into());
     }
+    // 拥塞控制仅 Linux/FreeBSD 支持；其他平台引擎在 build() 直接报
+    // Unsupported，这里提前给出更友好的提示（macOS 等 unix 平台放行）
+    #[cfg(not(unix))]
+    if !request.congestion_algo.trim().is_empty() {
+        return Err("拥塞控制算法（-C）仅支持 Linux/FreeBSD".into());
+    }
     Ok(())
 }
 
@@ -282,6 +288,10 @@ struct ClientParams {
     blocks_to_send: Option<u64>,
     /// DSCP 值（0 = 不设置，1-63 映射到 TOS 高 6 位）
     dscp: u32,
+    /// TCP 拥塞控制算法（None = 默认；仅 Linux/FreeBSD 生效）
+    congestion_algo: Option<String>,
+    /// UDP 禁止分片标志（仅 IPv4）
+    udp_dont_fragment: bool,
 }
 
 fn client_params_for(request: &TestRequest) -> ClientParams {
@@ -322,6 +332,10 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
             .then(|| request.transfer_amount.saturating_mul(1_000_000)),
         blocks_to_send: (request.transfer_mode == "blocks").then_some(request.transfer_amount),
         dscp: request.dscp,
+        // 空字符串 = 不设置；其余原样下发（引擎在非 Linux/FreeBSD 上静默忽略）
+        congestion_algo: (!request.congestion_algo.trim().is_empty())
+            .then(|| request.congestion_algo.trim().to_string()),
+        udp_dont_fragment: request.udp_dont_fragment,
     };
     match request.task_id.as_str() {
         "tcp-parallel" => params.num_streams = request.parallel.max(1) as u32,
@@ -593,6 +607,14 @@ fn engine_client_builder(
     // DSCP 标记（--dscp）：0 = 不设置；数值字符串由引擎解析并左移 2 位进 TOS 字节
     if params.dscp > 0 {
         builder = builder.dscp(&params.dscp.to_string());
+    }
+    // 拥塞控制算法（-C）：仅 Linux/FreeBSD 生效，其余平台引擎静默忽略
+    if let Some(algo) = &params.congestion_algo {
+        builder = builder.congestion(algo);
+    }
+    // UDP 禁止分片（--dont-fragment）：仅 IPv4，Unix 平台生效
+    if params.udp_dont_fragment {
+        builder = builder.dont_fragment(true);
     }
     // iperf3 认证：服务端以 --rsa-private-key-path + --authorized-users-path 启动时，
     // 客户端须用服务端公钥加密「用户名+密码」。未启用时前端已把三项清空，这里自然跳过。
@@ -1766,6 +1788,8 @@ mod tests {
             transfer_mode: "time".into(),
             transfer_amount: 0,
             dscp: 0,
+            congestion_algo: String::new(),
+            udp_dont_fragment: false,
             auth_username: String::new(),
             auth_password: String::new(),
             auth_public_key_path: String::new(),
@@ -2053,5 +2077,20 @@ mod tests {
         assert!(validate(&req).is_ok());
         req.dscp = 64;
         assert!(validate(&req).is_err());
+    }
+
+    #[test]
+    fn congestion_and_dont_fragment_map_through_params() {
+        let mut req = request("udp-bandwidth", "client", "udp");
+        req.congestion_algo = "  bbr  ".into();
+        req.udp_dont_fragment = true;
+        let params = client_params_for(&req);
+        // 算法去掉首尾空白；空字符串 = 不设置
+        assert_eq!(params.congestion_algo.as_deref(), Some("bbr"));
+        assert!(params.udp_dont_fragment);
+        // 默认：算法不设置、DF 关闭
+        let params = client_params_for(&request("udp-bandwidth", "client", "udp"));
+        assert_eq!(params.congestion_algo, None);
+        assert!(!params.udp_dont_fragment);
     }
 }

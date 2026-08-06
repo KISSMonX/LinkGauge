@@ -40,6 +40,10 @@ export interface TestConfig {
   transferAmount: number
   /** DSCP 值（0 = 不设置，1–63，对应 --dscp） */
   dscp: number
+  /** TCP 拥塞控制算法（空 = 默认，对应 -C；仅 Linux/FreeBSD 生效） */
+  congestionAlgo: string
+  /** UDP 数据报禁止分片（--dont-fragment；仅 IPv4） */
+  udpDontFragment: boolean
   /** 启用 iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path 启动时必需） */
   authEnabled: boolean
   authUsername: string
