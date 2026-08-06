@@ -19,7 +19,9 @@ const statusText = (status: TestItem['status']) => ({ waiting: t('st.waiting'), 
 const filterLabel = (item: 'ALL' | 'INFO' | 'WARN' | 'ERROR') => ({ ALL: t('st.filterAll'), INFO: t('st.filterInfo'), WARN: t('st.filterWarn'), ERROR: t('st.filterError') })[item]
 /** 测试结束后，有历史数据的项目可点击查看其历史曲线 */
 const canView = (item: TestItem) => !props.running && (props.history?.[item.id]?.points.length ?? 0) > 0
-watch(() => props.logs.length, async () => { await nextTick(); if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
+// 日志新增或整体替换（初始化应答合并）后都滚动到底部：仅盯 length 在「同长度
+// 替换」时会漏——历史上一度表现为日志「停在某一段」不跟随最新内容
+watch(() => [props.logs.length, props.logs.at(-1)?.time ?? ''], async () => { await nextTick(); if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
 </script>
 
 <template>

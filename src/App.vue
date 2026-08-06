@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { emit, emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open, save } from '@tauri-apps/plugin-dialog'
@@ -206,7 +206,7 @@ watch(serverConfig, (value) => { localStorage.setItem('linkgauge-server-config',
 watch(sshConfig, (value) => { localStorage.setItem('linkgauge-ssh-config', JSON.stringify(withoutSshSecret(value))); if (!syncing) emitSync() }, { deep: true })
 
 // —— 跨窗口状态同步：任何本地变更广播 side-sync，其他窗口应用（syncing 标志防回声循环） ——
-function syncBundle(): SyncState {
+function syncBundle(withLogs = false): SyncState {
   return {
     config: config.value,
     serverConfig: serverConfig.value,
@@ -235,8 +235,10 @@ function syncBundle(): SyncState {
     startedAt: startedAt.value,
     connected: connected.value,
     clientLocalPort: clientLocalPort.value,
-    // 只同步引擎日志：各窗口自己的 UI 日志（module=UI）本地保留，不跨窗口传播
-    logs: logs.value.filter((l) => l.module !== 'UI'),
+    // 常规广播不带日志（空数组）：各窗口都监听同一 test-event 广播自行累积，日志
+    // 是高频数据，随包整体替换会让陈旧副本反复截断显示（日志「停在某一段」）。
+    // 仅窗口初始化应答（withLogs）携带一次完整历史；applySync 对空数组不替换。
+    logs: withLogs ? logs.value.filter((l) => l.module !== 'UI') : [],
     serverUptime: serverUptime.value,
     serverCompleted: serverCompleted.value,
     serverServing: serverServing.value,
@@ -290,7 +292,9 @@ async function applySync(payload: SyncState) {
   startedAt.value = payload.startedAt
   connected.value = payload.connected
   clientLocalPort.value = payload.clientLocalPort
-  logs.value = [...logs.value.filter((l) => l.module === 'UI'), ...payload.logs]
+  // 常规同步包不带日志（空数组），各窗口由 test-event 广播自行累积，不做替换；
+  // 仅窗口初始化应答（withLogs）携带历史日志时整体合并一次
+  if (payload.logs.length > 0) logs.value = [...logs.value.filter((l) => l.module === 'UI'), ...payload.logs]
   serverUptime.value = payload.serverUptime
   serverCompleted.value = payload.serverCompleted
   serverServing.value = payload.serverServing
@@ -877,9 +881,9 @@ onMounted(async () => {
       invoke('set_locale', { locale: locale.value }).catch(() => {})
       // 跨窗口同步：状态包广播 + 主窗口收回标签通知 + 子窗口被请求关闭
       unlistenSync = await listen<SyncState>('side-sync', (e) => applySync(e.payload))
-      // 其他窗口请求当前状态（新分离的窗口启动时主动请求）：立即应答完整快照，
-      // 不受 syncing 阻塞——应答方正在应用状态时，其同步赋值已完成，快照内容一致
-      unlistenSyncReq = await listen('side-sync-request', () => { if (stateReady) void emit('side-sync', syncBundle()) })
+      // 其他窗口请求当前状态（新分离的窗口启动时主动请求）：定向应答完整快照
+      // （含历史日志，withLogs=true），不广播给其他窗口以免其日志被副本替换
+      unlistenSyncReq = await listen<{ from: string }>('side-sync-request', (e) => { if (stateReady) void emitTo(e.payload.from, 'side-sync', syncBundle(true)) })
       if (side.value === 'hub') {
         unlistenDock = await listen<DockEvent>('side-dock', (e) => dockTab(e.payload.side))
         // 主窗口关闭（✕）= 弹退出确认框：确认后调用 exit_app 退出整个应用，取消则保持打开
@@ -899,7 +903,7 @@ onMounted(async () => {
         })
         unlistenClose = await listen<DockEvent>('side-close', (e) => { if (e.payload.side === side.value) void dockBack() })
         // 启动时请求一次完整状态（serverSession/clientRunning 等），随后的事件才能正确匹配会话
-        void emit('side-sync-request')
+        void emit('side-sync-request', { from: ownLabel })
       }
       const [info, ifaces, customTcpLen, customUdpLen] = await Promise.all([
         invoke<NetworkInfo>('get_network_info'),
