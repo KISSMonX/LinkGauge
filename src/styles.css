@@ -72,6 +72,9 @@
   --modal-symbol-info: #1680f5;
   --task-running: #086ee5;
   --disabled-opacity: .48;
+  /* 测试项悬停介绍：亮色主题用深底浅字 */
+  --tooltip-bg: #242d3d;
+  --tooltip-text: #eef2f7;
 }
 [data-theme='dark'] {
   color-scheme: dark;
@@ -145,6 +148,9 @@
   --modal-symbol-error: #ef4444;
   --modal-symbol-info: #4d9df3;
   --task-running: #6db4ff;
+  /* 测试项悬停介绍：暗色主题用浅底深字 */
+  --tooltip-bg: #e9edf4;
+  --tooltip-text: #1c2433;
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 1180px; min-height: 760px; background: var(--bg); color: var(--text); font-size: 14px; overflow: hidden; }
@@ -209,6 +215,8 @@ h2,h3,p { margin-top: 0; }
 .config-section { padding: 8px 12px; border-bottom: 1px solid var(--border); }
 .tests-section { padding-bottom: 7px; }
 .test-list { margin-top: 6px; max-height: 222px; overflow-y: auto; }
+/* 测试项悬停介绍：fixed 定位跟随鼠标，pointer-events 关闭避免遮挡列表交互 */
+.item-tooltip { position: fixed; z-index: 999; max-width: 280px; padding: 6px 10px; border-radius: 5px; font-size: 12px; line-height: 1.55; color: var(--tooltip-text); background: var(--tooltip-bg); box-shadow: 0 4px 14px #0000002e; pointer-events: none; white-space: normal; }
 .test-list label { display: flex; align-items: center; gap: 10px; height: 27px; cursor: pointer; }
 .test-list label.muted { opacity: .5; }
 .test-list input[type=checkbox], .log-option input { width: 17px; height: 17px; accent-color: var(--blue); }

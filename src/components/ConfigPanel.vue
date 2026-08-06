@@ -104,6 +104,18 @@ const setSsh = <K extends keyof SshConfig>(key: K, value: SshConfig[K]) => emit(
 /** SSH 参数在连接建立后锁定，断开后才能修改 */
 const sshLocked = computed(() => props.sshStatus !== 'idle')
 
+// —— 测试项悬停介绍：fixed 定位浮动层（不受面板 overflow 裁剪），跟随鼠标 ——
+const itemTooltip = ref<{ text: string; x: number; y: number } | null>(null)
+/** 贴近视口右/下缘时回退坐标，避免提示被挤出屏幕 */
+const clampTooltip = (x: number, y: number) => ({ x: Math.min(x + 14, window.innerWidth - 280), y: Math.min(y + 14, window.innerHeight - 70) })
+function showItemTooltip(event: MouseEvent, id: string) {
+  itemTooltip.value = { text: t(('cfg.itemDesc.' + id) as MessageKey), ...clampTooltip(event.clientX, event.clientY) }
+}
+function moveItemTooltip(event: MouseEvent) {
+  if (itemTooltip.value) itemTooltip.value = { ...itemTooltip.value, ...clampTooltip(event.clientX, event.clientY) }
+}
+function hideItemTooltip() { itemTooltip.value = null }
+
 /** 带宽限制选项：当前网卡速率（默认） + 100 / 1000 / 0（不限制），相同速率去重 */
 const bandwidthOptions = computed(() => {
   const nic = props.local.speedMbps > 0 ? props.local.speedMbps : 0
@@ -203,7 +215,7 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <div class="section-title"><h2>{{ t('cfg.tests') }}</h2></div>
       <p class="protocol-hint">{{ t('cfg.testsHint') }}</p>
       <div class="test-list">
-        <label v-for="(item, index) in items" :key="item.id">
+        <label v-for="(item, index) in items" :key="item.id" @mouseenter="showItemTooltip($event, item.id)" @mousemove="moveItemTooltip" @mouseleave="hideItemTooltip">
           <input type="checkbox" :checked="item.enabled" :disabled="clientRunning" @change="emit('toggle-item', item.id)" />
           <span>{{ index + 1 }}. {{ itemLabel(item.id) }}</span><span class="drag">≡</span>
         </label>
@@ -313,5 +325,6 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
         </div>
       </div>
     </div>
+    <div v-if="itemTooltip" class="item-tooltip" :style="{ left: itemTooltip.x + 'px', top: itemTooltip.y + 'px' }">{{ itemTooltip.text }}</div>
   </aside>
 </template>
