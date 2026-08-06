@@ -789,7 +789,7 @@ async function exportConfig() {
     infoDialog.value = { title: t('report.exported'), message: saved }
   } catch (error) { errorDialog.value = { title: t('err.exportFailed'), message: String(error) } }
 }
-function importConfig() { const input = document.createElement('input'); input.type = 'file'; input.accept = '.json'; input.onchange = async () => { const file = input.files?.[0]; if (!file) return; try { config.value = { ...defaults, ...JSON.parse(await file.text()) }; log('INFO', t('log.importOk')) } catch { errorDialog.value = { title: t('err.importFailed'), message: t('err.importInvalid') } } }; input.click() }
+function importConfig() { const input = document.createElement('input'); input.type = 'file'; input.accept = '.json'; input.onchange = async () => { const file = input.files?.[0]; if (!file) return; try { const parsed = JSON.parse(await file.text()); if (!parsed.transferAmount) parsed.transferAmount = 100 /* 旧配置迁移，同 localStorage 加载 */; config.value = { ...defaults, ...parsed }; log('INFO', t('log.importOk')) } catch { errorDialog.value = { title: t('err.importFailed'), message: t('err.importInvalid') } } }; input.click() }
 
 /** 设置弹窗：切换界面语言（默认英文）与主题外观（默认亮色），变更随 side-sync 同步到所有窗口 */
 function onLocaleChange(event: Event) {
@@ -803,7 +803,7 @@ function onThemeChange(event: Event) {
 }
 
 onMounted(async () => {
-  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; if (parsed.udpPacketLength === 8192) parsed.udpPacketLength = 1460 /* 旧默认 8KB 会触发 IP 分片，迁移为 iperf3 默认 1460 */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
+  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; if (parsed.udpPacketLength === 8192) parsed.udpPacketLength = 1460 /* 旧默认 8KB 会触发 IP 分片，迁移为 iperf3 默认 1460 */; if (!parsed.transferAmount) parsed.transferAmount = 100 /* 旧默认 0 迁移：按量测试项默认勾选后需非零数量 */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
   const savedSsh = localStorage.getItem('linkgauge-ssh-config'); if (savedSsh) try { sshConfig.value = { ...sshDefaults, ...JSON.parse(savedSsh), password: '', passphrase: '' } } catch { /* ignore */ }
   if (isTauri()) {
