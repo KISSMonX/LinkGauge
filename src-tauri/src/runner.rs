@@ -453,67 +453,37 @@ async fn run_engine_client<R: tauri::Runtime>(
     emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
 
     let params = client_params_for(&request);
-    // iperf3 服务端一次只服务一个测试：队列里上一项刚结束时对端可能尚未回到监听
-    // 状态，此刻连上去会收到 ServerBusy。自动重试数次，避免整个测试项被误判为失败。
-    let mut attempt: u32 = 0;
-    let outcome = loop {
-        let builder = engine_client_builder(
-            &app,
-            &session_id,
-            &request,
-            &params,
-            &log,
-            &locale_handle,
-            rx.clone(),
-        );
-        let client = match builder.build() {
-            Ok(client) => client,
-            Err(error) => {
-                fail_engine(
-                    &app,
-                    &session_id,
-                    &request.task_id,
-                    &log,
+    let builder = engine_client_builder(
+        &app,
+        &session_id,
+        &request,
+        &params,
+        &log,
+        &locale_handle,
+        rx,
+    );
+    let client = match builder.build() {
+        Ok(client) => client,
+        Err(error) => {
+            fail_engine(
+                &app,
+                &session_id,
+                &request.task_id,
+                &log,
+                &locale,
+                &tr_format!(
                     &locale,
-                    &tr_format!(
-                        &locale,
-                        "测试配置无效：{}",
-                        "Invalid test configuration: {}",
-                        error
-                    ),
-                    false,
-                )
-                .await;
-                return;
-            }
-        };
-        match client.run().await {
-            // 已收到停止信号时不再重试（rx 非 None = 用户已点停止）
-            Err(riperf3::RiperfError::ServerBusy)
-                if attempt < BUSY_RETRY_MAX && rx.borrow().is_none() =>
-            {
-                attempt += 1;
-                let locale = current_locale(&locale_handle);
-                let message = tr_format!(
-                    &locale,
-                    "服务端正忙，{} 秒后重试（第 {}/{} 次）",
-                    "Server busy, retrying in {}s ({}/{})",
-                    BUSY_RETRY_DELAY.as_secs(),
-                    attempt,
-                    BUSY_RETRY_MAX
-                );
-                append_log(&log, &format!("[WARN] {message}"));
-                emit_log(&app, &session_id, &request.task_id, "WARN", message);
-                // 等待期间仍要响应「停止测试」，否则用户得干等完整个退避
-                let mut wait_rx = rx.clone();
-                tokio::select! {
-                    _ = sleep(BUSY_RETRY_DELAY) => {}
-                    _ = wait_rx.changed() => {}
-                }
-            }
-            other => break other,
+                    "测试配置无效：{}",
+                    "Invalid test configuration: {}",
+                    error
+                ),
+                false,
+            )
+            .await;
+            return;
         }
     };
+    let outcome = client.run().await;
     finish_engine(
         &app,
         &session_id,
@@ -526,13 +496,7 @@ async fn run_engine_client<R: tauri::Runtime>(
     .await;
 }
 
-/// 服务端忙时的重试次数与退避间隔（iperf3 服务端串行服务，队列相邻项之间常撞上）
-const BUSY_RETRY_MAX: u32 = 3;
-const BUSY_RETRY_DELAY: Duration = Duration::from_secs(2);
-
 /// 构造一次 riperf3 客户端 builder。
-///
-/// 必须每次重试都重新构造：`build()` 会消费 builder，其中的回调闭包也随之被移走。
 #[allow(clippy::too_many_arguments)]
 fn engine_client_builder<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -1629,12 +1593,12 @@ async fn finish_engine<R: tauri::Runtime>(
             } else {
                 // 两类可操作的失败给出具体排查方向，其余沿用引擎原文
                 let message = match &error {
-                    riperf3::RiperfError::ServerBusy => tr_format!(
+                    riperf3::RiperfError::ServerBusy => tr(
                         locale,
-                        "服务端忙：iperf3 一次只服务一个测试，重试 {} 次后仍被拒绝。请确认没有其他客户端正在占用该服务端。",
-                        "Server busy: iperf3 serves one test at a time and still refused after {} retries. Check that no other client is using that server.",
-                        BUSY_RETRY_MAX
-                    ),
+                        "服务端忙：iperf3 一次只服务一个测试。请确认没有其他客户端正在占用该服务端。",
+                        "Server busy: iperf3 serves one test at a time. Check that no other client is using that server.",
+                    )
+                    .to_string(),
                     riperf3::RiperfError::AccessDenied => tr(
                         locale,
                         "认证被服务端拒绝：请核对用户名、密码，以及 RSA 公钥是否与服务端 --authorized-users-path 中的条目匹配；若对端 iperf3 低于 3.17，需勾选「PKCS#1 填充」。",
@@ -2666,6 +2630,24 @@ mod queue_tests {
             content.matches("测试结果: 完成").count(),
             8,
             "8 个测试项都应写入完成结果"
+        );
+        // 前端队列级错误（看门狗超时等）经 append_client_log 补写运行日志
+        append_client_log(
+            handle.clone(),
+            ClientLogAppend {
+                run_id,
+                local_ip: "127.0.0.1".into(),
+                server_ip: "127.0.0.1".into(),
+                locale: "zh".into(),
+                level: "ERROR".into(),
+                message: "任务 tcp-single 超过 30 秒未完成（超时，标记失败并继续下一项）".into(),
+            },
+        )
+        .await;
+        let content = std::fs::read_to_string(&summary_file).unwrap();
+        assert!(
+            content.contains("[ERROR] 任务 tcp-single 超过 30 秒未完成"),
+            "前端超时错误应补写进运行日志"
         );
 
         server_tx.send(Some("stop".into())).unwrap();
