@@ -140,6 +140,10 @@ pub struct TestEvent {
     pub metric: Option<MetricPoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_path: Option<String>,
+    /// 环境性失败（服务端不可达等）：队列里剩余引擎项必然同样失败，
+    /// 前端据此中止整个队列而非逐项标失败
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fatal: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

@@ -743,7 +743,7 @@ function handleEvent(event: BackendEvent) {
   if (!clientRunning.value) return
   if (event.type === 'metric' && event.metric) { points.value.push(event.metric); connected.value = true; if (event.taskId === 'ping' && event.metric.jitterMs) summary.pingAverage = event.metric.jitterMs }
   if (event.type === 'complete') completeCurrent(event.status || 'success')
-  if (event.type === 'error') failCurrent(event.message || t('err.execFailed'))
+  if (event.type === 'error') failCurrent(event.message || t('err.execFailed'), event.fatal)
 }
 
 /** 把当前实时数据按项目 id 快照进历史缓存（仅内存，退出应用即销毁）；
@@ -766,19 +766,25 @@ function completeCurrent(status: TestItem['status']) {
   if (driver.value === ownLabel) void runNext()
 }
 
-function failCurrent(message: string) {
+function failCurrent(message: string, abort = false) {
   disarmWatchdog()
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = 'failed'
   completedPoints.value = [...points.value]
   snapshotItem(queue.value[queueIndex.value], 'failed')
   if (item) completedLabel.value = itemLabel(item.id)
-  log('ERROR', message)
-  // 单项失败不中止队列：标记 failed 后继续下一项（失败原因保留在弹窗与日志/报告中）。
-  // 曾因 finishRun(false) 中止整个队列——默认队列里 tcp-mptcp 在不支持的平台上必然
-  // 失败，表现为「卡在第 N 项、日志不刷新」（队列已停但 UI 无提示）
-  if (driver.value === ownLabel) void runNext()
+  log('ERROR', abort ? `${t('err.queueAborted')}：${message}` : message)
+  // 环境性失败（服务端未启动等）中止整个队列：剩余引擎项必然同样失败，继续只会
+  // 产生一串无意义失败，由用户修复环境后重新开始测试
+  if (abort) {
+    finishRun(false)
+  } else {
+    // 单项失败不中止队列：标记 failed 后继续下一项（失败原因保留在弹窗与日志/报告中）。
+    // 曾因 finishRun(false) 中止整个队列——默认队列里 tcp-mptcp 在不支持的平台上必然
+    // 失败，表现为「卡在第 N 项、日志不刷新」（队列已停但 UI 无提示）
+    if (driver.value === ownLabel) void runNext()
+  }
   const lastLog = summary.logPaths.at(-1)
-  errorDialog.value = { title: t('err.alert'), message: lastLog ? `${message}\n\n${t('err.logFile', { path: lastLog })}` : message, retry: true }
+  errorDialog.value = { title: t('err.alert'), message: lastLog ? `${(abort ? `${t('err.queueAborted')}\n\n` : '') + message}\n\n${t('err.logFile', { path: lastLog })}` : message, retry: !abort }
 }
 function finishRun(completed: boolean) { disarmWatchdog(); clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100 } log('INFO', t('log.finish')) }
 async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); if (item) snapshotItem(item.id, 'stopped'); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; finishRun(false) }
@@ -963,7 +969,7 @@ onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyn
     <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog?.retry" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><button v-else @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="confirmDialog" class="modal-backdrop" @click.self="confirmDialog = null"><div class="modal"><button class="modal-close" @click="confirmDialog = null">×</button><h2>{{ confirmDialog.title }}</h2><div class="modal-body"><span class="modal-symbol info">i</span><p>{{ confirmDialog.message }}</p></div><div class="modal-actions"><button @click="confirmDialog = null">{{ t('common.cancel') }}</button><button class="danger" @click="confirmStop">{{ confirmDialog.action === 'exit' ? t('confirm.exitButton') : t('common.confirm') }}</button></div></div></div>
     <div v-if="settingsDialog" class="modal-backdrop" @click.self="settingsDialog = false"><div class="modal"><button class="modal-close" @click="settingsDialog = false">×</button><h2>{{ t('settings.title') }}</h2><div class="settings-form"><label><span>{{ t('settings.language') }}</span><select :value="locale" @change="onLocaleChange($event)"><option value="en">English</option><option value="zh">中文</option></select></label><label><span>{{ t('settings.theme') }}</span><select :value="theme" @change="onThemeChange($event)"><option value="light">{{ t('settings.light') }}</option><option value="dark">{{ t('settings.dark') }}</option></select></label></div><p class="settings-note">{{ t('settings.engineNote') }}</p><div class="modal-actions"><button class="primary" @click="settingsDialog = false">{{ t('common.confirm') }}</button></div></div></div>
-    <div v-if="nicDialog" class="modal-backdrop" @click.self="nicDialog = false; applyNic(0)"><div class="modal nic-modal"><button class="modal-close" @click="nicDialog = false; applyNic(0)">×</button><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false; applyNic(0)">{{ t('nic.cancel') }}</button></div></div></div>
+    <div v-if="nicDialog" class="modal-backdrop"><div class="modal nic-modal"><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false">{{ t('nic.cancel') }}</button></div></div></div>
     <div v-if="aboutDialog" class="modal-backdrop" @click.self="aboutDialog = false"><div class="modal about-modal"><button class="modal-close" @click="aboutDialog = false">×</button><div class="about-header"><img class="about-logo" :src="appIcon" alt="LinkGauge" /><div><h2>LinkGauge</h2><p class="about-intro">{{ t('about.intro') }}</p></div></div><dl class="about-rows"><div class="about-row"><dt>{{ t('about.version') }}</dt><dd>v{{ appInfo.version }}</dd></div><div class="about-row"><dt>{{ t('about.commit') }}</dt><dd><code>{{ appInfo.commit }}</code></dd></div><div class="about-row"><dt>{{ t('about.author') }}</dt><dd>KISSMonX</dd></div><div class="about-row"><dt>{{ t('about.project') }}</dt><dd><button class="about-link" :title="APP_PROJECT_URL" @click="openLink(APP_PROJECT_URL)">github</button></dd></div></dl><div class="about-actions"><button class="primary" @click="openLink(APP_ISSUES_URL)">{{ t('about.feedback') }}</button></div><p class="about-engine">{{ t('about.engine') }}</p></div></div>
   </div>
 </template>
