@@ -21,7 +21,7 @@ import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, Met
 const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 
-const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, omitSecs: 0, windowKb: 0, cport: 0, ipVersion: 0, getServerOutput: false, transferMode: 'time', transferAmount: 0, dscp: 0, congestionAlgo: '', udpDontFragment: false, mptcp: false, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
+const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, omitSecs: 0, windowKb: 0, cport: 0, ipVersion: 0, getServerOutput: false, transferMode: 'time', transferAmount: 100, dscp: 0, congestionAlgo: '', udpDontFragment: false, mptcp: false, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
 const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1, authEnabled: false, authPrivateKeyPath: '', authUsersPath: '', authPkcs1Padding: false, idleTimeout: 0, maxDuration: 0, bitrateLimit: 0 }
 const sshDefaults: SshConfig = { host: '', port: 22, username: '', authMethod: 'password', password: '', privateKeyPath: '', passphrase: '' }
 const config = ref<TestConfig>({ ...defaults })
@@ -36,12 +36,12 @@ const items = ref<TestItem[]>([
   { id: 'udp-loss', label: 'UDP 抖动 / 丢包', protocol: 'udp', enabled: true, status: 'waiting' },
   { id: 'tcp-reverse', label: '反向测试（Reverse）', protocol: 'tcp', enabled: true, status: 'waiting' },
   { id: 'stress', label: '持续时间压力测试', protocol: 'tcp', enabled: true, status: 'waiting' },
-  // —— 本次功能扩展新增的测试项（按量 / MPTCP / 禁止分片），默认关闭 ——
-  { id: 'tcp-bytes', label: 'TCP 按量传输测试', protocol: 'tcp', enabled: false, status: 'waiting' },
-  { id: 'udp-bytes', label: 'UDP 按量传输测试', protocol: 'udp', enabled: false, status: 'waiting' },
-  { id: 'tcp-blocks', label: 'TCP 按块传输测试', protocol: 'tcp', enabled: false, status: 'waiting' },
-  { id: 'tcp-mptcp', label: 'TCP MPTCP 多路径测试', protocol: 'tcp', enabled: false, status: 'waiting' },
-  { id: 'udp-df', label: 'UDP 无分片（DF）测试', protocol: 'udp', enabled: false, status: 'waiting' }
+  // —— 本次功能扩展新增的测试项（按量 / MPTCP / 禁止分片），默认勾选 ——
+  { id: 'tcp-bytes', label: 'TCP 按量传输测试', protocol: 'tcp', enabled: true, status: 'waiting' },
+  { id: 'udp-bytes', label: 'UDP 按量传输测试', protocol: 'udp', enabled: true, status: 'waiting' },
+  { id: 'tcp-blocks', label: 'TCP 按块传输测试', protocol: 'tcp', enabled: true, status: 'waiting' },
+  { id: 'tcp-mptcp', label: 'TCP MPTCP 多路径测试', protocol: 'tcp', enabled: true, status: 'waiting' },
+  { id: 'udp-df', label: 'UDP 无分片（DF）测试', protocol: 'udp', enabled: true, status: 'waiting' }
 ])
 const local = ref<NetworkInfo>({ ip: '127.0.0.1', mac: '--', hostname: 'localhost', interfaceName: '默认网卡', speedMbps: 0 })
 const logs = ref<LogEntry[]>([])
