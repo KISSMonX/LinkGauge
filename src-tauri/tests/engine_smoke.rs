@@ -365,3 +365,43 @@ async fn omit_and_window_params_work_end_to_end() {
     let server_outcome = server_task.await.unwrap().unwrap();
     assert_eq!(server_outcome.termination, Termination::Completed);
 }
+
+/// 客户端源端口（--cport）与 IP 协议族（-4）端到端：单流时数据流绑定
+/// cport；显式 IPv4 强制地址族解析（runner.rs 的 cport/ip_version 接线）
+#[tokio::test(flavor = "multi_thread")]
+async fn cport_and_ip_version_work_end_to_end() {
+    // 先探测一个空闲端口作为 cport，避免固定端口被占用导致测试偶发失败
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let cport = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Tcp)
+        .duration(1)
+        .interval(1.0)
+        .cport(cport)
+        .ip_version(4)
+        .json_output(true)
+        .emit_output(false)
+        .build()
+        .unwrap();
+    let outcome = client.run().await.unwrap();
+    assert_eq!(outcome.termination, Termination::Completed);
+
+    let server_outcome = server_task.await.unwrap().unwrap();
+    assert_eq!(server_outcome.termination, Termination::Completed);
+}

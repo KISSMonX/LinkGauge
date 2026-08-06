@@ -34,6 +34,12 @@ pub struct TestRequest {
     /// TCP 套接字缓冲区大小（KB，0 = 自动/默认，对应 iperf3 `-w`；仅客户端模式使用）
     #[serde(default)]
     pub window_kb: u32,
+    /// 客户端数据流源端口（0 = 自动，对应 iperf3 `--cport`；第 i 条流绑定 cport+i）
+    #[serde(default)]
+    pub cport: u16,
+    /// IP 协议族（0 = 自动，4 = 仅 IPv4，6 = 仅 IPv6；仅客户端模式使用）
+    #[serde(default)]
+    pub ip_version: u8,
     // —— iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path
     // 启动时必需）。全部 default，旧版前端不传时等价于不启用 ——
     /// 认证用户名；为空表示不启用认证

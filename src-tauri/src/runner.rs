@@ -213,6 +213,10 @@ fn validate(request: &TestRequest) -> Result<(), String> {
     if request.window_kb > 16384 {
         return Err("套接字缓冲区不能超过 16MB".into());
     }
+    // IP 协议族只接受 0（自动）/ 4 / 6，其余取值直接拒绝
+    if !matches!(request.ip_version, 0 | 4 | 6) {
+        return Err("IP 协议族只能是 0（自动）、4 或 6".into());
+    }
     Ok(())
 }
 
@@ -240,6 +244,10 @@ struct ClientParams {
     omit_secs: u32,
     /// 套接字缓冲区（KB，0 = 自动）
     window_kb: u32,
+    /// 数据流源端口（0 = 自动；第 i 条流绑定 cport+i，对应 iperf3 --cport）
+    cport: u16,
+    /// IP 协议族（0 = 自动，4 / 6 = 强制）
+    ip_version: u8,
 }
 
 fn client_params_for(request: &TestRequest) -> ClientParams {
@@ -272,6 +280,8 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
         bind_address: (!request.local_ip.trim().is_empty()).then(|| request.local_ip.clone()),
         omit_secs: request.omit_secs,
         window_kb: request.window_kb,
+        cport: request.cport,
+        ip_version: request.ip_version,
     };
     match request.task_id.as_str() {
         "tcp-parallel" => params.num_streams = request.parallel.max(1) as u32,
@@ -520,6 +530,14 @@ fn engine_client_builder(
     // 用 u64 换算防溢出：UI 上限 16384 KB，但请求来自 IPC 边界，不可信
     if params.window_kb > 0 {
         builder = builder.window((params.window_kb as u64 * 1024).min(i32::MAX as u64) as i32);
+    }
+    // 数据流源端口（--cport）：0 = 不设置，走临时端口
+    if params.cport > 0 {
+        builder = builder.cport(params.cport);
+    }
+    // IP 协议族：0 = 自动，仅显式 4 / 6 时下发给引擎（validate 已保证取值合法）
+    if params.ip_version == 4 || params.ip_version == 6 {
+        builder = builder.ip_version(params.ip_version);
     }
     // iperf3 认证：服务端以 --rsa-private-key-path + --authorized-users-path 启动时，
     // 客户端须用服务端公钥加密「用户名+密码」。未启用时前端已把三项清空，这里自然跳过。
@@ -1614,6 +1632,8 @@ mod tests {
             interval: 1,
             omit_secs: 0,
             window_kb: 0,
+            cport: 0,
+            ip_version: 0,
             auth_username: String::new(),
             auth_password: String::new(),
             auth_public_key_path: String::new(),
@@ -1790,5 +1810,32 @@ mod tests {
         assert!(validate(&req).is_ok());
         req.window_kb = 16385;
         assert!(validate(&req).is_err());
+    }
+
+    #[test]
+    fn cport_and_ip_version_map_through_params() {
+        let mut req = request("tcp-single", "client", "tcp");
+        req.cport = 40000;
+        req.ip_version = 6;
+        let params = client_params_for(&req);
+        assert_eq!(params.cport, 40000);
+        assert_eq!(params.ip_version, 6);
+        // 默认 0 = 自动
+        let params = client_params_for(&request("tcp-single", "client", "tcp"));
+        assert_eq!(params.cport, 0);
+        assert_eq!(params.ip_version, 0);
+    }
+
+    #[test]
+    fn ip_version_rejects_invalid_values() {
+        let mut req = request("tcp-single", "client", "tcp");
+        for valid in [0, 4, 6] {
+            req.ip_version = valid;
+            assert!(validate(&req).is_ok(), "ip_version={valid} 应通过");
+        }
+        for invalid in [1, 3, 5, 7, 255] {
+            req.ip_version = invalid;
+            assert!(validate(&req).is_err(), "ip_version={invalid} 应被拒绝");
+        }
     }
 }
