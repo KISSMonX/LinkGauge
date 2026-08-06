@@ -272,7 +272,7 @@ dd { margin: 0; text-align: right; color: var(--text-strong); white-space: nowra
 .status-panel { min-width: 0; display: grid; grid-template-rows: 35px auto minmax(170px,1fr) auto auto; overflow-y: auto; }
 .queue-section,.logs-section { border-bottom: 1px solid var(--border); padding: 7px 12px; min-height: 0; }
 .task-row { height: 30px; display: grid; grid-template-columns: 24px 1fr auto; align-items: center; padding: 0 6px; border-bottom: 1px solid var(--border-light); }
-.task-row.running { color: var(--task-running, #086ee5); background: var(--blue-soft); }.task-row.success { color: var(--green-bright); }.task-row.failed { color: var(--red-strong); }.task-row b { font-size: 12px; }
+.task-row.running { color: var(--task-running, #086ee5); background: var(--blue-soft); }.task-row.success { color: var(--green-bright); }.task-row.failed { color: var(--red-strong); }.task-row b { font-size: 12px; min-width: 52px; text-align: right; }
 .task-row.clickable { cursor: pointer; }.task-row.clickable:hover { background: var(--blue-soft); }
 .task-row.selected { outline: 1px solid var(--blue); outline-offset: -1px; background: var(--blue-soft); }
 .server-badge { display: flex; align-items: center; gap: 6px; margin: 6px 0 4px; padding: 5px 9px; border-radius: 4px; font-size: 12px; color: var(--green); background: var(--green-bg); }

@@ -685,3 +685,49 @@ async fn server_interval_controls_sampling_cadence() {
         ends.len()
     );
 }
+
+/// 按块测试（-k）快任务端到端：100 块 × 128KB 预算在回环上毫秒级完成，
+/// 时长被块数覆盖；验证引擎 blocks 路径（与 bytes 路径并列，曾未覆盖）
+#[tokio::test(flavor = "multi_thread")]
+async fn block_limited_transfer_completes_fast() {
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Tcp)
+        .duration(60)
+        .interval(1.0)
+        .blksize(131_072)
+        .blocks(100) // 100 块 × 128KB = 12.8MB
+        .json_output(true)
+        .emit_output(false)
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let outcome = client.run().await.unwrap();
+    assert_eq!(outcome.termination, Termination::Completed);
+    assert!(
+        started.elapsed().as_secs() < 10,
+        "按块传输应远快于 10 秒（时长 60 应被 -k 覆盖）"
+    );
+    let sum = outcome.report.end.sum_sent.as_ref().expect("应有发送汇总");
+    assert!(
+        sum.bytes >= 13_107_200,
+        "按块模式应至少传输 100×128KB，实际 {}",
+        sum.bytes
+    );
+
+    let server_outcome = server_task.await.unwrap().unwrap();
+    assert_eq!(server_outcome.termination, Termination::Completed);
+}
