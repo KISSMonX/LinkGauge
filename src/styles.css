@@ -223,9 +223,10 @@ h2,h3,p { margin-top: 0; }
 .parameters > label { min-height: 32px; display: grid; grid-template-columns: 105px 1fr auto; align-items: center; gap: 8px; }
 .parameters input:not([type=checkbox]), .parameters select { width: 100%; height: 28px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); }
 .parameters input:focus, .parameters select:focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
-/* 参数项注释图标：悬停高亮，提示经 fixed 浮动层展示（点击可固定） */
-.info-icon { flex-shrink: 0; color: var(--text-faint); cursor: help; }
-.info-icon:hover { color: var(--blue); }
+/* 参数项注释图标：主题色实心圆底 + 面板色「i」（亮暗主题自动对比），悬停提亮 */
+.info-icon { flex-shrink: 0; color: var(--blue); cursor: help; }
+.info-icon .i-mark { fill: none; stroke: var(--panel-bg); stroke-width: 2.2; }
+.info-icon:hover { filter: brightness(1.2); }
 .parameters .log-option { display: flex; gap: 8px; grid-template-columns: none; margin-top: 2px; font-size: 13px; }
 .runtime-state { margin: 4px 0 0; padding: 7px 9px; border-radius: 4px; font-size: 12px; }.runtime-state.available { color: var(--green); background: var(--green-bg); }.runtime-state.missing { color: var(--red-alert); background: var(--red-bg); }
 /* 认证区（用户名 / 密码 / RSA 公钥）与参数区同款网格布局，避免行内错乱 */
