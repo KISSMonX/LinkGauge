@@ -1,5 +1,5 @@
 use crate::models::{MetricPoint, TestEvent, TestRequest};
-use chrono::Local;
+use chrono::{Local, TimeZone};
 use regex::Regex;
 use riperf3::{ClientBuilder, ServerBuilder, Termination, TransportProtocol};
 use std::{
@@ -404,7 +404,7 @@ async fn run_engine_client<R: tauri::Runtime>(
     rx: watch::Receiver<Option<String>>,
     locale_handle: Arc<RwLock<String>>,
 ) {
-    let task_name = task_label(&request.task_id);
+    let task_name = task_label(&request.locale, &request.task_id);
     let local_ip = if request.local_ip.trim().is_empty() {
         local_ip_address::local_ip()
             .map(|ip| ip.to_string())
@@ -417,6 +417,14 @@ async fn run_engine_client<R: tauri::Runtime>(
     };
     // 界面语言运行时可变：日志输出点实时读取，切换语言后立即生效
     let locale = current_locale(&locale_handle);
+    // 客户端运行汇总：同一 runId 的一轮队列共用「客户端汇总」文件，每项记录
+    // 测试项目与最终结果（结果在 finish_engine 写入）
+    append_run_summary(
+        &app,
+        &request,
+        &locale,
+        &tr_format!(locale, "测试项目：{}", "Test item: {}", task_name),
+    );
     let header = tr_format!(
         &locale,
         "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: {}, 端口 {}, 时长 {}s, 并发 {}, 带宽 {}, 报文长度 {}, 输出周期 {}s\n",
@@ -717,7 +725,7 @@ async fn run_engine_server<R: tauri::Runtime>(
     rx: watch::Receiver<Option<String>>,
     locale_handle: Arc<RwLock<String>>,
 ) {
-    let task_name = task_label(&request.task_id);
+    let task_name = task_label(&request.locale, &request.task_id);
     let local_ip = if request.local_ip.trim().is_empty() {
         local_ip_address::local_ip()
             .map(|ip| ip.to_string())
@@ -1210,7 +1218,7 @@ async fn run_ping<R: tauri::Runtime>(
     child_pids: Arc<AsyncMutex<HashSet<u32>>>,
     locale_handle: Arc<RwLock<String>>,
 ) {
-    let task_name = task_label(&request.task_id);
+    let task_name = task_label(&request.locale, &request.task_id);
     // 界面语言运行时可变：ping 日志实时读取当前语言
     let locale = current_locale(&locale_handle);
     let local_ip = if request.local_ip.trim().is_empty() {
@@ -1223,6 +1231,13 @@ async fn run_ping<R: tauri::Runtime>(
     let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
         return;
     };
+    // 客户端运行汇总：与引擎项一样，记录测试项目与最终结果
+    append_run_summary(
+        &app,
+        &request,
+        &locale,
+        &tr_format!(locale, "测试项目：{}", "Test item: {}", task_name),
+    );
     let args = if cfg!(windows) {
         vec!["-n".into(), "4".into(), request.server_ip.clone()]
     } else {
@@ -1324,6 +1339,18 @@ async fn run_ping<R: tauri::Runtime>(
                 tr(&locale, "未完成", "incomplete")
             }
         ),
+    );
+    append_run_summary(
+        &app,
+        &request,
+        &locale,
+        if final_stopped {
+            tr(&locale, "测试结果: 手动停止", "Result: manual stop")
+        } else if final_success {
+            tr(&locale, "测试结果: 完成", "Result: completed")
+        } else {
+            tr(&locale, "测试结果: 未完成", "Result: incomplete")
+        },
     );
     if final_stopped {
         finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
@@ -1470,6 +1497,48 @@ fn append_log(log: &SessionLog, line: &str) {
     }
 }
 
+/// 追加一行到客户端运行汇总文件：同一 runId 的一轮队列测试共用一个文件（类似
+/// 服务端一次会话一个 Server-*.log）。前端每轮开始生成 startedAt 作为 runId；
+/// run_id 为 0（旧前端/预览）或路径不可用时静默跳过——汇总文件是补充信息，
+/// 不因写入失败影响测试本身
+fn append_run_summary<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    request: &TestRequest,
+    locale: &str,
+    line: &str,
+) {
+    if request.run_id == 0 {
+        return;
+    }
+    let Some(stamp) = Local
+        .timestamp_millis_opt(request.run_id)
+        .single()
+        .map(|t| t.format("%Y%m%d%H%M%S").to_string())
+    else {
+        return;
+    };
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("linkgauge"))
+        .join("tests");
+    let name = format!(
+        "{}-{}-{}-{}.log",
+        tr(locale, "客户端汇总", "Client-Summary"),
+        safe_name(&request.local_ip),
+        safe_name(&request.server_ip),
+        stamp
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join(name))
+    {
+        let _ = file.write_all(line.as_bytes());
+        let _ = file.write_all(b"\n");
+    }
+}
+
 /// 客户端连不上服务端（未启动 / 端口错误 / 主机名解析失败 / 连接超时）——环境性
 /// 问题，队列里剩余引擎项必然同样失败。前端收到 fatal 事件后中止整个队列。
 /// 注意不能按 Io 错误一锅端：如 MPTCP 在不支持的平台上也是 Io(Unsupported)，
@@ -1530,6 +1599,12 @@ async fn finish_engine<R: tauri::Runtime>(
                 };
                 (message, false)
             };
+            append_run_summary(
+                app,
+                request,
+                locale,
+                tr(locale, "测试结果: 未完成", "Result: incomplete"),
+            );
             fail_engine(app, session_id, task_id, log, locale, &message, fatal).await;
         }
         Ok(outcome) => {
@@ -1546,6 +1621,7 @@ async fn finish_engine<R: tauri::Runtime>(
                 ),
             );
             append_engine_summary(log, report, locale);
+            append_run_summary(app, request, locale, &engine_summary_lines(report, locale));
             // --get-server-output：服务端视角的汇总文本（标准 iperf3 服务端为
             // 文本模式时才会产生；本机 LinkGauge 服务端是 JSON 模式，通常为空）。
             // 写入测试日志并广播一条日志事件，随日志一并进入报告
@@ -1575,13 +1651,31 @@ async fn finish_engine<R: tauri::Runtime>(
             match outcome.termination {
                 Termination::Completed => {
                     append_log(log, tr(locale, "测试结果: 完成", "Result: completed"));
+                    append_run_summary(
+                        app,
+                        request,
+                        locale,
+                        tr(locale, "测试结果: 完成", "Result: completed"),
+                    );
                     finish_ok(app, session_id, task_id, log, "success").await;
                 }
                 Termination::Interrupted => {
                     append_log(log, tr(locale, "测试结果: 手动停止", "Result: manual stop"));
+                    append_run_summary(
+                        app,
+                        request,
+                        locale,
+                        tr(locale, "测试结果: 手动停止", "Result: manual stop"),
+                    );
                     finish_ok(app, session_id, task_id, log, "stopped").await;
                 }
                 Termination::ServerTerminated => {
+                    append_run_summary(
+                        app,
+                        request,
+                        locale,
+                        tr(locale, "测试结果: 未完成", "Result: incomplete"),
+                    );
                     let message = tr(
                         locale,
                         "服务端主动终止了测试",
@@ -1591,6 +1685,12 @@ async fn finish_engine<R: tauri::Runtime>(
                     fail_engine(app, session_id, task_id, log, locale, &message, false).await;
                 }
                 Termination::ServerError(msg) => {
+                    append_run_summary(
+                        app,
+                        request,
+                        locale,
+                        tr(locale, "测试结果: 未完成", "Result: incomplete"),
+                    );
                     let message = tr_format!(
                         locale,
                         "服务端返回错误：{}",
@@ -1600,6 +1700,12 @@ async fn finish_engine<R: tauri::Runtime>(
                     fail_engine(app, session_id, task_id, log, locale, &message, false).await;
                 }
                 other => {
+                    append_run_summary(
+                        app,
+                        request,
+                        locale,
+                        tr(locale, "测试结果: 未完成", "Result: incomplete"),
+                    );
                     let message = tr_format!(
                         locale,
                         "测试异常结束：{:?}",
@@ -1614,7 +1720,10 @@ async fn finish_engine<R: tauri::Runtime>(
 }
 
 /// 追加最终汇总（发送/接收方向的传输量与平均带宽，UDP 附抖动丢包）
-fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &str) {
+/// 最终汇总文本（发送/接收方向的传输量与平均带宽，UDP 附抖动丢包）：逐行
+/// [INFO] 前缀，测试项日志与客户端运行汇总文件共用
+fn engine_summary_lines(report: &riperf3::Report, locale: &str) -> String {
+    let mut out = String::new();
     if let Some(sent) = &report.end.sum_sent {
         let mut line = tr_format!(
             locale,
@@ -1631,7 +1740,10 @@ fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &st
                 retransmits
             ));
         }
-        append_log(log, &format!("[INFO] {line}"));
+        out.push_str(&format!(
+            "[INFO] {line}
+"
+        ));
     }
     if let Some(received) = &report.end.sum_received {
         let mut line = tr_format!(
@@ -1652,7 +1764,18 @@ fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &st
                 received.lost_percent.unwrap_or(0.0)
             ));
         }
-        append_log(log, &format!("[INFO] {line}"));
+        out.push_str(&format!(
+            "[INFO] {line}
+"
+        ));
+    }
+    out
+}
+
+fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &str) {
+    let lines = engine_summary_lines(report, locale);
+    if !lines.is_empty() {
+        append_log(log, lines.trim_end());
     }
 }
 
@@ -1782,18 +1905,45 @@ fn safe_name(value: &str) -> String {
         .collect()
 }
 
-fn task_label(id: &str) -> &str {
-    match id {
-        "ping" => "Ping连通性测试",
-        "tcp-single" => "TCP单向带宽",
-        "tcp-bidir" => "TCP双向带宽",
-        "tcp-parallel" => "TCP多并发流",
-        "udp-bandwidth" => "UDP带宽",
-        "udp-loss" => "UDP抖动丢包",
-        "tcp-reverse" => "TCP反向测试",
-        "stress" => "持续压力测试",
-        "server" => "riperf3服务端",
-        _ => "网络测试",
+/// 任务显示名：随界面语言输出，日志文件名（经 safe_name 净化）与日志头部共用——
+/// 英文模式下产出英文文件名（如 Client-…-TCP One-way Bandwidth-…）
+fn task_label(locale: &str, id: &str) -> &'static str {
+    if locale == "en" {
+        match id {
+            "ping" => "Ping Connectivity",
+            "tcp-single" => "TCP One-way Bandwidth",
+            "tcp-bidir" => "TCP Bidirectional Bandwidth",
+            "tcp-parallel" => "TCP Parallel Streams",
+            "udp-bandwidth" => "UDP Bandwidth",
+            "udp-loss" => "UDP Jitter Loss",
+            "tcp-reverse" => "TCP Reverse Test",
+            "stress" => "Sustained Stress Test",
+            "tcp-bytes" => "TCP Byte-Limited Test",
+            "udp-bytes" => "UDP Byte-Limited Test",
+            "tcp-blocks" => "TCP Block-Limited Test",
+            "tcp-mptcp" => "TCP MPTCP Test",
+            "udp-df" => "UDP No-Fragment Test",
+            "server" => "riperf3 server",
+            _ => "Network test",
+        }
+    } else {
+        match id {
+            "ping" => "Ping连通性测试",
+            "tcp-single" => "TCP单向带宽",
+            "tcp-bidir" => "TCP双向带宽",
+            "tcp-parallel" => "TCP多并发流",
+            "udp-bandwidth" => "UDP带宽",
+            "udp-loss" => "UDP抖动丢包",
+            "tcp-reverse" => "TCP反向测试",
+            "stress" => "持续压力测试",
+            "tcp-bytes" => "TCP按量传输测试",
+            "udp-bytes" => "UDP按量传输测试",
+            "tcp-blocks" => "TCP按块传输测试",
+            "tcp-mptcp" => "TCP多路径测试",
+            "udp-df" => "UDP无分片测试",
+            "server" => "riperf3服务端",
+            _ => "网络测试",
+        }
     }
 }
 
@@ -1921,6 +2071,7 @@ mod tests {
         TestRequest {
             task_id: task_id.into(),
             mode: mode.into(),
+            run_id: 0,
             protocol: protocol.into(),
             server_ip: "192.168.1.100".into(),
             local_ip: "192.168.1.50".into(),
@@ -2347,10 +2498,11 @@ mod queue_tests {
     use tauri::Listener;
 
     /// 基础请求（tests 模块的 request 为兄弟模块私有，此处内联构造）
-    fn base_request(task_id: &str, port: u16) -> TestRequest {
+    fn base_request(task_id: &str, port: u16, run_id: i64) -> TestRequest {
         TestRequest {
             task_id: task_id.into(),
             mode: "client".into(),
+            run_id, // 每次运行唯一：汇总文件按 runId 区分，避免跨运行累积
             protocol: String::new(),
             server_ip: "127.0.0.1".into(),
             local_ip: "127.0.0.1".into(),
@@ -2435,6 +2587,8 @@ mod queue_tests {
         // 复现用户队列：ping 后连续 TCP/UDP 项（含 bidir 后的下一个连接——
         // 服务端 run_once 处理反向连接返回后需回到监听，若服务端卡在旧会话，
         // 后续项的 complete 会缺失）
+        // 每次运行唯一 runId：汇总文件按 runId 命名，避免与历史运行的文件混淆
+        let run_id = Local::now().timestamp_millis();
         for task_id in [
             "tcp-single",
             "tcp-bidir",
@@ -2446,7 +2600,7 @@ mod queue_tests {
             "tcp-blocks",
         ] {
             let state = app.state::<AppState>();
-            let session = start_test(handle.clone(), state, base_request(task_id, port))
+            let session = start_test(handle.clone(), state, base_request(task_id, port, run_id))
                 .await
                 .expect("start_test 应成功");
             // 等待该任务的 complete（30 秒超时）
@@ -2467,6 +2621,34 @@ mod queue_tests {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
+
+        // 客户端运行汇总文件：同一 runId 的 8 个测试项写入同一个文件，逐项有结果
+        let summary_dir = app.path().app_log_dir().unwrap().join("tests");
+        let run_stamp = Local
+            .timestamp_millis_opt(run_id)
+            .single()
+            .unwrap()
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        let summary_file = std::fs::read_dir(&summary_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                name.starts_with("客户端汇总-") && name.contains(&format!("-{run_stamp}.log"))
+            })
+            .expect("应生成客户端汇总文件");
+        let content = std::fs::read_to_string(&summary_file).unwrap();
+        assert!(
+            content.contains("测试项目：TCP单向带宽"),
+            "汇总文件应包含测试项目行"
+        );
+        assert_eq!(
+            content.matches("测试结果: 完成").count(),
+            8,
+            "8 个测试项都应写入完成结果"
+        );
 
         server_tx.send(Some("stop".into())).unwrap();
         let _ = server_task.await;

@@ -735,7 +735,7 @@ async function runNext() {
   // 静默路径。invoke 正常返回后由其后的 complete/error 事件解除。
   armWatchdog(taskId)
   try {
-    const sid = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, locale: locale.value, ...config.value, ...authPayload() } })
+    const sid = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, locale: locale.value, runId: startedAt.value, ...config.value, ...authPayload() } })
     // invoke 挂起期间看门狗可能已判失败并推进队列，迟到的会话 id 不能覆盖新任务
     if (queue.value[queueIndex.value] === taskId) clientSession.value = sid
   } catch (error) {

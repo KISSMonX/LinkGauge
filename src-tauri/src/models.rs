@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 pub struct TestRequest {
     pub task_id: String,
     pub mode: String,
+    /// 一轮队列测试的运行标识（前端 start() 的 startedAt 毫秒时间戳，0 = 无）：
+    /// 同一 runId 的客户端测试项写入同一个「客户端汇总」日志文件（类似服务端
+    /// 一次会话一个 Server-*.log）
+    #[serde(default)]
+    pub run_id: i64,
     /// 协议由 task_id 推断（udp-* 为 UDP），此字段仅兼容旧版前端，不再参与逻辑
     #[serde(default)]
     pub protocol: String,
