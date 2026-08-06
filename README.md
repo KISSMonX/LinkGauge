@@ -36,6 +36,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Separate TCP and UDP configuration views
 - Ping connectivity checks
 - TCP single-direction, bidirectional, parallel-stream, reverse, and stress tests
+- Byte/block-limited (`-n` / `-k`), MPTCP multipath, and UDP no-fragment (DF) test items, alongside the global options
 - UDP bandwidth, jitter, and packet-loss tests
 - Sequential test queue with waiting, running, successful, failed, and stopped states
 - Live bandwidth chart and aggregate statistics
@@ -407,6 +408,9 @@ The client can test directly against a stock iperf3 server (`iperf3 -s`) — the
 | --- | --- | --- |
 | Ping connectivity | system `ping`, not iperf3 | none |
 | TCP single / parallel streams / stress | `-c` / `-P N` / `-t N` | any 3.x |
+| TCP byte/block-limited | `-n` / `-k` | any 3.x |
+| TCP MPTCP multipath | `-m` | 3.12+ |
+| UDP no-fragment | `--dont-fragment` | any 3.x |
 | TCP reverse | `-R` | 3.1+ |
 | **TCP bidirectional** | `--bidir` | **3.7+** |
 | UDP bandwidth / jitter & loss | `-u` | any 3.x |
