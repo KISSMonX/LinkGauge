@@ -1,4 +1,4 @@
-use crate::models::{MetricPoint, TestEvent, TestRequest};
+use crate::models::{ClientLogAppend, MetricPoint, TestEvent, TestRequest};
 use chrono::{Local, TimeZone};
 use regex::Regex;
 use riperf3::{ClientBuilder, ServerBuilder, Termination, TransportProtocol};
@@ -1497,6 +1497,75 @@ fn append_log(log: &SessionLog, line: &str) {
     if let Ok(mut file) = log.file.lock() {
         let _ = file.write_all(line.as_bytes());
         let _ = file.write_all(b"\n");
+    }
+}
+
+/// 客户端运行日志的路径推导（与 setup_log 的客户端分支一致）：按 runId 时间戳
+/// 定位，前缀随界面语言（客户端 / Client）。运行中切换界面语言时前缀可能与
+/// 创建时不同，按时间戳在日志目录中找回既有文件，避免超时补写落到新文件
+fn client_run_log_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    run_id: i64,
+    local_ip: &str,
+    server_ip: &str,
+    locale: &str,
+) -> Option<std::path::PathBuf> {
+    if run_id == 0 {
+        return None;
+    }
+    let run_stamp = Local
+        .timestamp_millis_opt(run_id)
+        .single()?
+        .format("%Y%m%d%H%M%S")
+        .to_string();
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("linkgauge"))
+        .join("tests");
+    let name = format!(
+        "{}-{}-{}-{}.log",
+        tr(locale, "客户端", "Client"),
+        safe_name(local_ip),
+        safe_name(server_ip),
+        run_stamp
+    );
+    let path = log_dir.join(&name);
+    if path.exists() {
+        return Some(path);
+    }
+    let suffix = format!("-{run_stamp}.log");
+    std::fs::read_dir(&log_dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.ends_with(&suffix) && (n.starts_with("客户端-") || n.starts_with("Client-"))
+            })
+        })
+        .or(Some(path))
+}
+
+/// 前端生成的队列级日志补写客户端运行日志文件：看门狗超时 / 首事件探针失败 /
+/// 驱动接管等前端日志不在后端事件流里，经此落入运行日志；写入失败静默跳过
+#[tauri::command]
+pub async fn append_client_log<R: tauri::Runtime>(app: AppHandle<R>, request: ClientLogAppend) {
+    let Some(path) = client_run_log_path(
+        &app,
+        request.run_id,
+        &request.local_ip,
+        &request.server_ip,
+        &request.locale,
+    ) else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(format!("[{}] {}\n", request.level, request.message).as_bytes());
     }
 }
 
