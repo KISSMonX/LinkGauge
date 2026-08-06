@@ -154,6 +154,8 @@ export interface BackendEvent {
   message?: string
   metric?: MetricPoint
   logPath?: string
+  /** 环境性失败（服务端不可达等）：队列中剩余引擎项必然同样失败，前端据此中止整个队列 */
+  fatal?: boolean
 }
 
 export interface TestSummary {

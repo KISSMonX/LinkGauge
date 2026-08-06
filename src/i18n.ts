@@ -91,6 +91,7 @@ const zh = {
   'err.alert': '错误告警',
   'err.execFailed': '测试执行失败',
   'err.logFile': '日志文件：{path}',
+  'err.queueAborted': '队列已中止（环境问题，剩余项目未执行）。请修复后重新开始测试',
 
   // 停止确认
   'confirm.stopTitle': '停止测试',
@@ -497,6 +498,7 @@ const en: Record<MessageKey, string> = {
   'err.alert': 'Error alert',
   'err.execFailed': 'Test execution failed',
   'err.logFile': 'Log file: {path}',
+  'err.queueAborted': 'Queue aborted (environment issue; remaining items were not run). Fix the issue and restart the test',
 
   // 停止确认
   'confirm.stopTitle': 'Stop Test',

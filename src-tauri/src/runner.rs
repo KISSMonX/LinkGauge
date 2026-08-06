@@ -481,6 +481,7 @@ async fn run_engine_client<R: tauri::Runtime>(
                         "Invalid test configuration: {}",
                         error
                     ),
+                    false,
                 )
                 .await;
                 return;
@@ -600,6 +601,7 @@ fn engine_client_builder<R: tauri::Runtime>(
                         message: Some(payload),
                         metric: None,
                         log_path: None,
+                        fatal: None,
                     },
                 );
             }
@@ -906,6 +908,7 @@ async fn run_engine_server<R: tauri::Runtime>(
                     message: Some(payload),
                     metric: None,
                     log_path: None,
+                    fatal: None,
                 },
             );
         }
@@ -932,6 +935,7 @@ async fn run_engine_server<R: tauri::Runtime>(
                     "Invalid server configuration: {}",
                     error
                 ),
+                false,
             )
             .await;
             return;
@@ -953,6 +957,7 @@ async fn run_engine_server<R: tauri::Runtime>(
                     request.port,
                     error
                 ),
+                false,
             )
             .await;
             return;
@@ -1066,6 +1071,7 @@ async fn run_engine_server<R: tauri::Runtime>(
                         message: Some(payload),
                         metric: None,
                         log_path: None,
+                        fatal: None,
                     },
                 );
             }
@@ -1252,7 +1258,16 @@ async fn run_ping<R: tauri::Runtime>(
                 error
             );
             append_log(&log, &format!("[ERROR] {message}"));
-            fail_engine(&app, &session_id, &request.task_id, &log, &locale, &message).await;
+            fail_engine(
+                &app,
+                &session_id,
+                &request.task_id,
+                &log,
+                &locale,
+                &message,
+                false,
+            )
+            .await;
             return;
         }
     };
@@ -1324,7 +1339,16 @@ async fn run_ping<R: tauri::Runtime>(
             "Ping process exited unexpectedly",
         )
         .to_string();
-        fail_engine(&app, &session_id, &request.task_id, &log, &locale, &message).await;
+        fail_engine(
+            &app,
+            &session_id,
+            &request.task_id,
+            &log,
+            &locale,
+            &message,
+            false,
+        )
+        .await;
     }
 }
 
@@ -1391,6 +1415,7 @@ async fn setup_log<R: tauri::Runtime>(
                 error
             ),
             None,
+            false,
         );
         return None;
     }
@@ -1415,6 +1440,7 @@ async fn setup_log<R: tauri::Runtime>(
                     error
                 ),
                 None,
+                false,
             );
             return None;
         }
@@ -1445,6 +1471,23 @@ fn append_log(log: &SessionLog, line: &str) {
     }
 }
 
+/// 客户端连不上服务端（未启动 / 端口错误 / 主机名解析失败 / 连接超时）——环境性
+/// 问题，队列里剩余引擎项必然同样失败。前端收到 fatal 事件后中止整个队列。
+/// 注意不能按 Io 错误一锅端：如 MPTCP 在不支持的平台上也是 Io(Unsupported)，
+/// 那种逐项失败（如 tcp-mptcp）应继续队列而不是中止。
+fn is_server_unreachable(error: &riperf3::RiperfError) -> bool {
+    match error {
+        riperf3::RiperfError::Io(e) => matches!(
+            e.kind(),
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::TimedOut
+        ),
+        riperf3::RiperfError::ConnectionTimeout => true,
+        _ => false,
+    }
+}
+
 /// 客户端结束时按 RunOutcome 归类结果：成功 / 手动停止 / 失败
 async fn finish_engine<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -1457,23 +1500,38 @@ async fn finish_engine<R: tauri::Runtime>(
 ) {
     match outcome {
         Err(error) => {
-            // 两类可操作的失败给出具体排查方向，其余沿用引擎原文
-            let message = match &error {
-                riperf3::RiperfError::ServerBusy => tr_format!(
-                    locale,
-                    "服务端忙：iperf3 一次只服务一个测试，重试 {} 次后仍被拒绝。请确认没有其他客户端正在占用该服务端。",
-                    "Server busy: iperf3 serves one test at a time and still refused after {} retries. Check that no other client is using that server.",
-                    BUSY_RETRY_MAX
-                ),
-                riperf3::RiperfError::AccessDenied => tr(
-                    locale,
-                    "认证被服务端拒绝：请核对用户名、密码，以及 RSA 公钥是否与服务端 --authorized-users-path 中的条目匹配；若对端 iperf3 低于 3.17，需勾选「PKCS#1 填充」。",
-                    "Authentication rejected: verify the username, password, and that the RSA public key matches an entry in the server's --authorized-users-path. Tick \"PKCS#1 padding\" if the peer iperf3 is older than 3.17.",
+            // 服务端不可达（未启动 / 端口错 / DNS 失败 / 超时）单独归类：给出可操作
+            // 的排查文案并标记 fatal，前端收到后中止整个队列
+            let (message, fatal) = if is_server_unreachable(&error) {
+                (
+                    tr_format!(
+                        locale,
+                        "无法连接服务端：{}。请确认服务端已启动、IP 与端口正确。",
+                        "Cannot reach the server: {}. Verify the server is running and the IP/port are correct.",
+                        error
+                    ),
+                    true,
                 )
-                .to_string(),
-                _ => tr_format!(locale, "测试失败：{}", "Test failed: {}", error),
+            } else {
+                // 两类可操作的失败给出具体排查方向，其余沿用引擎原文
+                let message = match &error {
+                    riperf3::RiperfError::ServerBusy => tr_format!(
+                        locale,
+                        "服务端忙：iperf3 一次只服务一个测试，重试 {} 次后仍被拒绝。请确认没有其他客户端正在占用该服务端。",
+                        "Server busy: iperf3 serves one test at a time and still refused after {} retries. Check that no other client is using that server.",
+                        BUSY_RETRY_MAX
+                    ),
+                    riperf3::RiperfError::AccessDenied => tr(
+                        locale,
+                        "认证被服务端拒绝：请核对用户名、密码，以及 RSA 公钥是否与服务端 --authorized-users-path 中的条目匹配；若对端 iperf3 低于 3.17，需勾选「PKCS#1 填充」。",
+                        "Authentication rejected: verify the username, password, and that the RSA public key matches an entry in the server's --authorized-users-path. Tick \"PKCS#1 padding\" if the peer iperf3 is older than 3.17.",
+                    )
+                    .to_string(),
+                    _ => tr_format!(locale, "测试失败：{}", "Test failed: {}", error),
+                };
+                (message, false)
             };
-            fail_engine(app, session_id, task_id, log, locale, &message).await;
+            fail_engine(app, session_id, task_id, log, locale, &message, fatal).await;
         }
         Ok(outcome) => {
             let report = &outcome.report;
@@ -1540,7 +1598,7 @@ async fn finish_engine<R: tauri::Runtime>(
                         "The server terminated the test",
                     )
                     .to_string();
-                    fail_engine(app, session_id, task_id, log, locale, &message).await;
+                    fail_engine(app, session_id, task_id, log, locale, &message, false).await;
                 }
                 Termination::ServerError(msg) => {
                     let message = tr_format!(
@@ -1549,7 +1607,7 @@ async fn finish_engine<R: tauri::Runtime>(
                         "Server returned an error: {}",
                         msg
                     );
-                    fail_engine(app, session_id, task_id, log, locale, &message).await;
+                    fail_engine(app, session_id, task_id, log, locale, &message, false).await;
                 }
                 other => {
                     let message = tr_format!(
@@ -1558,7 +1616,7 @@ async fn finish_engine<R: tauri::Runtime>(
                         "Test ended abnormally: {:?}",
                         other
                     );
-                    fail_engine(app, session_id, task_id, log, locale, &message).await;
+                    fail_engine(app, session_id, task_id, log, locale, &message, false).await;
                 }
             }
         }
@@ -1702,6 +1760,7 @@ async fn fail_engine<R: tauri::Runtime>(
     log: &SessionLog,
     locale: &str,
     message: &str,
+    fatal: bool,
 ) {
     append_log(log, &format!("[ERROR] {message}"));
     let log_path = finish_log(log, false).await;
@@ -1709,7 +1768,7 @@ async fn fail_engine<R: tauri::Runtime>(
         "{message}\n{}",
         tr_format!(locale, "详细日志：{}", "Detailed log: {}", log_path)
     );
-    emit_error(app, session_id, task_id, full, Some(log_path));
+    emit_error(app, session_id, task_id, full, Some(log_path), fatal);
 }
 
 /// 关闭日志文件并按完成状态重命名（完成/未完成/手动停止均保留日志）
@@ -1766,6 +1825,7 @@ fn emit_log<R: tauri::Runtime>(
             message: Some(message),
             metric: None,
             log_path: None,
+            fatal: None,
         },
     );
 }
@@ -1786,6 +1846,7 @@ fn emit_metric<R: tauri::Runtime>(
             message: None,
             metric: Some(metric),
             log_path: None,
+            fatal: None,
         },
     );
 }
@@ -1807,6 +1868,7 @@ fn emit_complete<R: tauri::Runtime>(
             message: None,
             metric: None,
             log_path: Some(path),
+            fatal: None,
         },
     );
 }
@@ -1816,6 +1878,7 @@ fn emit_error<R: tauri::Runtime>(
     task: &str,
     message: String,
     path: Option<String>,
+    fatal: bool,
 ) {
     let _ = app.emit(
         "test-event",
@@ -1828,13 +1891,14 @@ fn emit_error<R: tauri::Runtime>(
             message: Some(message),
             metric: None,
             log_path: path,
+            fatal: Some(fatal),
         },
     );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{client_params_for, validate};
+    use super::{client_params_for, is_server_unreachable, validate};
     use crate::models::TestRequest;
     use riperf3::TransportProtocol;
 
@@ -2240,6 +2304,24 @@ mod tests {
         let mut bad = request("tcp-single", "client", "tcp");
         bad.transfer_mode = "packets".into();
         assert!(validate(&bad).is_err());
+    }
+
+    /// 服务端不可达分类：连接被拒 / DNS 失败 / 超时 → fatal；平台不支持（如
+    /// Windows 上的 MPTCP，同样落在 Io）与认证拒绝等 → 非 fatal（队列继续）
+    #[test]
+    fn server_unreachable_classification() {
+        use std::io::ErrorKind;
+        let io = |kind| riperf3::RiperfError::Io(std::io::Error::from(kind));
+        assert!(is_server_unreachable(&io(ErrorKind::ConnectionRefused)));
+        assert!(is_server_unreachable(&io(ErrorKind::NotFound)));
+        assert!(is_server_unreachable(&io(ErrorKind::TimedOut)));
+        assert!(is_server_unreachable(
+            &riperf3::RiperfError::ConnectionTimeout
+        ));
+        // 非 fatal：MPTCP 在 Windows 上就是 Io(Unsupported)，逐项失败应继续队列
+        assert!(!is_server_unreachable(&io(ErrorKind::Unsupported)));
+        assert!(!is_server_unreachable(&riperf3::RiperfError::ServerBusy));
+        assert!(!is_server_unreachable(&riperf3::RiperfError::AccessDenied));
     }
 }
 
