@@ -1598,6 +1598,22 @@ async fn finish_engine<R: tauri::Runtime>(
                     ),
                     true,
                 )
+            } else if matches!(
+                &error,
+                riperf3::RiperfError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported
+            ) {
+                // 平台不支持（如 Windows/macOS 内核无 IPPROTO_MPTCP，socket 创建报
+                // WSAEOPNOTSUPP）：给出明确文案，而非引擎的「无法连接服务端」误导
+                // 信息；逐项失败继续队列（不中止）
+                (
+                    tr_format!(
+                        locale,
+                        "当前平台不支持该测试项（协议未配置或不可用）：{}",
+                        "This test item is not supported on the current platform (protocol not configured or unavailable): {}",
+                        error
+                    ),
+                    false,
+                )
             } else {
                 // 两类可操作的失败给出具体排查方向，其余沿用引擎原文
                 let message = match &error {

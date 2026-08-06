@@ -240,7 +240,7 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <p class="protocol-hint">{{ t('cfg.testsHint') }}</p>
       <div class="test-list">
         <label v-for="(item, index) in items" :key="item.id" @mouseenter="showTip($event, t(('cfg.itemDesc.' + item.id) as MessageKey))" @mousemove="moveTip" @mouseleave="hideTip">
-          <input type="checkbox" :checked="item.enabled" :disabled="clientRunning" @change="emit('toggle-item', item.id)" />
+          <input type="checkbox" :checked="item.enabled" :disabled="clientRunning || item.supported === false" @change="emit('toggle-item', item.id)" />
           <span>{{ index + 1 }}. {{ itemLabel(item.id) }}</span><span class="drag">≡</span>
         </label>
       </div>

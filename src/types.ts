@@ -9,6 +9,8 @@ export interface TestItem {
   protocol: Protocol | 'ping'
   enabled: boolean
   status: TaskStatus
+  /** 当前平台是否支持（false = 勾选框禁用、默认不勾；如 Windows/macOS 无 MPTCP） */
+  supported?: boolean
 }
 
 export interface TestConfig {

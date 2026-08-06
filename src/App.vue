@@ -28,6 +28,9 @@ const sshDefaults: SshConfig = { host: '', port: 22, username: '', authMethod: '
 const config = ref<TestConfig>({ ...defaults })
 const serverConfig = ref<ServerConfig>({ ...serverDefaults })
 const sshConfig = ref<SshConfig>({ ...sshDefaults })
+// Windows/macOS 内核无 IPPROTO_MPTCP：MPTCP 测试项不可用（勾选框禁用、默认不勾），
+// 避免运行后报出「无法连接服务端」的误导性错误；预览模式（浏览器）保持可选
+const mptcpSupported = !('__TAURI_INTERNALS__' in window) || /Linux/i.test(navigator.userAgent)
 const items = ref<TestItem[]>([
   { id: 'ping', label: 'Ping 连通性测试', protocol: 'ping', enabled: true, status: 'waiting' },
   { id: 'tcp-single', label: 'TCP 单向带宽', protocol: 'tcp', enabled: true, status: 'waiting' },
@@ -41,7 +44,7 @@ const items = ref<TestItem[]>([
   { id: 'tcp-bytes', label: 'TCP 按量传输测试', protocol: 'tcp', enabled: true, status: 'waiting' },
   { id: 'udp-bytes', label: 'UDP 按量传输测试', protocol: 'udp', enabled: true, status: 'waiting' },
   { id: 'tcp-blocks', label: 'TCP 按块传输测试', protocol: 'tcp', enabled: true, status: 'waiting' },
-  { id: 'tcp-mptcp', label: 'TCP MPTCP 多路径测试', protocol: 'tcp', enabled: true, status: 'waiting' },
+  { id: 'tcp-mptcp', label: 'TCP MPTCP 多路径测试', protocol: 'tcp', enabled: mptcpSupported, status: 'waiting', supported: mptcpSupported },
   { id: 'udp-df', label: 'UDP 无分片（DF）测试', protocol: 'udp', enabled: true, status: 'waiting' }
 ])
 const local = ref<NetworkInfo>({ ip: '127.0.0.1', mac: '--', hostname: 'localhost', interfaceName: '默认网卡', speedMbps: 0 })
