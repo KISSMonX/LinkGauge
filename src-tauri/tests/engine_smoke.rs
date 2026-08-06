@@ -463,3 +463,47 @@ async fn idle_timeout_aborts_with_specific_message() {
     );
     assert!(started.elapsed().as_secs() < 10, "空闲超时应在一秒左右触发");
 }
+
+/// --get-server-output 端到端：文本模式服务端的汇总随测试结果返回，
+/// 客户端报告的 server_output_text 应包含服务端视角的区间/汇总行
+/// （runner.rs 将其写入测试日志并广播）
+#[tokio::test(flavor = "multi_thread")]
+async fn get_server_output_captures_server_text_report() {
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .json_output(false) // 文本模式：服务端才为客户端捕获文本输出
+        .emit_output(false)
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Tcp)
+        .duration(1)
+        .interval(1.0)
+        .get_server_output(true)
+        .json_output(true)
+        .emit_output(false)
+        .build()
+        .unwrap();
+    let outcome = client.run().await.unwrap();
+    assert_eq!(outcome.termination, Termination::Completed);
+    let server_text = outcome
+        .report
+        .server_output_text
+        .filter(|t| !t.trim().is_empty())
+        .expect("get_server_output 应带回服务端文本");
+    assert!(
+        server_text.contains("sec"),
+        "服务端文本应包含区间/汇总行，实际：{server_text}"
+    );
+
+    let server_outcome = server_task.await.unwrap().unwrap();
+    assert_eq!(server_outcome.termination, Termination::Completed);
+}

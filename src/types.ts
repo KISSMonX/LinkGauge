@@ -32,6 +32,8 @@ export interface TestConfig {
   cport: number
   /** IP 协议族（0 = 自动，4 = 仅 IPv4，6 = 仅 IPv6） */
   ipVersion: number
+  /** 测试结束后拉取服务端视角的输出（--get-server-output） */
+  getServerOutput: boolean
   /** 启用 iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path 启动时必需） */
   authEnabled: boolean
   authUsername: string
