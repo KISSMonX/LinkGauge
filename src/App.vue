@@ -219,6 +219,7 @@ function syncBundle(): SyncState {
     queue: queue.value,
     queueIndex: queueIndex.value,
     driver: driver.value,
+    source: ownLabel,
     savedTcpLength: savedTcpLength.value,
     savedUdpLength: savedUdpLength.value,
     summary: { ...summary },
@@ -262,11 +263,19 @@ async function applySync(payload: SyncState) {
   local.value = payload.local
   clientRunning.value = payload.clientRunning
   serverRunning.value = payload.serverRunning
-  clientSession.value = payload.clientSession
   serverSession.value = payload.serverSession
-  queue.value = payload.queue
-  queueIndex.value = payload.queueIndex
-  driver.value = payload.driver
+  // 队列推进状态（queue/queueIndex/clientSession/driver）只采纳驱动窗口的同步：
+  // 非驱动窗口收到 complete 也会执行 completeCurrent（更新状态但不推进队列），
+  // 其广播携带旧 queueIndex；若驱动窗口采纳，队列会被「回退」到上一项——新任务
+  // 事件全部被会话匹配丢弃、看门狗因当前任务不匹配而失效，表现为随机静默卡死
+  // （日志停在「开始第 N+1 项」，进度条停在「第 N 项」）。clientRunning 保持
+  // 全源采纳：任意窗口点「停止」都要立即生效。
+  if (payload.source === payload.driver) {
+    clientSession.value = payload.clientSession
+    queue.value = payload.queue
+    queueIndex.value = payload.queueIndex
+    driver.value = payload.driver
+  }
   savedTcpLength.value = payload.savedTcpLength
   savedUdpLength.value = payload.savedUdpLength
   Object.assign(summary, payload.summary)

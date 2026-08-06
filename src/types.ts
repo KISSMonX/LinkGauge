@@ -193,6 +193,8 @@ export interface SyncState {
   queueIndex: number
   /** 驱动客户端队列的窗口 label（main / client），其他窗口只展示不启动下一项 */
   driver: string
+  /** 发出本同步包的窗口 label：队列推进状态只采纳驱动窗口（source === driver）的同步 */
+  source: string
   savedTcpLength: number
   savedUdpLength: number
   /** 汇总数据（由驱动窗口维护 startedAt/completed/total，指标类字段各窗口本地推导） */
