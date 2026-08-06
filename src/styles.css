@@ -207,11 +207,6 @@ h2,h3,p { margin-top: 0; }
 .server-params > label { min-height: 32px; display: grid; grid-template-columns: 105px 1fr auto; align-items: center; gap: 8px; }
 .server-params > label input { width: 100%; height: 28px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); }
 .server-params > label input:focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
-.server-params > label small { white-space: nowrap; color: var(--text-note); font-size: 12px; }
-/* 输出间隔的说明纵向排在输入框下方并允许换行：若与输入框同排（auto 列），英文长说明
-   会把 1fr 输入列挤到近零宽度，间隔数字不可见（中文说明较短不受影响） */
-.server-params > label .field { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.server-params > label .field small { white-space: normal; }
 .config-section { padding: 8px 12px; border-bottom: 1px solid var(--border); }
 .tests-section { padding-bottom: 7px; }
 .test-list { margin-top: 6px; max-height: 222px; overflow-y: auto; }
@@ -228,7 +223,6 @@ h2,h3,p { margin-top: 0; }
 .parameters > label { min-height: 32px; display: grid; grid-template-columns: 105px 1fr auto; align-items: center; gap: 8px; }
 .parameters input:not([type=checkbox]), .parameters select { width: 100%; height: 28px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); }
 .parameters input:focus, .parameters select:focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
-.parameters small { white-space: nowrap; color: var(--text-note); font-size: 12px; }
 /* 参数项注释图标：悬停高亮，提示经 fixed 浮动层展示（点击可固定） */
 .info-icon { flex-shrink: 0; color: var(--text-faint); cursor: help; }
 .info-icon:hover { color: var(--blue); }
@@ -238,10 +232,6 @@ h2,h3,p { margin-top: 0; }
 .auth-section > label:not(.log-option) { min-height: 32px; display: grid; grid-template-columns: 105px 1fr auto; align-items: center; gap: 8px; }
 .auth-section > label input:not([type=checkbox]) { width: 100%; height: 28px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); }
 .auth-section > label input:not([type=checkbox]):focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
-.auth-section > label small { white-space: nowrap; color: var(--text-note); font-size: 12px; }
-/* 密码说明纵向排在输入框下方并允许换行（同服务端「输出间隔」说明的布局） */
-.auth-section > label .field { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.auth-section > label .field small { white-space: normal; }
 .auth-section .log-option { display: flex; align-items: center; gap: 8px; margin-top: 2px; font-size: 13px; }
 .auth-section .server-hint { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 .config-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px 12px; }
@@ -316,8 +306,6 @@ dd { margin: 0; text-align: right; color: var(--text-strong); white-space: nowra
 .ssh-section > label { min-height: 32px; display: grid; grid-template-columns: 105px 1fr auto; align-items: center; gap: 8px; }
 .ssh-section > label input, .ssh-section > label select { width: 100%; height: 28px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); }
 .ssh-section > label input:focus, .ssh-section > label select:focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
-.ssh-section > label .field { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.ssh-section > label .field small { white-space: normal; color: var(--text-note); font-size: 12px; }
 .ssh-section .status-pill { font-weight: 600; }
 .ssh-section .server-hint { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 /* —— 服务端视角中间栏：服务端概览 / SSH 控制台 视图切换 —— */
