@@ -1,5 +1,19 @@
 use serde::{Deserialize, Serialize};
 
+/// 前端生成的队列级日志补写请求（看门狗超时等）：前端日志不在后端事件流里，
+/// 经 append_client_log 命令写入客户端运行日志文件
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientLogAppend {
+    /// 一轮队列的运行标识（前端 start() 的 startedAt），用于定位运行日志文件
+    pub run_id: i64,
+    pub local_ip: String,
+    pub server_ip: String,
+    pub locale: String,
+    pub level: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestRequest {

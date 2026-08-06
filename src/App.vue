@@ -681,14 +681,26 @@ function taskLimitMs(taskId: string) {
   if (taskId === 'ping') return 30_000
   return Math.max((config.value.duration + 30) * 1000, 30_000)
 }
+/** 前端生成的队列级日志补写客户端运行日志文件：看门狗超时 / 首事件探针失败 /
+ *  驱动接管等前端日志不在后端事件流里（界面可见但文件没有），经后端
+ *  append_client_log 命令落入运行日志；写入失败静默跳过 */
+function appendRunLog(level: string, message: string) {
+  if (!isTauri()) return
+  invoke('append_client_log', {
+    request: { runId: startedAt.value, localIp: local.value.ip, serverIp: config.value.serverIp, locale: locale.value, level, message },
+  }).catch(() => {})
+}
+
 function armWatchdog(taskId: string) {
   clearTimeout(watchdogTimer)
   const limitMs = taskLimitMs(taskId)
   watchdogArmedIndex = queueIndex.value
   watchdogTimer = window.setTimeout(() => {
     if (!clientRunning.value || queueIndex.value > watchdogArmedIndex) return
+    const msg = `任务 ${taskId} 超过 ${Math.round(limitMs / 1000)} 秒未完成（超时，标记失败并继续下一项）`
+    appendRunLog('ERROR', msg)
     log('ERROR', `任务超时未收到完成事件（看门狗）：${taskId}`)
-    failCurrent(`任务 ${taskId} 超过 ${Math.round(limitMs / 1000)} 秒未完成（超时，标记失败并继续下一项）`)
+    failCurrent(msg)
   }, limitMs)
   // 首事件探针：后端任务一旦启动会毫秒级发出「执行」事件；10 秒内没有任何本
   // 任务事件基本可断定 invoke 丢失或事件通道异常（「开始第 N 项后连执行日志
@@ -698,7 +710,9 @@ function armWatchdog(taskId: string) {
   firstEventArmedIndex = queueIndex.value
   firstEventTimer = window.setTimeout(() => {
     if (!clientRunning.value || queueIndex.value > firstEventArmedIndex) return
-    failCurrent(t('log.taskNoStart', { task: itemLabel(taskId) }))
+    const msg = t('log.taskNoStart', { task: itemLabel(taskId) })
+    appendRunLog('ERROR', msg)
+    failCurrent(msg)
   }, 10_000)
 }
 function disarmWatchdog() { clearTimeout(watchdogTimer); clearTimeout(firstEventTimer) }
@@ -718,7 +732,9 @@ function armPassiveWatchdog(taskId: string) {
     const cur = items.value.find((i) => i.id === taskId)
     if (!cur || cur.status !== 'running') return
     driver.value = ownLabel
-    failCurrent(t('log.driverDead', { driver: driver.value, task: itemLabel(taskId) }))
+    const msg = t('log.driverDead', { driver: driver.value, task: itemLabel(taskId) })
+    appendRunLog('ERROR', msg)
+    failCurrent(msg)
   }, limitMs)
 }
 watch([clientRunning, queueIndex, driver], () => {

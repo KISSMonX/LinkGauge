@@ -119,6 +119,7 @@ pub fn run() {
             open_url,
             runner::start_test,
             runner::stop_test,
+            runner::append_client_log,
             runner::set_locale,
             runner::open_log_dir,
             ssh::ssh_connect,
