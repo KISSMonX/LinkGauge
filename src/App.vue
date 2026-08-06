@@ -628,6 +628,22 @@ async function stopServer() {
   log('INFO', t('log.stopServer'))
 }
 
+// —— 任务看门狗：事件丢失时的兜底推进（防静默卡死）——
+// 曾出现任务完成/失败事件未达前端时队列无限等待、日志图表静止的故障；
+// 启动任务后若在期限内未收到 complete/error，强制标记失败并继续下一项
+let watchdogTimer: number | undefined
+/** 启动看门狗：按量/快任务 30 秒兜底，按时长任务 duration+60 秒，上限 180 秒 */
+function armWatchdog(taskId: string) {
+  clearTimeout(watchdogTimer)
+  const limitMs = Math.max(30_000, Math.min((config.value.duration + 60) * 1000, 180_000))
+  watchdogTimer = window.setTimeout(() => {
+    if (!clientRunning.value || queue.value[queueIndex.value] !== taskId) return
+    log('ERROR', `任务超时未收到完成事件（看门狗）：${taskId}`)
+    failCurrent(`任务 ${taskId} 在 ${Math.round(limitMs / 1000)} 秒内未完成（看门狗触发）`)
+  }, limitMs)
+}
+function disarmWatchdog() { clearTimeout(watchdogTimer) }
+
 async function runNext() {
   queueIndex.value += 1
   if (queueIndex.value >= queue.value.length) { finishRun(true); return }
@@ -640,6 +656,7 @@ async function runNext() {
   if (!isTauri()) { simulateTask(taskId); return }
   try {
     clientSession.value = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, locale: locale.value, ...config.value, ...authPayload() } })
+    armWatchdog(taskId)
   } catch (error) {
     failCurrent(String(error))
   }
@@ -729,6 +746,7 @@ function snapshotItem(id: string, status: TestItem['status']) {
 }
 
 function completeCurrent(status: TestItem['status']) {
+  disarmWatchdog()
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = status
   if (status === 'success') summary.completed++
   // 快照本次测试的完整数据到内存缓存（测试完成后图表显示；退出应用即销毁）
@@ -742,6 +760,7 @@ function completeCurrent(status: TestItem['status']) {
 }
 
 function failCurrent(message: string) {
+  disarmWatchdog()
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = 'failed'
   completedPoints.value = [...points.value]
   snapshotItem(queue.value[queueIndex.value], 'failed')
@@ -754,7 +773,7 @@ function failCurrent(message: string) {
   const lastLog = summary.logPaths.at(-1)
   errorDialog.value = { title: t('err.alert'), message: lastLog ? `${message}\n\n${t('err.logFile', { path: lastLog })}` : message, retry: true }
 }
-function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100 } log('INFO', t('log.finish')) }
+function finishRun(completed: boolean) { disarmWatchdog(); clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100 } log('INFO', t('log.finish')) }
 async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); if (item) snapshotItem(item.id, 'stopped'); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; finishRun(false) }
 
 const reportStamp = () => {
