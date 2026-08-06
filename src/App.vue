@@ -746,7 +746,11 @@ function failCurrent(message: string) {
   completedPoints.value = [...points.value]
   snapshotItem(queue.value[queueIndex.value], 'failed')
   if (item) completedLabel.value = itemLabel(item.id)
-  log('ERROR', message); finishRun(false)
+  log('ERROR', message)
+  // 单项失败不中止队列：标记 failed 后继续下一项（失败原因保留在弹窗与日志/报告中）。
+  // 曾因 finishRun(false) 中止整个队列——默认队列里 tcp-mptcp 在不支持的平台上必然
+  // 失败，表现为「卡在第 N 项、日志不刷新」（队列已停但 UI 无提示）
+  if (driver.value === ownLabel) void runNext()
   const lastLog = summary.logPaths.at(-1)
   errorDialog.value = { title: t('err.alert'), message: lastLog ? `${message}\n\n${t('err.logFile', { path: lastLog })}` : message, retry: true }
 }
