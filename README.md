@@ -31,6 +31,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - English / 中文 UI (English by default), switchable in **Settings**, synced across windows
 - Light / dark theme (light by default), switchable in **Settings**, synced across windows
 - Server can bind a specific IP and port, with a configurable log/statistics output interval (seconds)
+- Server-side protection options: idle timeout (auto-stop after N seconds without a client), per-test max duration (refuses longer requests), and an aggregate bandwidth cap (terminates over-rate tests)
 - SSH remote console on the server view: connect to a remote host (password or private key) and drive its iperf3 server from an in-app console with live output — pure-Rust [russh](https://github.com/warp-tech/russh), no system `ssh` client required
 - Separate TCP and UDP configuration views
 - Ping connectivity checks
@@ -437,6 +438,7 @@ An iperf3 server serves one test at a time. Between adjacent items in the queue 
 
 - TCP retransmission counts are always 0 on Windows (`TCP_INFO` is unavailable there).
 - The authorized-users file uses riperf3's `username,sha256hex` line format, not the JSON format of iperf3's official tooling.
+- With an idle timeout set, the LinkGauge server stops itself when it fires (the engine's one-off mode exits instead of restarting the listener).
 
 ## Troubleshooting
 

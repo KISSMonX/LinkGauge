@@ -70,6 +70,18 @@ pub struct TestRequest {
     /// 对 iperf3 < 3.17 的客户端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP）
     #[serde(default)]
     pub server_auth_pkcs1_padding: bool,
+    // —— 服务端防护参数（保护共享服务端；0 = 不限制，仅服务端模式使用）——
+    /// 空闲超时（秒，对应 iperf3 --idle-timeout）：N 秒内无客户端连接则退出监听
+    #[serde(default)]
+    pub server_idle_timeout: u32,
+    /// 单次测试最大时长（秒，对应 iperf3 --server-max-duration）：
+    /// 请求时长 + 预热超过上限的测试在参数交换阶段被拒绝
+    #[serde(default)]
+    pub server_max_duration: u32,
+    /// 服务端带宽上限（Mbps，对应 iperf3 --server-bitrate-limit，换算 ×1_000_000）：
+    /// 聚合吞吐超过上限的测试被终止
+    #[serde(default)]
+    pub server_bitrate_limit_mbps: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
