@@ -42,7 +42,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Local port of the active connection shown in the client dashboard
 - Multi-NIC detection with an interface picker (the first interface is the default) and link-speed reporting
 - Bandwidth presets (100 / 1000 Mbps, unlimited) that default to the current NIC link speed
-- Warm-up omit period (`-O`) and TCP socket buffer size (`-w`, 0 = auto) client options
+- Warm-up omit period (`-O`), TCP socket buffer size (`-w`, 0 = auto), client source port (`--cport`), and explicit IPv4/IPv6 selection client options
 - Packet-length presets (TCP up to 1 MB, UDP up to 64 KB), with a custom length persisted to the config file
 - Real-time INFO, WARN, and ERROR logs with filtering
 - Engine logs follow the UI language switch at runtime
@@ -417,6 +417,8 @@ Against servers older than 3.7 the `bidirectional` parameter is silently ignored
 - **Choosing "unlimited" bandwidth really is unlimited** (equivalent to `-b 0`). Note that the iperf3 CLI defaults `-u` to 1 Mbit/s when `-b` is omitted; LinkGauge does not inherit that default.
 - **No warm-up by default** (`-O` off). The omit period must be shorter than the test duration.
 - **TCP socket buffer defaults to 0 (auto)**, matching iperf3's `-w` default; enter a size in KB to override it.
+- **Client source port defaults to 0 (auto)** (iperf3 `--cport` off); when set, data-stream `i` binds source port `cport + i`, like iperf3.
+- **IP version defaults to auto**; force IPv4 or IPv6 when the server address is a hostname on a dual-stack host.
 
 ### Authentication
 

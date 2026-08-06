@@ -28,6 +28,10 @@ export interface TestConfig {
   omitSecs: number
   /** TCP 套接字缓冲区（KB，0 = 自动，对应 iperf3 `-w`） */
   windowKb: number
+  /** 客户端数据流源端口（0 = 自动，对应 iperf3 `--cport`） */
+  cport: number
+  /** IP 协议族（0 = 自动，4 = 仅 IPv4，6 = 仅 IPv6） */
+  ipVersion: number
   /** 启用 iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path 启动时必需） */
   authEnabled: boolean
   authUsername: string
