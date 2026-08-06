@@ -42,6 +42,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Local port of the active connection shown in the client dashboard
 - Multi-NIC detection with an interface picker (the first interface is the default) and link-speed reporting
 - Bandwidth presets (100 / 1000 Mbps, unlimited) that default to the current NIC link speed
+- Warm-up omit period (`-O`) and TCP socket buffer size (`-w`, 0 = auto) client options
 - Packet-length presets (TCP up to 1 MB, UDP up to 64 KB), with a custom length persisted to the config file
 - Real-time INFO, WARN, and ERROR logs with filtering
 - Engine logs follow the UI language switch at runtime
@@ -388,7 +389,7 @@ Client-<local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<completed|incomplete
 
 - Engine: [riperf3](https://github.com/therealevanhenry/riperf3) — a ground-up, wire-compatible Rust implementation of the iperf3 protocol, vendored at `vendor/riperf3` (upstream HEAD, version 0.9.0-dev).
 - The engine runs **in-process**: no iperf3 executable is installed, bundled, resolved, or spawned. Per-second metrics flow through typed callbacks; tests can be interrupted gracefully via a watch channel.
-- **Local patch:** upstream exposes interval results only after a run completes, so a small `on_interval` callback was added (see `vendor/riperf3` — `IntervalReporterConfig`, `ClientBuilder::on_interval`, `ServerBuilder::on_interval`). The patch is marked with `local LinkGauge patch` comments; re-apply it after upgrading the vendored source.
+- **Local patches:** (1) upstream exposes interval results only after a run completes, so a small `on_interval` callback was added (see `vendor/riperf3` — `IntervalReporterConfig`, `ClientBuilder::on_interval`, `ServerBuilder::on_interval`); (2) the final `sum_*` window now excludes the `-O` warm-up period (iperf3 prints its `[SUM]` row as "omit-end sec"), so the aggregate bitrate is not understated on warm-up runs. Both patches are marked with `local LinkGauge patch` comments; re-apply them after upgrading the vendored source.
 - Interop: the engine is interoperable with real iperf3 servers and clients (verified upstream against iperf 3.21).
 - Known platform difference: TCP retransmission counts depend on `TCP_INFO`, which is unavailable on Windows; the app reports 0 there.
 
@@ -414,6 +415,8 @@ Against servers older than 3.7 the `bidirectional` parameter is silently ignored
   > When upgrading from an older version, a stored value of 8192 is migrated to 1460 automatically; pick a larger value from the dropdown if you genuinely need one.
 - **TCP packet length defaults to 128 KB**, matching iperf3.
 - **Choosing "unlimited" bandwidth really is unlimited** (equivalent to `-b 0`). Note that the iperf3 CLI defaults `-u` to 1 Mbit/s when `-b` is omitted; LinkGauge does not inherit that default.
+- **No warm-up by default** (`-O` off). The omit period must be shorter than the test duration.
+- **TCP socket buffer defaults to 0 (auto)**, matching iperf3's `-w` default; enter a size in KB to override it.
 
 ### Authentication
 

@@ -205,6 +205,14 @@ fn validate(request: &TestRequest) -> Result<(), String> {
     {
         return Err("启用认证后，RSA 私钥与授权用户文件路径均不能为空".into());
     }
+    // 预热必须在测试时长内（iperf3 要求 -O < -t），否则统计区间为空
+    if request.omit_secs > 0 && u64::from(request.omit_secs) >= request.duration {
+        return Err("预热时间必须小于测试时长".into());
+    }
+    // 套接字缓冲区上限（KB）：与界面输入框上限一致，防溢出（引擎按 i32 字节接收）
+    if request.window_kb > 16384 {
+        return Err("套接字缓冲区不能超过 16MB".into());
+    }
     Ok(())
 }
 
@@ -228,6 +236,10 @@ struct ClientParams {
     bandwidth_bps: u64,
     interval: f64,
     bind_address: Option<String>,
+    /// 预热秒数（0 = 不预热）：on_interval 回调已跳过 omitted 区间，仅影响统计口径
+    omit_secs: u32,
+    /// 套接字缓冲区（KB，0 = 自动）
+    window_kb: u32,
 }
 
 fn client_params_for(request: &TestRequest) -> ClientParams {
@@ -258,6 +270,8 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
         bandwidth_bps: request.bandwidth.saturating_mul(1_000_000),
         interval: request.interval as f64,
         bind_address: (!request.local_ip.trim().is_empty()).then(|| request.local_ip.clone()),
+        omit_secs: request.omit_secs,
+        window_kb: request.window_kb,
     };
     match request.task_id.as_str() {
         "tcp-parallel" => params.num_streams = request.parallel.max(1) as u32,
@@ -496,6 +510,16 @@ fn engine_client_builder(
     builder = builder.bandwidth(params.bandwidth_bps);
     if let Some(addr) = &params.bind_address {
         builder = builder.bind_address(addr);
+    }
+    // 预热：跳过前 N 秒的统计（排除 TCP 慢启动）；on_interval 回调已跳过
+    // omitted 区间，实时图表/日志与最终报告口径一致
+    if params.omit_secs > 0 {
+        builder = builder.omit(params.omit_secs);
+    }
+    // 套接字缓冲区（KB → 字节）：0 = 引擎默认（等价 iperf3 的 -w 0 = 自动）。
+    // 用 u64 换算防溢出：UI 上限 16384 KB，但请求来自 IPC 边界，不可信
+    if params.window_kb > 0 {
+        builder = builder.window((params.window_kb as u64 * 1024).min(i32::MAX as u64) as i32);
     }
     // iperf3 认证：服务端以 --rsa-private-key-path + --authorized-users-path 启动时，
     // 客户端须用服务端公钥加密「用户名+密码」。未启用时前端已把三项清空，这里自然跳过。
@@ -1588,6 +1612,8 @@ mod tests {
             packet_length: 1024,
             udp_packet_length: 8192,
             interval: 1,
+            omit_secs: 0,
+            window_kb: 0,
             auth_username: String::new(),
             auth_password: String::new(),
             auth_public_key_path: String::new(),
@@ -1723,5 +1749,46 @@ mod tests {
         let mut client = request("tcp-single", "client", "tcp");
         client.server_auth_enabled = true;
         assert!(validate(&client).is_ok());
+    }
+
+    #[test]
+    fn omit_and_window_map_through_params() {
+        let mut req = request("tcp-single", "client", "tcp");
+        req.omit_secs = 5;
+        req.window_kb = 256;
+        let params = client_params_for(&req);
+        assert_eq!(params.omit_secs, 5);
+        assert_eq!(params.window_kb, 256);
+        // 默认 0 = 不预热 / 自动缓冲
+        let params = client_params_for(&request("tcp-single", "client", "tcp"));
+        assert_eq!(params.omit_secs, 0);
+        assert_eq!(params.window_kb, 0);
+    }
+
+    #[test]
+    fn omit_must_be_shorter_than_duration() {
+        let mut req = request("tcp-single", "client", "tcp");
+        req.duration = 10;
+        // 预热 == 时长：拒绝（统计区间为空）
+        req.omit_secs = 10;
+        assert!(validate(&req).is_err());
+        // 预热 > 时长：拒绝
+        req.omit_secs = 11;
+        assert!(validate(&req).is_err());
+        // 预热 < 时长：通过
+        req.omit_secs = 9;
+        assert!(validate(&req).is_ok());
+        // 0 = 不预热：通过
+        req.omit_secs = 0;
+        assert!(validate(&req).is_ok());
+    }
+
+    #[test]
+    fn window_kb_capped_at_16mb() {
+        let mut req = request("tcp-single", "client", "tcp");
+        req.window_kb = 16384;
+        assert!(validate(&req).is_ok());
+        req.window_kb = 16385;
+        assert!(validate(&req).is_err());
     }
 }

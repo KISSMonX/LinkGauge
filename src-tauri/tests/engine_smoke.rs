@@ -275,3 +275,93 @@ async fn authenticated_client_succeeds_unauthenticated_denied() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 预热（-O）与套接字缓冲（-w）端到端：预热期的区间以 omitted 标记实时回调
+/// （runner.rs 据此跳过图表/日志），最终报告不含预热段；-w 不影响测试完成
+#[tokio::test(flavor = "multi_thread")]
+async fn omit_and_window_params_work_end_to_end() {
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    // 3 秒测试 + 1 秒预热：前 1 秒区间应被标记 omitted
+    let flags: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let hook = flags.clone();
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Tcp)
+        .duration(3)
+        .interval(1.0)
+        .omit(1)
+        .window(64 * 1024) // 64 KB 套接字缓冲（-w 64K）
+        .json_output(true)
+        .emit_output(false)
+        .on_interval(move |interval: &riperf3::json_report::Interval| {
+            hook.lock().unwrap().push(interval.sum.omitted);
+        })
+        .build()
+        .unwrap();
+    let outcome = client.run().await.unwrap();
+    assert_eq!(outcome.termination, Termination::Completed);
+    {
+        let seen = flags.lock().unwrap();
+        assert!(
+            seen.contains(&true),
+            "预热期区间应以 omitted 标记回调：{seen:?}"
+        );
+        assert!(
+            seen.contains(&false),
+            "预热结束后应有正常统计区间：{seen:?}"
+        );
+    }
+    // 与 iperf3 一致：报告保留预热区间行（omitted 标记），但汇总排除预热段
+    let report = &outcome.report;
+    assert!(
+        report.intervals.iter().any(|interval| interval.sum.omitted),
+        "报告应保留预热区间行（omitted 标记）"
+    );
+    let measured = report
+        .intervals
+        .iter()
+        .filter(|interval| !interval.sum.omitted)
+        .count();
+    assert!(
+        measured >= 2,
+        "预热结束后应有正常统计区间，实际 {measured} 个"
+    );
+    let sum = outcome.report.end.sum_sent.as_ref().expect("应有发送汇总");
+    let measured_bytes: u64 = report
+        .intervals
+        .iter()
+        .filter(|interval| !interval.sum.omitted)
+        .map(|interval| interval.sum.bytes)
+        .sum();
+    // 汇总窗口只覆盖预热后的测量段（与 iperf3 的 [SUM] 行一致）；
+    // 曾回归为 seconds=3（全程），导致聚合带宽被低估（vendor 补丁修复）
+    assert!(
+        (sum.seconds - 2.0).abs() < 0.01,
+        "汇总秒数应排除预热段（≈2s），实际 {}",
+        sum.seconds
+    );
+    assert!(
+        (sum.start - 1.0).abs() < 0.01,
+        "汇总起点应为预热结束（≈1s），实际 {}",
+        sum.start
+    );
+    assert_eq!(
+        sum.bytes, measured_bytes,
+        "汇总字节数应与非预热区间一致（不含预热）"
+    );
+
+    let server_outcome = server_task.await.unwrap().unwrap();
+    assert_eq!(server_outcome.termination, Termination::Completed);
+}
