@@ -104,6 +104,19 @@ const setSsh = <K extends keyof SshConfig>(key: K, value: SshConfig[K]) => emit(
 /** SSH 参数在连接建立后锁定，断开后才能修改 */
 const sshLocked = computed(() => props.sshStatus !== 'idle')
 
+/** 按量测试项（tcp-bytes / udp-bytes / tcp-blocks）：勾选后传输量输入框必须可见 */
+const AMOUNT_ITEMS = ['tcp-bytes', 'udp-bytes', 'tcp-blocks']
+const amountItemSelected = computed(() => props.items.some((i) => AMOUNT_ITEMS.includes(i.id) && i.enabled))
+/** 时长输入框：仅「全局按时长」且未勾选按量测试项时显示（否则显示传输量输入框） */
+const showDuration = computed(() => props.config.transferMode === 'time' && !amountItemSelected.value)
+/** 传输量单位标签：显式按块模式，或仅勾选按块项时显示块数，其余显示 MB */
+const amountLabel = computed(() => {
+  const blocksOnly = props.config.transferMode === 'blocks' ||
+    (props.config.transferMode === 'time' && amountItemSelected.value &&
+      !props.items.some((i) => (i.id === 'tcp-bytes' || i.id === 'udp-bytes') && i.enabled))
+  return blocksOnly ? t('cfg.transferAmountBlocks') : t('cfg.transferAmountBytes')
+})
+
 // —— 悬停/点击提示（测试项介绍 + 参数项注释共用）：
 // fixed 定位浮动层不受面板 overflow 裁剪；hover 跟随鼠标，点击固定显示 ——
 const tooltip = ref<{ text: string; x: number; y: number; pinned: boolean } | null>(null)
@@ -237,8 +250,8 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <label><span>{{ t('cfg.serverIp') }}</span><span class="ip-row"><input :value="config.serverIp" :disabled="clientRunning" @input="set('serverIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="clientRunning" :title="t('nic.title')" @click="emit('pick-nic')">{{ t('cfg.nicBtn') }}</button></span></label>
       <label><span>{{ t('cfg.port') }}</span><input type="number" :value="config.port" min="1" max="65535" :disabled="clientRunning" @input="set('port', Number(($event.target as HTMLInputElement).value))" /></label>
       <label><span>{{ t('cfg.transferMode') }}</span><select :value="config.transferMode" :disabled="clientRunning" @change="set('transferMode', ($event.target as HTMLSelectElement).value as TestConfig['transferMode'])"><option value="time">{{ t('cfg.transferModeTime') }}</option><option value="bytes">{{ t('cfg.transferModeBytes') }}</option><option value="blocks">{{ t('cfg.transferModeBlocks') }}</option></select></label>
-      <label v-if="config.transferMode === 'time'"><span>{{ t('cfg.duration') }}</span><input type="number" :value="config.duration" min="1" max="86400" :disabled="clientRunning" @input="set('duration', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label v-else><span>{{ config.transferMode === 'bytes' ? t('cfg.transferAmountBytes') : t('cfg.transferAmountBlocks') }}</span><input type="number" :value="config.transferAmount" min="1" :disabled="clientRunning" @input="set('transferAmount', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.transferAmountNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.transferAmountNote'))" /></label>
+      <label v-if="showDuration"><span>{{ t('cfg.duration') }}</span><input type="number" :value="config.duration" min="1" max="86400" :disabled="clientRunning" @input="set('duration', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label v-else><span>{{ amountLabel }}</span><input type="number" :value="config.transferAmount" min="1" :disabled="clientRunning" @input="set('transferAmount', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.transferAmountNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.transferAmountNote'))" /></label>
       <label><span>{{ t('cfg.parallel') }}</span><input type="number" :value="config.parallel" min="1" max="128" :disabled="clientRunning" @input="set('parallel', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.parallelNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.parallelNote'))" /></label>
       <label><span>{{ t('cfg.bandwidth') }}</span><select :value="config.bandwidth" :disabled="clientRunning" @change="set('bandwidth', Number(($event.target as HTMLSelectElement).value))"><option v-for="option in bandwidthOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.unlimited'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.unlimited'))" /></label>
       <label><span>{{ t('cfg.tcpLen') }}</span><select :value="tcpPacketSelect" :disabled="clientRunning" @change="onPacketChange('tcp', $event)"><option v-for="option in tcpPacketOptions" :key="option.value" :value="option.value">{{ option.label }}</option><option value="custom">{{ t('cfg.custom') }}</option></select></label>
