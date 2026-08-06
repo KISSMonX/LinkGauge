@@ -300,12 +300,21 @@ struct ClientParams {
 
 /// 按量模式推导：按量测试项（tcp-bytes / udp-bytes / tcp-blocks）强制
 /// bytes / blocks，其余取全局 transfer_mode。validate 与 client_params_for
-/// 共用同一推导，保证「队列里混排按量项 + 常规项」时各项口径一致
+/// 共用同一推导，保证「队列里混排按量项 + 常规项」时各项口径一致。
+/// 空串（服务端等不传 transfer_mode 的旧请求，serde 缺省）归一化为 "time"，
+/// 非空非法值（如 "packets"）原样返回由调用方拒绝
 fn effective_transfer_mode(request: &TestRequest) -> &str {
     match request.task_id.as_str() {
         "tcp-bytes" | "udp-bytes" => "bytes",
         "tcp-blocks" => "blocks",
-        _ => request.transfer_mode.as_str(),
+        _ => {
+            let mode = request.transfer_mode.as_str();
+            if mode.is_empty() {
+                "time"
+            } else {
+                mode
+            }
+        }
     }
 }
 
@@ -2178,5 +2187,19 @@ mod tests {
         let mut mixed = request("tcp-single", "client", "tcp");
         mixed.transfer_amount = 2;
         assert!(validate(&mixed).is_ok());
+    }
+
+    #[test]
+    fn server_request_without_transfer_mode_passes_validation() {
+        // 回归：服务端启动请求不携带 transfer_mode（serde 缺省空串），
+        // 空串必须按 time 处理，否则「启动服务」报错
+        let mut req = request("server", "server", "tcp");
+        req.duration = 0;
+        req.transfer_mode = String::new();
+        assert!(validate(&req).is_ok());
+        // 空串归一化不放松非空非法值校验
+        let mut bad = request("tcp-single", "client", "tcp");
+        bad.transfer_mode = "packets".into();
+        assert!(validate(&bad).is_err());
     }
 }
