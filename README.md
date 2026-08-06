@@ -477,6 +477,11 @@ An iperf3 server serves one test at a time. Between adjacent items in the queue 
 - [ ] Test result history and multi-run comparison
 - [ ] Unit tests for key frontend logic
 
+## Contributors
+
+- **houming** — project author and maintainer
+- **DeepSeek** — AI-assisted development partner (iperf3 option set, server improvements, bug fixes in the 0.2.0 release cycle)
+
 ## Contributing
 
 Issues and pull requests are welcome after the repository is published.
