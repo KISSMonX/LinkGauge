@@ -673,13 +673,20 @@ function handleEvent(event: BackendEvent) {
   // 会话匹配：任务极快完成时（如按量测试在回环上毫秒级传完），complete/日志
   // 事件可能早于 invoke('start_test') 返回（clientSession 尚未更新）到达，
   // 按 sessionId 匹配会被丢弃、队列卡死（AGENTS.md 的 loopback 时序问题——
-  // localPort 有特例处理，普通事件没有）。改为按任务匹配：客户端事件对应当前
-  // 队列任务 id，服务端事件对应 server 会话；两者都是串行单会话，上一个任务
-  // 的迟到事件会被当前任务 id 过滤掉
+  // localPort 有特例处理，普通事件没有）。双条件匹配：当前队列任务 id 或
+  // clientSession 任一命中即属当前客户端任务；两者都是串行单会话，上一个
+  // 任务的迟到事件会被同时过滤（taskId 与 sessionId 都不再指向它）
   const currentTaskId = queue.value[queueIndex.value]
-  const isClient = event.taskId !== 'server' && clientRunning.value && (!currentTaskId || event.taskId === currentTaskId)
+  const isClient = event.taskId !== 'server' && clientRunning.value &&
+    ((!currentTaskId || event.taskId === currentTaskId) || event.sessionId === clientSession.value)
   const isServer = event.taskId === 'server' && serverRunning.value
-  if (!isClient && !isServer) return
+  if (!isClient && !isServer) {
+    // 诊断：客户端运行中收到无法归属的事件（排查队列卡住 / 事件串台）
+    if (clientRunning.value && event.taskId !== 'server' && event.type !== 'status') {
+      log('WARN', `忽略无法归属的事件：${event.type} 任务=${event.taskId} 会话=${event.sessionId.slice(0, 8)} 当前任务=${currentTaskId || '无'} 当前会话=${clientSession.value.slice(0, 8) || '无'}`)
+    }
+    return
+  }
   if (event.type === 'log') log(event.level || 'INFO', event.message || '', event.taskId)
   if (event.logPath && !summary.logPaths.includes(event.logPath)) summary.logPaths.push(event.logPath)
   // 服务端事件：独立于客户端队列，维护服务端运行状态与独立统计
