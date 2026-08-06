@@ -663,38 +663,32 @@ async function stopServer() {
 let watchdogTimer: number | undefined
 /** 首事件探针定时器：任务启动后若 10 秒内收不到任何本任务事件，直接判失败（见 armWatchdog） */
 let firstEventTimer: number | undefined
-/** 任务类型感知的看门狗期限：按量/块/ping 任务 15 秒；按时长任务 duration+15 秒 */
+/** 任务类型感知的硬时限：按量/块/ping 30 秒；按时长任务 duration+30 秒。
+ *  硬时限从任务启动起算、不可被事件续期——任何卡死（invoke 挂起、事件丢失、
+ *  运行中途挂起）都必然超时，标记失败并继续下一项。此前的事件续期制在
+ *  「任务持续发事件但永不完成」时看门狗被无限续期，队列静默卡死 */
 function taskLimitMs(taskId: string) {
   const fast = taskId === 'ping' || taskId === 'tcp-bytes' || taskId === 'udp-bytes' || taskId === 'tcp-blocks'
-  return fast ? 15_000 : (config.value.duration + 15) * 1000
+  return fast ? 30_000 : (config.value.duration + 30) * 1000
 }
-/** 看门狗静默计时（事件续期制）：当前任务收到任何事件即重新计时，只惩罚「事件
- *  静默」——完成事件丢失 / 任务无声死亡。慢速传输因指标持续到达而不会被误杀
- *  （旧公式 duration+60 且 30 秒下限是死代码，事件丢失时界面冻结 61 秒以上
- *  才自愈，用户感知为「卡死」） */
-function setWatchdog(taskId: string) {
+function armWatchdog(taskId: string) {
   clearTimeout(watchdogTimer)
   const limitMs = taskLimitMs(taskId)
   watchdogTimer = window.setTimeout(() => {
     if (!clientRunning.value || queue.value[queueIndex.value] !== taskId) return
     log('ERROR', `任务超时未收到完成事件（看门狗）：${taskId}`)
-    failCurrent(`任务 ${taskId} 事件静默超过 ${Math.round(limitMs / 1000)} 秒仍未收到完成事件（看门狗触发）`)
+    failCurrent(`任务 ${taskId} 超过 ${Math.round(limitMs / 1000)} 秒未完成（超时，标记失败并继续下一项）`)
   }, limitMs)
-}
-function armWatchdog(taskId: string) {
-  setWatchdog(taskId)
   // 首事件探针：后端任务一旦启动会毫秒级发出「执行」事件；10 秒内没有任何本
   // 任务事件基本可断定 invoke 丢失或事件通道异常（「开始第 N 项后连执行日志
-  // 都没有」的卡死形态）——直接判失败继续队列，不必干等看门狗；迟到事件由
-  // 任务匹配安全丢弃，不会误伤
+  // 都没有」的卡死形态）——直接判失败继续队列；迟到事件由任务匹配安全丢弃，
+  // 不会误伤
   clearTimeout(firstEventTimer)
   firstEventTimer = window.setTimeout(() => {
     if (!clientRunning.value || queue.value[queueIndex.value] !== taskId) return
     failCurrent(t('log.taskNoStart', { task: itemLabel(taskId) }))
   }, 10_000)
 }
-/** 事件续期：当前任务的事件证明任务存活，静默计时重新开始 */
-function kickWatchdog(taskId: string) { setWatchdog(taskId) }
 function disarmWatchdog() { clearTimeout(watchdogTimer); clearTimeout(firstEventTimer) }
 
 let passiveTimer: number | undefined
@@ -820,9 +814,8 @@ function handleEvent(event: BackendEvent) {
   }
   // 客户端事件：停止或结束后的事件忽略
   if (!clientRunning.value) return
-  // 首事件探针解除 + 看门狗续期：收到当前任务的任何事件（执行/指标/端口状态等）
-  // 即视为启动成功且任务存活，静默计时重新开始
-  if (event.taskId === currentTaskId) { clearTimeout(firstEventTimer); kickWatchdog(event.taskId) }
+  // 首事件探针解除：收到当前任务的任何事件（执行/指标/端口状态等）即视为启动成功
+  if (event.taskId === currentTaskId) clearTimeout(firstEventTimer)
   if (event.type === 'metric' && event.metric) { points.value.push(event.metric); connected.value = true; if (event.taskId === 'ping' && event.metric.jitterMs) summary.pingAverage = event.metric.jitterMs }
   if (event.type === 'complete') completeCurrent(event.status || 'success')
   if (event.type === 'error') failCurrent(event.message || t('err.execFailed'), event.fatal)
