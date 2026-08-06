@@ -1460,7 +1460,13 @@ async fn setup_log<R: tauri::Runtime>(
         );
         return None;
     }
-    let working_path = log_dir.join(format!("{base_name}-进行中.log"));
+    // 运行中的工作文件名后缀随界面语言（进行中 / in progress），完成时由
+    // finish_log 重命名为 -completed / -incomplete
+    let working_path = log_dir.join(format!(
+        "{}-{}.log",
+        base_name,
+        tr(&request.locale, "进行中", "in progress")
+    ));
     let file = match OpenOptions::new()
         .create(true)
         .truncate(true)
