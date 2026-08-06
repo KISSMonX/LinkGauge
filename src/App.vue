@@ -680,9 +680,8 @@ function taskLimitMs(taskId: string) {
   if (taskId === 'ping') return 30_000
   return Math.max((config.value.duration + 30) * 1000, 30_000)
 }
-/** 前端生成的队列级日志补写客户端运行日志文件：看门狗超时 / 首事件探针失败 /
- *  驱动接管等前端日志不在后端事件流里（界面可见但文件没有），经后端
- *  append_client_log 命令落入运行日志；写入失败静默跳过 */
+/** 前端生成的队列级日志补写客户端运行日志文件：这类日志不在后端事件流里
+ * （界面可见但文件没有），经后端 append_client_log 命令落入运行日志 */
 function appendRunLog(level: string, message: string) {
   if (!isTauri()) return
   invoke('append_client_log', {
@@ -697,8 +696,6 @@ function armWatchdog(taskId: string) {
   watchdogTimer = window.setTimeout(() => {
     if (!clientRunning.value || queueIndex.value > watchdogArmedIndex) return
     const msg = `任务 ${taskId} 超过 ${Math.round(limitMs / 1000)} 秒未完成（超时，标记失败并继续下一项）`
-    appendRunLog('ERROR', msg)
-    log('ERROR', `任务超时未收到完成事件（看门狗）：${taskId}`)
     failCurrent(msg)
   }, limitMs)
   // 首事件探针：后端任务一旦启动会毫秒级发出「执行」事件；10 秒内没有任何本
@@ -710,7 +707,6 @@ function armWatchdog(taskId: string) {
   firstEventTimer = window.setTimeout(() => {
     if (!clientRunning.value || queueIndex.value > firstEventArmedIndex) return
     const msg = t('log.taskNoStart', { task: itemLabel(taskId) })
-    appendRunLog('ERROR', msg)
     failCurrent(msg)
   }, 10_000)
 }
@@ -732,7 +728,6 @@ function armPassiveWatchdog(taskId: string) {
     if (!cur || cur.status !== 'running') return
     driver.value = ownLabel
     const msg = t('log.driverDead', { driver: driver.value, task: itemLabel(taskId) })
-    appendRunLog('ERROR', msg)
     failCurrent(msg)
   }, limitMs)
 }
@@ -846,7 +841,8 @@ function handleEvent(event: BackendEvent) {
   if (event.taskId === currentTaskId) clearTimeout(firstEventTimer)
   if (event.type === 'metric' && event.metric) { points.value.push(event.metric); connected.value = true; if (event.taskId === 'ping' && event.metric.jitterMs) summary.pingAverage = event.metric.jitterMs }
   if (event.type === 'complete') completeCurrent(event.status || 'success')
-  if (event.type === 'error') failCurrent(event.message || t('err.execFailed'), event.fatal)
+  // 后端错误在发出事件前已经写入运行日志；这里只更新界面与队列，避免重复落盘
+  if (event.type === 'error') failCurrent(event.message || t('err.execFailed'), event.fatal, false)
 }
 
 /** 把当前实时数据按项目 id 快照进历史缓存（仅内存，退出应用即销毁）；
@@ -872,13 +868,16 @@ function completeCurrent(status: TestItem['status']) {
   if (driver.value === ownLabel) void runNext()
 }
 
-function failCurrent(message: string, abort = false) {
+function failCurrent(message: string, abort = false, persist = true) {
   disarmWatchdog()
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = 'failed'
   completedPoints.value = [...points.value]
   snapshotItem(queue.value[queueIndex.value], 'failed')
   if (item) completedLabel.value = itemLabel(item.id)
-  log('ERROR', abort ? `${t('err.queueAborted')}：${message}` : message)
+  const logMessage = abort ? `${t('err.queueAborted')}：${message}` : message
+  // invoke 异常、看门狗等纯前端失败没有后端日志事件，必须在队列推进前主动补写
+  if (persist) appendRunLog('ERROR', logMessage)
+  log('ERROR', logMessage)
   // 环境性失败（服务端未启动等）中止整个队列：剩余引擎项必然同样失败，继续只会
   // 产生一串无意义失败，由用户修复环境后重新开始测试
   if (abort) {
