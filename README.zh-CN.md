@@ -42,6 +42,7 @@
 - 客户端概览显示当前连接的本地端口
 - 多网卡检测与接口选择弹窗（默认选中第一个接口）并显示链路速率
 - 带宽预设（100 / 1000 Mbps、不限），默认跟随当前网卡链路速率
+- 客户端预热时间（`-O`）与 TCP 套接字缓冲区（`-w`，0 = 自动）选项
 - 报文长度预设（TCP 最大 1 MB、UDP 最大 64 KB），自定义长度持久化到配置文件
 - INFO、WARN、ERROR 实时日志与等级筛选
 - 引擎日志跟随界面语言实时切换
@@ -385,7 +386,7 @@ Client-<本机IP>-<服务端IP>-<测试名称>-<yyyyMMddHHmmss>-<完成|未完�
 
 - 引擎：[riperf3](https://github.com/therealevanhenry/riperf3) —— 从零实现、与 iperf3 线协议兼容的 Rust 实现，vendor 于 `vendor/riperf3`（上游 HEAD，版本 0.9.0-dev）。
 - 引擎**在应用进程内运行**：不安装、不捆绑、不解析、不启动任何 iperf3 可执行文件。逐秒指标通过类型化回调到达；测试可通过 watch 通道优雅中断。
-- **本地补丁：** 上游只在测试结束后才暴露逐秒区间数据，因此新增了 `on_interval` 实时回调（见 `vendor/riperf3` 中 `IntervalReporterConfig`、`ClientBuilder::on_interval`、`ServerBuilder::on_interval`）。补丁处均标注 `local LinkGauge patch` 注释；升级 vendor 源码后需重新应用。
+- **本地补丁：** （1）上游只在测试结束后才暴露逐秒区间数据，因此新增了 `on_interval` 实时回调（见 `vendor/riperf3` 中 `IntervalReporterConfig`、`ClientBuilder::on_interval`、`ServerBuilder::on_interval`）；（2）最终 `sum_*` 汇总窗口排除 `-O` 预热段（iperf3 的 `[SUM]` 行打印 "omit-end sec"），避免预热测试的聚合带宽被低估。补丁处均标注 `local LinkGauge patch` 注释；升级 vendor 源码后需重新应用。
 - 互通性：与真实 iperf3 服务端/客户端互通（上游已针对 iperf 3.21 验证）。
 - 已知平台差异：TCP 重传计数依赖 `TCP_INFO`，Windows 上不可用，该平台显示为 0。
 
@@ -411,6 +412,8 @@ Client-<本机IP>-<服务端IP>-<测试名称>-<yyyyMMddHHmmss>-<完成|未完�
   > 从旧版本升级时，已保存的 8192 会自动迁移为 1460；如确需大报文，可在下拉框中重新选择。
 - **TCP 报文长度默认 128 KB**，与 iperf3 一致。
 - **带宽选「不限制」即真正不限速**（等价 `-b 0`）。注意 iperf3 命令行的 `-u` 在不带 `-b` 时默认限速 1 Mbit/s，本软件不沿用该默认。
+- **默认不预热**（`-O` 关闭）。预热时间必须小于测试时长。
+- **TCP 套接字缓冲区默认 0（自动）**，与 iperf3 的 `-w` 默认一致；填写 KB 数值可覆盖。
 
 ### 认证
 

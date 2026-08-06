@@ -27,6 +27,13 @@ pub struct TestRequest {
     #[serde(default)]
     pub udp_packet_length: u64,
     pub interval: u64,
+    /// 预热时间（秒，0 = 不预热，对应 iperf3 `-O`）：跳过前 N 秒的统计，
+    /// 排除 TCP 慢启动影响；必须小于 duration
+    #[serde(default)]
+    pub omit_secs: u32,
+    /// TCP 套接字缓冲区大小（KB，0 = 自动/默认，对应 iperf3 `-w`；仅客户端模式使用）
+    #[serde(default)]
+    pub window_kb: u32,
     // —— iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path
     // 启动时必需）。全部 default，旧版前端不传时等价于不启用 ——
     /// 认证用户名；为空表示不启用认证

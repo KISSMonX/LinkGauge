@@ -24,6 +24,10 @@ export interface TestConfig {
    *  超过路径 MTU 会触发 IP 分片，丢包率将被分片放大而无法与原生 iperf3 结果对比 */
   udpPacketLength: number
   interval: number
+  /** 预热秒数（0 = 不预热，对应 iperf3 `-O`）：跳过前 N 秒统计，须小于 duration */
+  omitSecs: number
+  /** TCP 套接字缓冲区（KB，0 = 自动，对应 iperf3 `-w`） */
+  windowKb: number
   /** 启用 iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path 启动时必需） */
   authEnabled: boolean
   authUsername: string

@@ -21,7 +21,7 @@ import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, Met
 const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 
-const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
+const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, omitSecs: 0, windowKb: 0, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
 const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1, authEnabled: false, authPrivateKeyPath: '', authUsersPath: '', authPkcs1Padding: false }
 const sshDefaults: SshConfig = { host: '', port: 22, username: '', authMethod: 'password', password: '', privateKeyPath: '', passphrase: '' }
 const config = ref<TestConfig>({ ...defaults })
@@ -414,6 +414,9 @@ function validate() {
   if (config.value.mode === 'client' && !/^([a-z\d-]+\.)*[a-z\d-]+$/i.test(config.value.serverIp) && !/^\d{1,3}(\.\d{1,3}){3}$/.test(config.value.serverIp)) return t('err.serverIp')
   if (config.value.port < 1 || config.value.port > 65535) return t('err.port')
   if (config.value.duration < 1) return t('err.duration')
+  // 预热必须落在测试时长内（iperf3 要求 -O < -t），否则统计区间为空
+  if (config.value.omitSecs > 0 && config.value.omitSecs >= config.value.duration) return t('err.omitTooLong')
+  if (config.value.windowKb > 16384) return t('err.windowTooLarge')
   // 认证三要素缺一不可：iperf3 用服务端公钥加密「用户名+密码」，少任何一项都会被服务端拒绝
   if (config.value.authEnabled && (!config.value.authUsername.trim() || !config.value.authPassword || !config.value.authPublicKeyPath.trim())) return t('err.authIncomplete')
   return ''
