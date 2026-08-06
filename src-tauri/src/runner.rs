@@ -2342,7 +2342,7 @@ mod queue_tests {
             bind_ip: String::new(),
             locale: String::new(),
             port,
-            duration: 60,
+            duration: 1,
             parallel: 1,
             bandwidth: 0,
             packet_length: 131072,
@@ -2417,7 +2417,19 @@ mod queue_tests {
             }
         });
 
-        for task_id in ["tcp-bytes", "udp-bytes", "tcp-blocks"] {
+        // 复现用户队列：ping 后连续 TCP/UDP 项（含 bidir 后的下一个连接——
+        // 服务端 run_once 处理反向连接返回后需回到监听，若服务端卡在旧会话，
+        // 后续项的 complete 会缺失）
+        for task_id in [
+            "tcp-single",
+            "tcp-bidir",
+            "tcp-parallel",
+            "udp-bandwidth",
+            "udp-loss",
+            "tcp-bytes",
+            "udp-bytes",
+            "tcp-blocks",
+        ] {
             let state = app.state::<AppState>();
             let session = start_test(handle.clone(), state, base_request(task_id, port))
                 .await
