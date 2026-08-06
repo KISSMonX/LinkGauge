@@ -499,3 +499,4 @@ iperf3 服务端一次只服务一个测试。队列中相邻测试项之间，�
 - [ESnet iperf3](https://github.com/esnet/iperf)：本工具所互通线协议的定义者
 - [Tauri](https://tauri.app/)：桌面应用框架
 - [Vue](https://vuejs.org/) 与 [Chart.js](https://www.chartjs.org/)：前端和数据可视化技术栈
+- [DeepSeek](https://deepseek.com/)：参与本版本的 AI 辅助开发——iperf3 选项集、服务端改进与问题修复
