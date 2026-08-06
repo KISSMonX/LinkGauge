@@ -42,6 +42,14 @@ export interface ServerConfig {
   bindIp: string
   /** 日志 / 统计信息输出间隔（秒） */
   interval: number
+  /** 启用服务端 iperf3 认证（要求客户端提供用户名/密码凭据） */
+  authEnabled: boolean
+  /** RSA 私钥文件路径（PEM，用于解密客户端凭据，--rsa-private-key-path） */
+  authPrivateKeyPath: string
+  /** 授权用户文件路径（--authorized-users-path；每行 `用户名,sha256hex`，见 riperf3 auth.rs） */
+  authUsersPath: string
+  /** 对 iperf3 < 3.17 的客户端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP） */
+  authPkcs1Padding: boolean
 }
 
 /** 服务端页的 SSH 远程控制台连接参数（密码与私钥口令不落盘，仅在内存与窗口间流转） */

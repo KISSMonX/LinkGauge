@@ -197,6 +197,14 @@ fn validate(request: &TestRequest) -> Result<(), String> {
     if request.port == 0 {
         return Err("端口无效".into());
     }
+    // 服务端认证依赖私钥与用户文件两个路径，缺一不可（引擎在两者均提供时才校验凭据）
+    if request.mode == "server"
+        && request.server_auth_enabled
+        && (request.server_auth_private_key_path.trim().is_empty()
+            || request.server_auth_users_path.trim().is_empty())
+    {
+        return Err("启用认证后，RSA 私钥与授权用户文件路径均不能为空".into());
+    }
     Ok(())
 }
 
@@ -559,15 +567,28 @@ async fn run_engine_server(
     };
     // 界面语言运行时可变：头部日志用启动时语言，循环内每次迭代实时读取
     let locale = current_locale(&locale_handle);
+    // 认证启用时在头部日志标注：服务端持有私钥与用户文件，客户端需按「客户端 → 认证」配置
+    let auth_display = if request.server_auth_enabled {
+        tr_format!(
+            &locale,
+            "，认证已启用（私钥 {}，用户文件 {}）",
+            ", auth enabled (private key {}, users file {})",
+            request.server_auth_private_key_path,
+            request.server_auth_users_path
+        )
+    } else {
+        String::new()
+    };
     append_log(
         &log,
         &tr_format!(
             locale,
-            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务\n\n",
-            "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: bind {}, listen port {}, serving continuously\n\n",
+            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务{}\n\n",
+            "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: bind {}, listen port {}, serving continuously{}\n\n",
             riperf3::VERSION,
             bind_display,
-            request.port
+            request.port,
+            auth_display
         ),
     );
 
@@ -578,6 +599,19 @@ async fn run_engine_server(
     let mut server_builder = ServerBuilder::new();
     if !request.bind_ip.trim().is_empty() {
         server_builder = server_builder.bind_address(&request.bind_ip);
+    }
+    // 服务端认证：私钥 + 授权用户文件必须同时提供（对应 iperf3 的
+    // --rsa-private-key-path + --authorized-users-path）。凭据解密或校验失败时
+    // 引擎按协议直接关闭控制连接（见 riperf3 server.rs 的 authenticate），
+    // 客户端表现为「访问被拒」，服务端日志记录具体原因
+    if request.server_auth_enabled {
+        server_builder = server_builder
+            .rsa_private_key_path(request.server_auth_private_key_path.trim())
+            .authorized_users_path(request.server_auth_users_path.trim());
+        // iperf3 3.17 起默认 OAEP 填充，更早的客户端只认 PKCS#1 v1.5
+        if request.server_auth_pkcs1_padding {
+            server_builder = server_builder.use_pkcs1_padding(true);
+        }
     }
     server_builder = server_builder.on_interval({
         let serving = serving.clone();
@@ -1534,7 +1568,7 @@ fn emit_error(app: &AppHandle, session: &str, task: &str, message: String, path:
 
 #[cfg(test)]
 mod tests {
-    use super::client_params_for;
+    use super::{client_params_for, validate};
     use crate::models::TestRequest;
     use riperf3::TransportProtocol;
 
@@ -1558,6 +1592,10 @@ mod tests {
             auth_password: String::new(),
             auth_public_key_path: String::new(),
             auth_pkcs1_padding: false,
+            server_auth_enabled: false,
+            server_auth_private_key_path: String::new(),
+            server_auth_users_path: String::new(),
+            server_auth_pkcs1_padding: false,
         }
     }
 
@@ -1664,5 +1702,26 @@ mod tests {
         req.packet_length = 131072;
         req.udp_packet_length = 8192;
         assert_eq!(client_params_for(&req).blksize, Some(131072));
+    }
+
+    #[test]
+    fn server_auth_requires_both_files() {
+        let mut req = request("server", "server", "tcp");
+        req.duration = 0;
+        req.server_auth_enabled = true;
+        // 只填一个路径：必须拒绝（引擎在两者均提供时才校验凭据）
+        req.server_auth_private_key_path = "key.pem".into();
+        assert!(validate(&req).is_err());
+        req.server_auth_users_path = "users.csv".into();
+        assert!(validate(&req).is_ok());
+        // 未启用时缺路径不报错（保持旧行为）
+        req.server_auth_enabled = false;
+        req.server_auth_private_key_path.clear();
+        req.server_auth_users_path.clear();
+        assert!(validate(&req).is_ok());
+        // 客户端模式不受服务端认证字段影响
+        let mut client = request("tcp-single", "client", "tcp");
+        client.server_auth_enabled = true;
+        assert!(validate(&client).is_ok());
     }
 }

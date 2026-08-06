@@ -1,11 +1,75 @@
 //! riperf3 引擎端到端冒烟测试（本地回环，无需外部服务）：
 //! 1. 内嵌服务端 + 客户端跑一轮 TCP 测试，验证 on_interval 补丁的实时回调
 //!    能收到逐秒数据，且测试正常完成；
-//! 2. 空闲服务端收到中断信号后正常退出（runner.rs 服务端循环的退出条件）。
+//! 2. 空闲服务端收到中断信号后正常退出（runner.rs 服务端循环的退出条件）；
+//! 3. 服务端启用认证后：携带正确凭据的客户端完成测试，无凭据客户端被拒绝
+//!    （对应 runner.rs 服务端认证接线：私钥 + 授权用户文件）。
 
 use riperf3::{ClientBuilder, ServerBuilder, Termination, TransportProtocol};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
+
+/// 测试专用 RSA 密钥对（Node crypto 生成，仅用于本测试；公钥 SPKI PEM，
+/// 私钥 PKCS#8 PEM —— 与 riperf3 的 parse_public_key_pem / parse_private_key_pem 对应）
+const TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCaKB/qpCQdT2hu
+VV8aYqAbYORGJLJ+Gp8+A1TkyTHQRjdjNQQW7UvFG3zcs6VhpPRdNw6G+8AFEtLp
+IlCdaEjVbURwLHJmRLd8oYq2xVxCgpQwoCXr7TcSMRt6mObYVcHk2Gm6YGSVlQwT
+RyQnva0PvQmzR8Mu34Mtnv7nEffKKemgaGOhfINxXsogaaCouGa8OmFi8on9zaRm
+dmBkgx82zF6cEsJWw6WCBokspU1434Qwue9C9cZKFDv9uAKysqGbZcF0Id0w6ZzK
+8Y5MKqdCtPI5qxsb4eIRbqoOHzBdP0fcjov4vLQbGzy2jtwuDPKlKjo+yKQClgF9
+gDls7AoDAgMBAAECggEAGWcv+JWl5zfqXfbZiNqPHGk3aiD//OyG00xElWhbj2u9
+aC7DXBfXMEWwVMTnJZPDj7IpRbB/WxatWi0FGyX6jUPH+bLereBNsE8FMcs3bIpi
+FdqThTD+WJQZEsyBi015JIH5IkpiKOLP2O6/PtabNIhn7Hrl53fTq7/orMv23lcP
+jIdu2KzCr/CJwco5nlFtgIHoJoZ3Za3g4NNl1uEzAU9YNF9iqYvYhFC1RW0Muyuo
+qCRhSJ83PXuu6ju+oT6fgLRee1KaZkwpRL9TKRnE+YWO2fedkYy9LB4Cez4evt71
+V6S6tJMn4JoAieIpZY+ZAQDaZcJ0aQY/p2wBYPgz6QKBgQDSN+bSgSAfRAK3oOBg
+uhd5gblcPaLVuUu1SPnacwBSqm4vSqbGFFjGubh6j6U8eoSgN/JCwa94tVHHLAzF
+VUN+VHenGUS01wYEl9or0hbM07gCXIpfYpPw2sDgGsoZk2IN16JdaSjC/XjM77+Y
+LIpTsE5yIlmHdhWEsGdYdHpi3QKBgQC7uqyMyTN8FA/KacKUwee4ZJPbgKte/cxw
+jmprxGJ6D4QptvctUD2sGz/SDZzH1BzF72Jd5qmWoSajO/m+f8SZKMwA727yTKob
+Eu0ZIBDJI2HIWAxJkTiLMW+VB0DorwGTh1nAVf7GYeXzkW0riKAqvjsoqRd87XgS
+eIsrpeAiXwKBgQDJZo1aOCPSUJJZ42OUyDUdUE+KM/MB2BjUgin+RBeXG3mdDWRi
+ebPkEKLRqTWhj6/o4DDWDEJU30KOE4HYvSuAqORJz0eoCinV1LZNLWZyrpSojohz
+gjpCkxIeowvlHPLgWCtSWyGWTsmhbkCdRm7wZwWBC6/CvDs5eNhKQq3OcQKBgQCT
+Fcuj8vCXwtAsc3i1PMflPUhrrwCWSJwphCv1i8TshcOzO1um8Tug4Si711aDarmw
+i8Kyd8tf7ZtsQc2HaGwM5F4STYbL6S1OUSHbkbgVH9e5NONLsLBwvqcCSNCefp/p
+ix7TB426uXGFyOeUOFPlqW6IiROSGiz9q9y+shROWQKBgBvoa6nao/NDN4at7q/w
+0bdztWujANUkxNgk6Xr+IIXf+BuXnpJXEGu/4aclw0JCptUlqhNaHmc8VuVwWSJ1
+lFSUcTsBkpek9JpyFXToJ7tkU4cwe62Z7T3XbYjmNa7dSQdicx8rF2OLnqlP9l2g
+8HFnBp7Gnjxh5NP9nSIl6NOd
+-----END PRIVATE KEY-----";
+
+const TEST_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmigf6qQkHU9oblVfGmKg
+G2DkRiSyfhqfPgNU5Mkx0EY3YzUEFu1LxRt83LOlYaT0XTcOhvvABRLS6SJQnWhI
+1W1EcCxyZkS3fKGKtsVcQoKUMKAl6+03EjEbepjm2FXB5NhpumBklZUME0ckJ72t
+D70Js0fDLt+DLZ7+5xH3yinpoGhjoXyDcV7KIGmgqLhmvDphYvKJ/c2kZnZgZIMf
+NsxenBLCVsOlggaJLKVNeN+EMLnvQvXGShQ7/bgCsrKhm2XBdCHdMOmcyvGOTCqn
+QrTyOasbG+HiEW6qDh8wXT9H3I6L+Ly0Gxs8to7cLgzypSo6PsikApYBfYA5bOwK
+AwIDAQAB
+-----END PUBLIC KEY-----";
+
+/// 授权用户文件内容：`testuser,sha256("{testuser}testpass")`（格式见 riperf3 auth.rs）
+const TEST_USERS_FILE: &str =
+    "testuser,6d30222cf5cb9f09b0175e1dbfbc0b6fef34fc08c2fdf02682e0c2450c9c7170\n";
+
+/// 把测试密钥/用户文件写入临时目录，返回目录路径（测试结束时清理）
+fn write_auth_fixtures() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "linkgauge-auth-fixtures-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("key.pem"), TEST_PRIVATE_KEY_PEM).unwrap();
+    std::fs::write(dir.join("pub.pem"), TEST_PUBLIC_KEY_PEM).unwrap();
+    std::fs::write(dir.join("users.csv"), TEST_USERS_FILE).unwrap();
+    dir
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_server_roundtrip_with_live_intervals() {
@@ -133,4 +197,81 @@ async fn on_connect_hooks_fire_with_peer_address() {
 
     let server_outcome = server_task.await.unwrap().unwrap();
     assert_eq!(server_outcome.termination, Termination::Completed);
+}
+
+/// 服务端启用认证（私钥 + 授权用户文件）：带正确凭据的客户端跑通测试，
+/// 无凭据客户端被拒绝 —— 验证 runner.rs 的服务端认证接线与引擎握手
+#[tokio::test(flavor = "multi_thread")]
+async fn authenticated_client_succeeds_unauthenticated_denied() {
+    let dir = write_auth_fixtures();
+    let key_path = dir.join("key.pem");
+    let users_path = dir.join("users.csv");
+    let pub_path = dir.join("pub.pem");
+
+    // —— 正例：客户端携带用户名/密码/公钥，测试正常完成 ——
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .rsa_private_key_path(key_path.to_str().unwrap())
+        .authorized_users_path(users_path.to_str().unwrap())
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Tcp)
+        .duration(1)
+        .interval(1.0)
+        .json_output(true)
+        .emit_output(false)
+        .username("testuser")
+        .password("testpass")
+        .rsa_public_key_path(pub_path.to_str().unwrap())
+        .build()
+        .unwrap();
+    let outcome = client.run().await.unwrap();
+    assert_eq!(outcome.termination, Termination::Completed);
+    let server_outcome = server_task.await.unwrap().unwrap();
+    assert_eq!(server_outcome.termination, Termination::Completed);
+
+    // —— 负例：不携带凭据的客户端必须被拒绝（认证服务端直接关闭控制连接） ——
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .rsa_private_key_path(key_path.to_str().unwrap())
+        .authorized_users_path(users_path.to_str().unwrap())
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Tcp)
+        .duration(1)
+        .interval(1.0)
+        .json_output(true)
+        .emit_output(false)
+        .build()
+        .unwrap();
+    assert!(
+        client.run().await.is_err(),
+        "无凭据客户端应被认证服务端拒绝"
+    );
+    // 服务端同样以错误结束（拒绝后不再接受数据流，run_once 返回错误）
+    assert!(server_task.await.unwrap().is_err());
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

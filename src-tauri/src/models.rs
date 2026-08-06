@@ -41,6 +41,22 @@ pub struct TestRequest {
     /// 对 iperf3 < 3.17 的服务端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP）
     #[serde(default)]
     pub auth_pkcs1_padding: bool,
+    // —— 服务端 iperf3 认证（要求客户端提供 --username/--password 凭据）——
+    // 与客户端认证字段分开：服务端持有的是 RSA 私钥与授权用户文件，不涉及用户名/密码。
+    // 全部 default，旧版前端不传时等价于不启用 ——
+    /// 是否启用服务端认证（仅服务端模式使用）
+    #[serde(default)]
+    pub server_auth_enabled: bool,
+    /// 服务端 RSA 私钥文件路径（PEM，用于解密客户端凭据，对应 --rsa-private-key-path）
+    #[serde(default)]
+    pub server_auth_private_key_path: String,
+    /// 授权用户文件路径（对应 --authorized-users-path；格式见 riperf3 auth.rs：
+    /// 每行 `用户名,sha256hex`，哈希为 sha256("{用户名}{密码}")，# 开头为注释）
+    #[serde(default)]
+    pub server_auth_users_path: String,
+    /// 对 iperf3 < 3.17 的客户端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP）
+    #[serde(default)]
+    pub server_auth_pkcs1_padding: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

@@ -26,6 +26,10 @@ const emit = defineEmits<{
   'pick-nic-server': []
   /** 选择 iperf3 认证用的服务端 RSA 公钥文件 */
   'pick-public-key': []
+  /** 选择服务端认证用的 RSA 私钥文件 */
+  'pick-auth-key': []
+  /** 选择服务端认证用的授权用户文件 */
+  'pick-auth-users': []
   'save-custom-length': [protocol: 'tcp' | 'udp', value: number]
   /** 标签页被拖拽分离为独立窗口 */
   detach: [side: 'client' | 'server']
@@ -236,6 +240,16 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <label><span>{{ t('srv.interval') }}</span><span class="field"><input type="number" :value="serverConfig.interval" min="1" max="60" :disabled="serverRunning" @input="setServer('interval', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('srv.intervalNote') }}</small></span></label>
       <p class="server-hint">{{ t('srv.hint') }}</p>
       <p class="runtime-state available">{{ t('cfg.engineReady') }}</p>
+    </section>
+    <section class="config-section auth-section">
+      <div class="section-title"><h2>{{ t('srv.auth') }}</h2></div>
+      <label class="log-option"><input type="checkbox" :checked="serverConfig.authEnabled" :disabled="serverRunning" @change="setServer('authEnabled', ($event.target as HTMLInputElement).checked)" /><span>{{ t('srv.authEnable') }}</span></label>
+      <template v-if="serverConfig.authEnabled">
+        <label><span>{{ t('srv.authKey') }}</span><span class="ip-row"><input :value="serverConfig.authPrivateKeyPath" :disabled="serverRunning" :placeholder="t('srv.authKeyPlaceholder')" @input="setServer('authPrivateKeyPath', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="serverRunning" :title="t('cfg.authKeyBrowse')" @click="emit('pick-auth-key')">{{ t('cfg.authKeyBrowse') }}</button></span></label>
+        <label><span>{{ t('srv.authUsers') }}</span><span class="ip-row"><input :value="serverConfig.authUsersPath" :disabled="serverRunning" :placeholder="t('srv.authUsersPlaceholder')" @input="setServer('authUsersPath', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="serverRunning" :title="t('cfg.authKeyBrowse')" @click="emit('pick-auth-users')">{{ t('cfg.authKeyBrowse') }}</button></span></label>
+        <label class="log-option"><input type="checkbox" :checked="serverConfig.authPkcs1Padding" :disabled="serverRunning" @change="setServer('authPkcs1Padding', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.authPkcs1') }}</span></label>
+        <p class="server-hint">{{ t('srv.authHint') }}</p>
+      </template>
     </section>
     <div class="config-actions">
       <button class="primary" :disabled="serverRunning" @click="emit('start-server')"><Icon name="play" />{{ t('srv.start') }}</button>

@@ -50,7 +50,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - JSON configuration import, export, and local persistence
 - HTML and PDF report generation
 - Pure-Rust riperf3 engine: interoperable with standard iperf3 servers, no runtime dependencies
-- iperf3 authentication (username / password / RSA public key, with PKCS#1 padding for pre-3.17 servers); the password is never persisted
+- iperf3 authentication in both directions — the client supplies username / password / RSA public key (with PKCS#1 padding for pre-3.17 peers), and the server can require credentials via its own RSA private key and an authorized-users file; passwords are never persisted
 - Automatic retry when the server is busy, so adjacent queue items don't knock each other out
 - Automated CI checks and tagged release builds for Windows x64, macOS x64 / arm64, and Linux x64 / arm64
 
@@ -417,10 +417,12 @@ Against servers older than 3.7 the `bidirectional` parameter is silently ignored
 
 ### Authentication
 
-If the peer iperf3 runs with `--rsa-private-key-path` and `--authorized-users-path`, enable authentication in the client's "Authentication" section and supply a username, password, and the path to the server's RSA public key.
+**Client side:** If the peer iperf3 runs with `--rsa-private-key-path` and `--authorized-users-path`, enable authentication in the client's "Authentication" section and supply a username, password, and the path to the server's RSA public key.
 
 - iperf3 3.17 and later default to OAEP padding; tick "Use PKCS#1 padding" for older servers.
 - **The password is never written to local storage and is not included in exported config JSON** — re-enter it after restarting the app. The username and public key path are not secret and are saved normally.
+
+**Server side:** The server view has its own **Server Authentication** section. Enable it and pick the RSA private key (`--rsa-private-key-path`) plus an authorized-users file (`--authorized-users-path`); every client must then authenticate before any test runs, and unauthorized clients are refused. The users file lists one user per line as `username,sha256hex` — the hash of `sha256("{username}{password}")`, `#` comments allowed. Clients authenticate with the same username/password and must hold the server's matching public key (see "Client side" above). The key and users file paths are not secrets and are saved with the other server settings.
 
 ### Automatic retry when the server is busy
 
@@ -429,7 +431,7 @@ An iperf3 server serves one test at a time. Between adjacent items in the queue 
 ### Other known differences
 
 - TCP retransmission counts are always 0 on Windows (`TCP_INFO` is unavailable there).
-- Server mode does not support authentication yet; it is configurable on the client side only.
+- The authorized-users file uses riperf3's `username,sha256hex` line format, not the JSON format of iperf3's official tooling.
 
 ## Troubleshooting
 
