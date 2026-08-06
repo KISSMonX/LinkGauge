@@ -45,6 +45,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Bandwidth presets (100 / 1000 Mbps, unlimited) that default to the current NIC link speed
 - Warm-up omit period (`-O`), TCP socket buffer size (`-w`, 0 = auto), client source port (`--cport`), and explicit IPv4/IPv6 selection client options
 - DSCP marking (`--dscp`) and byte/block-limited tests (`-n` / `-k`, ending when the amount is transferred) client options
+- TCP congestion-control algorithm (`-C`, Linux/FreeBSD) and UDP don't-fragment (`--dont-fragment`, IPv4) client options
 - Optional fetch of the peer server's own output (`--get-server-output`), appended to the test log and report
 - Packet-length presets (TCP up to 1 MB, UDP up to 64 KB), with a custom length persisted to the config file
 - Real-time INFO, WARN, and ERROR logs with filtering
@@ -424,6 +425,8 @@ Against servers older than 3.7 the `bidirectional` parameter is silently ignored
 - **IP version defaults to auto**; force IPv4 or IPv6 when the server address is a hostname on a dual-stack host.
 - **No DSCP marking by default** (0 = unset, like iperf3 without `--dscp`); values 1–63 map to the TOS upper 6 bits.
 - **Byte/block-limited tests are off by default**; when enabled (`-n` / `-k`) they end the run once the amount is transferred and ignore the duration, and the warm-up omit period is rejected, like the iperf3 CLI.
+- **Congestion-control algorithm is unset by default**; the `-C` option applies on Linux/FreeBSD and is rejected with a clear message elsewhere.
+- **UDP don't-fragment is off by default**; when enabled it sets the DF flag on IPv4 UDP datagrams.
 
 ### Authentication
 

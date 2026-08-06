@@ -56,6 +56,14 @@ pub struct TestRequest {
     /// 仅客户端模式使用）
     #[serde(default)]
     pub dscp: u32,
+    /// TCP 拥塞控制算法（空 = 不设置，对应 iperf3 -C；仅 Linux/FreeBSD 生效，
+    /// 其他平台引擎静默忽略）
+    #[serde(default)]
+    pub congestion_algo: String,
+    /// UDP 数据报设置禁止分片标志（对应 iperf3 --dont-fragment；
+    /// 仅 IPv4，Unix 平台生效）
+    #[serde(default)]
+    pub udp_dont_fragment: bool,
     // —— iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path
     // 启动时必需）。全部 default，旧版前端不传时等价于不启用 ——
     /// 认证用户名；为空表示不启用认证
