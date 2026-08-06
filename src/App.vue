@@ -663,19 +663,30 @@ async function stopServer() {
 let watchdogTimer: number | undefined
 /** 首事件探针定时器：任务启动后若 10 秒内收不到任何本任务事件，直接判失败（见 armWatchdog） */
 let firstEventTimer: number | undefined
-/** 任务类型感知的硬时限：按量/块/ping 30 秒；按时长任务 duration+30 秒。
- *  硬时限从任务启动起算、不可被事件续期——任何卡死（invoke 挂起、事件丢失、
- *  运行中途挂起）都必然超时，标记失败并继续下一项。此前的事件续期制在
- *  「任务持续发事件但永不完成」时看门狗被无限续期，队列静默卡死 */
+/** 看门狗武装时的队列游标：超时触发条件 = 队列尚未越过该游标（越过 = 任务已正常
+ *  完成/失败并推进）。按游标而非当前任务 id 判定——即使游标被任何异常回退，
+ *  超时也必然触发，任何卡死都无法静默持续 */
+let watchdogArmedIndex = -1
+let firstEventArmedIndex = -1
+/** 任务类型感知的硬时限：从任务启动起算、不可被事件续期——任何卡死（invoke
+ *  挂起、事件丢失、运行中途挂起）都必然超时，标记失败并继续下一项。按量/块
+ *  任务若配置了带宽，按 传输量/带宽 估算预期时长 + 15 秒（下限 30 秒），避免
+ *  慢速链路上的大传输量被误杀；ping 30 秒；按时长任务 duration+30 秒 */
 function taskLimitMs(taskId: string) {
-  const fast = taskId === 'ping' || taskId === 'tcp-bytes' || taskId === 'udp-bytes' || taskId === 'tcp-blocks'
-  return fast ? 30_000 : (config.value.duration + 30) * 1000
+  if (taskId === 'tcp-bytes' || taskId === 'udp-bytes' || taskId === 'tcp-blocks') {
+    const bw = config.value.bandwidth
+    const expectedMs = bw > 0 ? (config.value.transferAmount * 8 / bw) * 1000 : 0
+    return Math.max(30_000, expectedMs + 15_000)
+  }
+  if (taskId === 'ping') return 30_000
+  return Math.max((config.value.duration + 30) * 1000, 30_000)
 }
 function armWatchdog(taskId: string) {
   clearTimeout(watchdogTimer)
   const limitMs = taskLimitMs(taskId)
+  watchdogArmedIndex = queueIndex.value
   watchdogTimer = window.setTimeout(() => {
-    if (!clientRunning.value || queue.value[queueIndex.value] !== taskId) return
+    if (!clientRunning.value || queueIndex.value > watchdogArmedIndex) return
     log('ERROR', `任务超时未收到完成事件（看门狗）：${taskId}`)
     failCurrent(`任务 ${taskId} 超过 ${Math.round(limitMs / 1000)} 秒未完成（超时，标记失败并继续下一项）`)
   }, limitMs)
@@ -684,8 +695,9 @@ function armWatchdog(taskId: string) {
   // 都没有」的卡死形态）——直接判失败继续队列；迟到事件由任务匹配安全丢弃，
   // 不会误伤
   clearTimeout(firstEventTimer)
+  firstEventArmedIndex = queueIndex.value
   firstEventTimer = window.setTimeout(() => {
-    if (!clientRunning.value || queue.value[queueIndex.value] !== taskId) return
+    if (!clientRunning.value || queueIndex.value > firstEventArmedIndex) return
     failCurrent(t('log.taskNoStart', { task: itemLabel(taskId) }))
   }, 10_000)
 }
@@ -699,9 +711,10 @@ let passiveTimer: number | undefined
 function armPassiveWatchdog(taskId: string) {
   clearTimeout(passiveTimer)
   const limitMs = taskLimitMs(taskId)
+  const armedIndex = queueIndex.value
   passiveTimer = window.setTimeout(() => {
     if (side.value !== 'hub' || !clientRunning.value || driver.value === ownLabel) return
-    if (queue.value[queueIndex.value] !== taskId) return
+    if (queueIndex.value > armedIndex) return
     const cur = items.value.find((i) => i.id === taskId)
     if (!cur || cur.status !== 'running') return
     driver.value = ownLabel
