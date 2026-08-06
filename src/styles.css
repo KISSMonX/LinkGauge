@@ -75,8 +75,8 @@
   /* 测试项悬停介绍：亮色主题用深底浅字 */
   --tooltip-bg: #242d3d;
   --tooltip-text: #eef2f7;
-  /* info 图标「i」标记色：亮色主题黑底白字对比（圆为蓝色） */
-  --info-icon-mark: #101828;
+  /* info 图标「i」标记色：亮暗主题统一白色（圆为蓝色） */
+  --info-icon-mark: #ffffff;
 }
 [data-theme='dark'] {
   color-scheme: dark;
