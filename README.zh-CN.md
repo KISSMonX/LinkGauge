@@ -383,8 +383,8 @@ macOS 与 Linux 上必须显式传 `--bundles`，因为 `tauri.conf.json` 的 `b
 日志文件名格式（服务端与客户端分开记录）：
 
 ```text
-Server-<本机IP>-<端口>-<yyyyMMddHHmmss>-<完成|未完成>.log      # 服务端
-Client-<本机IP>-<服务端IP>-<测试名称>-<yyyyMMddHHmmss>-<完成|未完成>.log   # 客户端
+服务端-<本机IP>-<端口>-<yyyyMMddHHmmss>-<完成|未完成>.log   # 服务端（前缀随界面语言：服务端 / Server）
+客户端-<本机IP>-<服务端IP>-<yyyyMMddHHmmss>.log            # 客户端：一轮队列的所有测试项写入同一个运行日志（前缀随界面语言：客户端 / Client）
 ```
 
 ## 测试引擎（riperf3）

@@ -394,6 +394,9 @@ struct TestLog {
     file: Arc<Mutex<StdFile>>,
     working_path: std::path::PathBuf,
     base_name: String,
+    /// 客户端运行日志：一轮队列的所有测试项共用并持续追加，finish 时不重命名；
+    /// false = 服务端单会话文件，完成时重命名为 -completed/-incomplete
+    shared: bool,
 }
 type SessionLog = Arc<TestLog>;
 
@@ -417,13 +420,6 @@ async fn run_engine_client<R: tauri::Runtime>(
     };
     // 界面语言运行时可变：日志输出点实时读取，切换语言后立即生效
     let locale = current_locale(&locale_handle);
-    // 客户端运行汇总：同一 runId 的一轮队列共用「客户端汇总」文件，每项记录
-    // 测试项目与最终结果（结果在 finish_engine 写入）
-    append_run_summary(
-        &app,
-        &request,
-        &tr_format!(locale, "测试项目：{}", "Test item: {}", task_name),
-    );
     let header = tr_format!(
         &locale,
         "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: {}, 端口 {}, 时长 {}s, 并发 {}, 带宽 {}, 报文长度 {}, 输出周期 {}s\n",
@@ -446,31 +442,15 @@ async fn run_engine_client<R: tauri::Runtime>(
         request.interval,
     );
     append_log(&log, &header);
-    // 客户端运行汇总：执行过程（引擎/参数、执行行、间隔输出、重试告警）与
-    // 最终结果一并记录，一个文件即可还原整轮测试的执行过程
-    append_run_summary(&app, &request, &header);
-    emit_log(
-        &app,
-        &session_id,
-        &request.task_id,
-        "INFO",
-        tr_format!(
-            &locale,
-            "执行：riperf3 -c {}（内嵌引擎）",
-            "Running: riperf3 -c {} (embedded engine)",
-            request.server_ip
-        ),
+    // 执行行同时写入运行日志（此前只发事件，运行日志缺执行过程）
+    let exec_line = tr_format!(
+        &locale,
+        "执行：riperf3 -c {}（内嵌引擎）",
+        "Running: riperf3 -c {} (embedded engine)",
+        request.server_ip
     );
-    append_run_summary(
-        &app,
-        &request,
-        &tr_format!(
-            &locale,
-            "执行：riperf3 -c {}（内嵌引擎）",
-            "Running: riperf3 -c {} (embedded engine)",
-            request.server_ip
-        ),
-    );
+    append_log(&log, &format!("[INFO] {exec_line}"));
+    emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
 
     let params = client_params_for(&request);
     // iperf3 服务端一次只服务一个测试：队列里上一项刚结束时对端可能尚未回到监听
@@ -523,7 +503,6 @@ async fn run_engine_client<R: tauri::Runtime>(
                     BUSY_RETRY_MAX
                 );
                 append_log(&log, &format!("[WARN] {message}"));
-                append_run_summary(&app, &request, &format!("[WARN] {message}"));
                 emit_log(&app, &session_id, &request.task_id, "WARN", message);
                 // 等待期间仍要响应「停止测试」，否则用户得干等完整个退避
                 let mut wait_rx = rx.clone();
@@ -570,7 +549,6 @@ fn engine_client_builder<R: tauri::Runtime>(
     let hook_task = request.task_id.clone();
     let hook_log = log.clone();
     let hook_locale = locale_handle.clone();
-    let hook_request = request.clone();
     let on_interval = move |interval: &riperf3::json_report::Interval| {
         if interval.sum.omitted {
             return;
@@ -591,7 +569,6 @@ fn engine_client_builder<R: tauri::Runtime>(
             format_interval_line(&current_locale(&hook_locale), second, sum)
         );
         append_log(&hook_log, &line);
-        append_run_summary(&hook_app, &hook_request, &line);
     };
 
     let mut builder = ClientBuilder::new(&request.server_ip)
@@ -1244,12 +1221,6 @@ async fn run_ping<R: tauri::Runtime>(
     let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
         return;
     };
-    // 客户端运行汇总：与引擎项一样，记录测试项目与最终结果
-    append_run_summary(
-        &app,
-        &request,
-        &tr_format!(locale, "测试项目：{}", "Test item: {}", task_name),
-    );
     let args = if cfg!(windows) {
         vec!["-n".into(), "4".into(), request.server_ip.clone()]
     } else {
@@ -1257,7 +1228,6 @@ async fn run_ping<R: tauri::Runtime>(
     };
     let exec_line = tr_format!(locale, "执行：ping {}", "Running: ping {}", args.join(" "));
     append_log(&log, &format!("[INFO] {exec_line}"));
-    append_run_summary(&app, &request, &format!("[INFO] {exec_line}"));
     emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
 
     let mut command = Command::new("ping");
@@ -1318,7 +1288,6 @@ async fn run_ping<R: tauri::Runtime>(
                     let level = if is_error { "WARN" } else { "INFO" };
                     let output_line = format!("[{level}] {line}");
                     append_log(&log, &output_line);
-                    append_run_summary(&app, &request, &output_line);
                     emit_log(&app, &session_id, &request.task_id, level, line.clone());
                     if let Some(metric) = parse_ping_metric(&line) {
                         emit_metric(&app, &session_id, &request.task_id, metric);
@@ -1349,17 +1318,6 @@ async fn run_ping<R: tauri::Runtime>(
                 tr(&locale, "未完成", "incomplete")
             }
         ),
-    );
-    append_run_summary(
-        &app,
-        &request,
-        if final_stopped {
-            tr(&locale, "测试结果: 手动停止", "Result: manual stop")
-        } else if final_success {
-            tr(&locale, "测试结果: 完成", "Result: completed")
-        } else {
-            tr(&locale, "测试结果: 未完成", "Result: incomplete")
-        },
     );
     if final_stopped {
         finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
@@ -1419,24 +1377,40 @@ async fn setup_log<R: tauri::Runtime>(
     task_name: &str,
 ) -> Option<SessionLog> {
     let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
-    // 服务端与客户端日志分开记录：服务端-{本机IP}-{端口}-{时间} /
-    // Client-{本机IP}-{对端IP}-{测试项}-{时间}；服务端前缀随界面语言
-    // （服务端 / Server），与客户端汇总文件的本地化命名一致
-    let base_name = if request.mode == "server" || request.task_id == "server" {
-        format!(
-            "{}-{}-{}-{}",
-            tr(&request.locale, "服务端", "Server"),
-            safe_name(local_ip),
-            request.port,
-            stamp
+    // 服务端与客户端日志分开记录。客户端不再按测试项分文件：一轮队列的所有
+    // 测试项（同一 runId）写入同一个运行日志 客户端-{本机IP}-{对端IP}-{运行时间}，
+    // 前缀随界面语言（客户端 / Client）；无 runId 时退化为本次会话时间戳。
+    // 服务端保持单会话文件 服务端-{本机IP}-{端口}-{时间}
+    let (shared, base_name) = if request.mode == "server" || request.task_id == "server" {
+        (
+            false,
+            format!(
+                "{}-{}-{}-{}",
+                tr(&request.locale, "服务端", "Server"),
+                safe_name(local_ip),
+                request.port,
+                stamp
+            ),
         )
     } else {
-        format!(
-            "Client-{}-{}-{}-{}",
-            safe_name(local_ip),
-            safe_name(&request.server_ip),
-            safe_name(task_name),
-            stamp
+        let run_stamp = if request.run_id == 0 {
+            stamp.clone()
+        } else {
+            Local
+                .timestamp_millis_opt(request.run_id)
+                .single()
+                .map(|t| t.format("%Y%m%d%H%M%S").to_string())
+                .unwrap_or_else(|| stamp.clone())
+        };
+        (
+            true,
+            format!(
+                "{}-{}-{}-{}",
+                tr(&request.locale, "客户端", "Client"),
+                safe_name(local_ip),
+                safe_name(&request.server_ip),
+                run_stamp
+            ),
         )
     };
     let log_dir = app
@@ -1460,17 +1434,22 @@ async fn setup_log<R: tauri::Runtime>(
         );
         return None;
     }
-    // 运行中的工作文件名后缀随界面语言（进行中 / in progress），完成时由
-    // finish_log 重命名为 -completed / -incomplete
-    let working_path = log_dir.join(format!(
-        "{}-{}.log",
-        base_name,
-        tr(&request.locale, "进行中", "in progress")
-    ));
+    // 共享运行日志直接以最终文件名存在（无「进行中」后缀，也不重命名）；
+    // 服务端保留 进行中/in progress 工作名，完成时由 finish_log 重命名
+    let working_path = if shared {
+        log_dir.join(format!("{base_name}.log"))
+    } else {
+        log_dir.join(format!(
+            "{}-{}.log",
+            base_name,
+            tr(&request.locale, "进行中", "in progress")
+        ))
+    };
     let file = match OpenOptions::new()
         .create(true)
-        .truncate(true)
-        .write(true)
+        .append(shared) // 共享日志跨测试项追加；服务端会话文件从零开始
+        .write(!shared)
+        .truncate(!shared)
         .open(&working_path)
         .await
     {
@@ -1506,6 +1485,7 @@ async fn setup_log<R: tauri::Runtime>(
         file: Arc::new(Mutex::new(file.into_std().await)),
         working_path,
         base_name,
+        shared,
     });
     append_log(&log, &header);
     Some(log)
@@ -1515,43 +1495,6 @@ async fn setup_log<R: tauri::Runtime>(
 /// 一样逐行呈现（此前只写内容不换行，多行输出在文件里粘成一行）
 fn append_log(log: &SessionLog, line: &str) {
     if let Ok(mut file) = log.file.lock() {
-        let _ = file.write_all(line.as_bytes());
-        let _ = file.write_all(b"\n");
-    }
-}
-
-/// 追加一行到客户端运行汇总文件：同一 runId 的一轮队列测试共用一个文件（类似
-/// 服务端一次会话一个 Server-*.log）。前端每轮开始生成 startedAt 作为 runId；
-/// run_id 为 0（旧前端/预览）或路径不可用时静默跳过——汇总文件是补充信息，
-/// 不因写入失败影响测试本身
-fn append_run_summary<R: tauri::Runtime>(app: &AppHandle<R>, request: &TestRequest, line: &str) {
-    if request.run_id == 0 {
-        return;
-    }
-    let Some(stamp) = Local
-        .timestamp_millis_opt(request.run_id)
-        .single()
-        .map(|t| t.format("%Y%m%d%H%M%S").to_string())
-    else {
-        return;
-    };
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("linkgauge"))
-        .join("tests");
-    let name = format!(
-        "{}-{}-{}-{}.log",
-        tr(&request.locale, "客户端汇总", "Client-Summary"),
-        safe_name(&request.local_ip),
-        safe_name(&request.server_ip),
-        stamp
-    );
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join(name))
-    {
         let _ = file.write_all(line.as_bytes());
         let _ = file.write_all(b"\n");
     }
@@ -1633,11 +1576,6 @@ async fn finish_engine<R: tauri::Runtime>(
                 };
                 (message, false)
             };
-            append_run_summary(
-                app,
-                request,
-                tr(locale, "测试结果: 未完成", "Result: incomplete"),
-            );
             fail_engine(app, session_id, task_id, log, locale, &message, fatal).await;
         }
         Ok(outcome) => {
@@ -1654,7 +1592,6 @@ async fn finish_engine<R: tauri::Runtime>(
                 ),
             );
             append_engine_summary(log, report, locale);
-            append_run_summary(app, request, &engine_summary_lines(report, locale));
             // --get-server-output：服务端视角的汇总文本（标准 iperf3 服务端为
             // 文本模式时才会产生；本机 LinkGauge 服务端是 JSON 模式，通常为空）。
             // 写入测试日志并广播一条日志事件，随日志一并进入报告
@@ -1684,28 +1621,13 @@ async fn finish_engine<R: tauri::Runtime>(
             match outcome.termination {
                 Termination::Completed => {
                     append_log(log, tr(locale, "测试结果: 完成", "Result: completed"));
-                    append_run_summary(
-                        app,
-                        request,
-                        tr(locale, "测试结果: 完成", "Result: completed"),
-                    );
                     finish_ok(app, session_id, task_id, log, "success").await;
                 }
                 Termination::Interrupted => {
                     append_log(log, tr(locale, "测试结果: 手动停止", "Result: manual stop"));
-                    append_run_summary(
-                        app,
-                        request,
-                        tr(locale, "测试结果: 手动停止", "Result: manual stop"),
-                    );
                     finish_ok(app, session_id, task_id, log, "stopped").await;
                 }
                 Termination::ServerTerminated => {
-                    append_run_summary(
-                        app,
-                        request,
-                        tr(locale, "测试结果: 未完成", "Result: incomplete"),
-                    );
                     let message = tr(
                         locale,
                         "服务端主动终止了测试",
@@ -1715,11 +1637,6 @@ async fn finish_engine<R: tauri::Runtime>(
                     fail_engine(app, session_id, task_id, log, locale, &message, false).await;
                 }
                 Termination::ServerError(msg) => {
-                    append_run_summary(
-                        app,
-                        request,
-                        tr(locale, "测试结果: 未完成", "Result: incomplete"),
-                    );
                     let message = tr_format!(
                         locale,
                         "服务端返回错误：{}",
@@ -1729,11 +1646,6 @@ async fn finish_engine<R: tauri::Runtime>(
                     fail_engine(app, session_id, task_id, log, locale, &message, false).await;
                 }
                 other => {
-                    append_run_summary(
-                        app,
-                        request,
-                        tr(locale, "测试结果: 未完成", "Result: incomplete"),
-                    );
                     let message = tr_format!(
                         locale,
                         "测试异常结束：{:?}",
@@ -1917,6 +1829,10 @@ async fn finish_log(log: &SessionLog, success: bool) -> String {
     if let Ok(mut file) = log.file.lock() {
         let _ = file.flush();
     }
+    if log.shared {
+        // 客户端运行日志：整轮队列持续追加，不重命名
+        return log.working_path.to_string_lossy().to_string();
+    }
     let final_path = log.working_path.with_file_name(format!(
         "{}-{}.log",
         log.base_name,
@@ -2082,6 +1998,7 @@ mod tests {
             file: Arc::new(Mutex::new(file)),
             working_path: path.clone(),
             base_name: "test".into(),
+            shared: false,
         });
         append_log(&log, "[INFO] 第一行");
         append_log(&log, "[INFO] 第二行");
@@ -2664,13 +2581,13 @@ mod queue_tests {
             .map(|e| e.path())
             .find(|p| {
                 let name = p.file_name().unwrap_or_default().to_string_lossy();
-                name.starts_with("客户端汇总-") && name.contains(&format!("-{run_stamp}.log"))
+                name.starts_with("客户端-") && name.contains(&format!("-{run_stamp}.log"))
             })
             .expect("应生成客户端汇总文件");
         let content = std::fs::read_to_string(&summary_file).unwrap();
         assert!(
-            content.contains("测试项目：TCP单向带宽"),
-            "汇总文件应包含测试项目行"
+            content.contains("测试项目: TCP单向带宽"),
+            "运行日志应包含测试项目行"
         );
         assert!(
             content.contains("执行：riperf3"),

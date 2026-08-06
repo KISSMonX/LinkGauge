@@ -386,8 +386,8 @@ The peer must be reachable, its firewall must allow the configured TCP/UDP port,
 Log filenames follow this pattern (server and client logs are recorded separately):
 
 ```text
-Server-<local-ip>-<port>-<yyyyMMddHHmmss>-<completed|incomplete>.log   # server
-Client-<local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<completed|incomplete>.log   # client
+Server-<local-ip>-<port>-<yyyyMMddHHmmss>-<completed|incomplete>.log   # server (prefix follows the UI language: 服务端 / Server)
+Client-<local-ip>-<server-ip>-<yyyyMMddHHmmss>.log            # client: all test items of one run share a single run log (prefix follows the UI language: 客户端 / Client)
 ```
 
 ## Test Engine (riperf3)
