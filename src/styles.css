@@ -75,6 +75,8 @@
   /* 测试项悬停介绍：亮色主题用深底浅字 */
   --tooltip-bg: #242d3d;
   --tooltip-text: #eef2f7;
+  /* info 图标「i」标记色：亮色主题黑底白字对比（圆为蓝色） */
+  --info-icon-mark: #101828;
 }
 [data-theme='dark'] {
   color-scheme: dark;
@@ -151,6 +153,8 @@
   /* 测试项悬停介绍：暗色主题用浅底深字 */
   --tooltip-bg: #e9edf4;
   --tooltip-text: #1c2433;
+  /* info 图标「i」标记色：暗色主题用白色（圆为亮蓝） */
+  --info-icon-mark: #ffffff;
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 1180px; min-height: 760px; background: var(--bg); color: var(--text); font-size: 14px; overflow: hidden; }
@@ -223,9 +227,9 @@ h2,h3,p { margin-top: 0; }
 .parameters > label { min-height: 32px; display: grid; grid-template-columns: 105px 1fr auto; align-items: center; gap: 8px; }
 .parameters input:not([type=checkbox]), .parameters select { width: 100%; height: 28px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 8px; background: var(--input-bg); color: var(--text-input); }
 .parameters input:focus, .parameters select:focus { outline: 2px solid var(--blue-focus)33; border-color: var(--blue-focus); }
-/* 参数项注释图标：主题色实心圆底 + 面板色「i」（亮暗主题自动对比），悬停提亮 */
+/* 参数项注释图标：主题色实心圆底 + 「i」按主题取黑/白（亮=黑，暗=白），悬停提亮 */
 .info-icon { flex-shrink: 0; color: var(--blue); cursor: help; }
-.info-icon .i-mark { fill: none; stroke: var(--panel-bg); stroke-width: 2.2; }
+.info-icon .i-mark { fill: none; stroke: var(--info-icon-mark); stroke-width: 2.2; }
 .info-icon:hover { filter: brightness(1.2); }
 .parameters .log-option { display: flex; gap: 8px; grid-template-columns: none; margin-top: 2px; font-size: 13px; }
 .runtime-state { margin: 4px 0 0; padding: 7px 9px; border-radius: 4px; font-size: 12px; }.runtime-state.available { color: var(--green); background: var(--green-bg); }.runtime-state.missing { color: var(--red-alert); background: var(--red-bg); }
