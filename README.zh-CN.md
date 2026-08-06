@@ -390,7 +390,7 @@ Client-<本机IP>-<服务端IP>-<测试名称>-<yyyyMMddHHmmss>-<完成|未完�
 
 - 引擎：[riperf3](https://github.com/therealevanhenry/riperf3) —— 从零实现、与 iperf3 线协议兼容的 Rust 实现，vendor 于 `vendor/riperf3`（上游 HEAD，版本 0.9.0-dev）。
 - 引擎**在应用进程内运行**：不安装、不捆绑、不解析、不启动任何 iperf3 可执行文件。逐秒指标通过类型化回调到达；测试可通过 watch 通道优雅中断。
-- **本地补丁：** （1）上游只在测试结束后才暴露逐秒区间数据，因此新增了 `on_interval` 实时回调（见 `vendor/riperf3` 中 `IntervalReporterConfig`、`ClientBuilder::on_interval`、`ServerBuilder::on_interval`）；（2）最终 `sum_*` 汇总窗口排除 `-O` 预热段（iperf3 的 `[SUM]` 行打印 "omit-end sec"），避免预热测试的聚合带宽被低估。补丁处均标注 `local LinkGauge patch` 注释；升级 vendor 源码后需重新应用。
+- **本地补丁：** （1）上游只在测试结束后才暴露逐秒区间数据，因此新增了 `on_interval` 实时回调（见 `vendor/riperf3` 中 `IntervalReporterConfig`、`ClientBuilder::on_interval`、`ServerBuilder::on_interval`）；（2）最终 `sum_*` 汇总窗口排除 `-O` 预热段（iperf3 的 `[SUM]` 行打印 "omit-end sec"），避免预热测试的聚合带宽被低估；（3）服务端统计采样间隔可通过 `ServerBuilder::interval` 配置（上游固定 1s，无服务端 `-i` 旋钮）。补丁处均标注 `local LinkGauge patch` 注释；升级 vendor 源码后需重新应用。
 - 互通性：与真实 iperf3 服务端/客户端互通（上游已针对 iperf 3.21 验证）。
 - 已知平台差异：TCP 重传计数依赖 `TCP_INFO`，Windows 上不可用，该平台显示为 0。
 

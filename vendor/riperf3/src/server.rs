@@ -495,6 +495,11 @@ pub struct Server {
     /// `-f` unit format for the text report (#242): the server-side flag was
     /// silently ignored — every render site hardcoded the adaptive default.
     pub(crate) format_char: char,
+    /// `-i/--interval` (local LinkGauge patch): server-side stats sampling
+    /// interval in seconds (default 1.0). iperf3's server derives its
+    /// reporting cadence from the client's `-i`; this makes the cadence
+    /// explicit server-side too, like the client builder.
+    pub(crate) interval_secs: f64,
     /// Per-interval live callback (local LinkGauge patch), see
     /// [`ServerBuilder::on_interval`].
     pub(crate) on_interval: Option<crate::reporter::IntervalHook>,
@@ -2237,7 +2242,7 @@ impl Server {
                 .collect();
             crate::reporter::spawn_interval_reporter(
                 crate::reporter::IntervalReporterConfig {
-                    interval_secs: 1.0,
+                    interval_secs: self.interval_secs,
                     protocol: ctx.cfg.protocol,
                     // #242: the wired -f (was a hardcoded adaptive default).
                     format_char: self.format_char,
@@ -4489,6 +4494,7 @@ pub struct ServerBuilder {
     interrupt: Option<crate::client::InterruptWatch>,
     json_stream_full_output: bool,
     format_char: char,
+    interval_secs: f64,
     on_interval: Option<crate::reporter::IntervalHook>,
     /// Live connection callback (local LinkGauge patch), see
     /// [`ServerBuilder::on_connect`].
@@ -4524,6 +4530,7 @@ impl Default for ServerBuilder {
             json_stream_full_output: false,
             // iperf3 has NO default -f: every figure auto-scales (#221).
             format_char: 'a',
+            interval_secs: 1.0,
             on_interval: None,
             on_connect: None,
         }
@@ -4671,6 +4678,15 @@ impl ServerBuilder {
         self
     }
 
+    /// `-i/--interval` (local LinkGauge patch): server-side stats sampling
+    /// interval in seconds (default 1.0). iperf3's server derives its
+    /// reporting cadence from the client's `-i`; this makes the cadence
+    /// explicit server-side too, like the client builder.
+    pub fn interval(mut self, secs: f64) -> Self {
+        self.interval_secs = secs;
+        self
+    }
+
     /// `--forceflush`: force flushing output at every interval.
     pub fn forceflush(mut self, enabled: bool) -> Self {
         self.forceflush = enabled;
@@ -4813,6 +4829,7 @@ impl ServerBuilder {
             interrupt: self.interrupt.clone(),
             json_stream_full_output: self.json_stream_full_output,
             format_char: self.format_char,
+            interval_secs: self.interval_secs,
             on_interval: self.on_interval,
             on_connect: self.on_connect,
         })

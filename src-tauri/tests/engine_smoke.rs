@@ -636,3 +636,52 @@ async fn congestion_control_works_end_to_end() {
     let server_outcome = server_task.await.unwrap().unwrap();
     assert_eq!(server_outcome.termination, Termination::Completed);
 }
+
+/// 服务端统计采样间隔（-i，本地补丁）端到端：服务端 interval(2.0) 时，
+/// 5 秒测试的服务端 on_interval 回调应远少于 1s 节拍的 5 次
+/// （2 个整区间 + 1 个尾区间 = 至多 3 次；runner.rs 据此跟随界面设置）
+#[tokio::test(flavor = "multi_thread")]
+async fn server_interval_controls_sampling_cadence() {
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server_intervals: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+    let hook = server_intervals.clone();
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .interval(2.0)
+        .interrupt(server_rx)
+        .on_interval(move |interval: &riperf3::json_report::Interval| {
+            if !interval.sum.omitted {
+                hook.lock().unwrap().push(interval.sum.end);
+            }
+        })
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Tcp)
+        .duration(5)
+        .interval(1.0)
+        .json_output(true)
+        .emit_output(false)
+        .build()
+        .unwrap();
+    let outcome = client.run().await.unwrap();
+    assert_eq!(outcome.termination, Termination::Completed);
+
+    let server_outcome = server_task.await.unwrap().unwrap();
+    assert_eq!(server_outcome.termination, Termination::Completed);
+    let ends = server_intervals.lock().unwrap();
+    assert!(!ends.is_empty(), "服务端应收到至少一个统计区间");
+    assert!(
+        ends.len() <= 3,
+        "2s 采样间隔下 5 秒测试至多 3 个区间（2 整 + 1 尾），实际 {} 个：{ends:?}",
+        ends.len()
+    );
+}
