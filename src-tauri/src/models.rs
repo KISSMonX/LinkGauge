@@ -40,6 +40,10 @@ pub struct TestRequest {
     /// IP 协议族（0 = 自动，4 = 仅 IPv4，6 = 仅 IPv6；仅客户端模式使用）
     #[serde(default)]
     pub ip_version: u8,
+    /// 测试结束后拉取服务端视角的输出（对应 iperf3 --get-server-output；
+    /// 仅客户端模式使用，服务端为文本模式时返回其汇总文本）
+    #[serde(default)]
+    pub get_server_output: bool,
     // —— iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path
     // 启动时必需）。全部 default，旧版前端不传时等价于不启用 ——
     /// 认证用户名；为空表示不启用认证

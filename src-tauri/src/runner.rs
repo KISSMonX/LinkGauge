@@ -258,6 +258,8 @@ struct ClientParams {
     cport: u16,
     /// IP 协议族（0 = 自动，4 / 6 = 强制）
     ip_version: u8,
+    /// 测试结束后拉取服务端视角的输出（--get-server-output）
+    get_server_output: bool,
 }
 
 fn client_params_for(request: &TestRequest) -> ClientParams {
@@ -292,6 +294,7 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
         window_kb: request.window_kb,
         cport: request.cport,
         ip_version: request.ip_version,
+        get_server_output: request.get_server_output,
     };
     match request.task_id.as_str() {
         "tcp-parallel" => params.num_streams = request.parallel.max(1) as u32,
@@ -548,6 +551,10 @@ fn engine_client_builder(
     // IP 协议族：0 = 自动，仅显式 4 / 6 时下发给引擎（validate 已保证取值合法）
     if params.ip_version == 4 || params.ip_version == 6 {
         builder = builder.ip_version(params.ip_version);
+    }
+    // 拉取服务端视角输出（--get-server-output）：服务端为文本模式时随结果返回
+    if params.get_server_output {
+        builder = builder.get_server_output(true);
     }
     // iperf3 认证：服务端以 --rsa-private-key-path + --authorized-users-path 启动时，
     // 客户端须用服务端公钥加密「用户名+密码」。未启用时前端已把三项清空，这里自然跳过。
@@ -1371,6 +1378,23 @@ async fn finish_engine(
                 ),
             );
             append_engine_summary(log, report, locale);
+            // --get-server-output：服务端视角的汇总文本（标准 iperf3 服务端为
+            // 文本模式时才会产生；本机 LinkGauge 服务端是 JSON 模式，通常为空）。
+            // 写入测试日志并广播一条日志事件，随日志一并进入报告
+            if let Some(text) = report
+                .server_output_text
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+            {
+                let header = tr(
+                    locale,
+                    "服务端输出（--get-server-output）：",
+                    "Server output (--get-server-output):",
+                );
+                let block = format!("\n[INFO] {header}\n{text}");
+                append_log(log, &block);
+                emit_log(app, session_id, task_id, "INFO", block);
+            }
             emit_final_metric(app, session_id, task_id, report, request.duration as i64);
             match outcome.termination {
                 Termination::Completed => {
@@ -1692,6 +1716,7 @@ mod tests {
             window_kb: 0,
             cport: 0,
             ip_version: 0,
+            get_server_output: false,
             auth_username: String::new(),
             auth_password: String::new(),
             auth_public_key_path: String::new(),

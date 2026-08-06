@@ -44,6 +44,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Multi-NIC detection with an interface picker (the first interface is the default) and link-speed reporting
 - Bandwidth presets (100 / 1000 Mbps, unlimited) that default to the current NIC link speed
 - Warm-up omit period (`-O`), TCP socket buffer size (`-w`, 0 = auto), client source port (`--cport`), and explicit IPv4/IPv6 selection client options
+- Optional fetch of the peer server's own output (`--get-server-output`), appended to the test log and report
 - Packet-length presets (TCP up to 1 MB, UDP up to 64 KB), with a custom length persisted to the config file
 - Real-time INFO, WARN, and ERROR logs with filtering
 - Engine logs follow the UI language switch at runtime
