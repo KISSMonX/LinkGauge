@@ -22,7 +22,7 @@ const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 
 const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
-const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1 }
+const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1, authEnabled: false, authPrivateKeyPath: '', authUsersPath: '', authPkcs1Padding: false }
 const sshDefaults: SshConfig = { host: '', port: 22, username: '', authMethod: 'password', password: '', privateKeyPath: '', passphrase: '' }
 const config = ref<TestConfig>({ ...defaults })
 const serverConfig = ref<ServerConfig>({ ...serverDefaults })
@@ -433,6 +433,24 @@ async function pickPublicKey() {
 
 // —— SSH 远程控制台：连接远端主机，在控制台里直接操作对端的 iperf3 服务端 ——
 
+/** 选择服务端认证用的 RSA 私钥文件（对应 --rsa-private-key-path） */
+async function pickServerAuthKey() {
+  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
+  try {
+    const path = await open({ title: t('srv.authKeyPick'), multiple: false, directory: false, filters: [{ name: t('cfg.authKeyFilter'), extensions: ['pem', 'key', 'crt'] }] })
+    if (typeof path === 'string') { serverConfig.value = { ...serverConfig.value, authPrivateKeyPath: path }; log('INFO', t('log.authServerKeyPicked', { path }), 'server') }
+  } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
+}
+
+/** 选择服务端认证用的授权用户文件（对应 --authorized-users-path） */
+async function pickServerAuthUsers() {
+  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
+  try {
+    const path = await open({ title: t('srv.authUsersPick'), multiple: false, directory: false })
+    if (typeof path === 'string') { serverConfig.value = { ...serverConfig.value, authUsersPath: path }; log('INFO', t('log.authUsersPicked', { path }), 'server') }
+  } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
+}
+
 /** 选择 SSH 登录用的私钥文件 */
 async function pickPrivateKey() {
   if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
@@ -569,6 +587,7 @@ async function startServer() {
   if (serverRunning.value) return
   if (serverConfig.value.port < 1 || serverConfig.value.port > 65535) { errorDialog.value = { title: t('err.paramError'), message: t('err.port') }; return }
   if (serverConfig.value.interval < 1 || serverConfig.value.interval > 60) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverInterval') }; return }
+  if (serverConfig.value.authEnabled && (!serverConfig.value.authPrivateKeyPath.trim() || !serverConfig.value.authUsersPath.trim())) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverAuthIncomplete') }; return }
   const bindTarget = serverConfig.value.bindIp.trim() || local.value.ip
   log('INFO', t('log.startServer', { addr: serverConfig.value.bindIp.trim() ? serverConfig.value.bindIp : t('sdash.allAdapters'), port: serverConfig.value.port }))
   if (!isTauri()) { serverRunning.value = true; log('INFO', t('log.previewServer')); return }
@@ -576,7 +595,7 @@ async function startServer() {
   serverUptime.value = 0; serverCompleted.value = 0; serverServing.value = false; serverPoints.value = []
   serverPeerIp.value = ''; serverPeerPort.value = 0
   try {
-    serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, locale: locale.value, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval } })
+    serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, locale: locale.value, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval, serverAuthEnabled: serverConfig.value.authEnabled, serverAuthPrivateKeyPath: serverConfig.value.authEnabled ? serverConfig.value.authPrivateKeyPath.trim() : '', serverAuthUsersPath: serverConfig.value.authEnabled ? serverConfig.value.authUsersPath.trim() : '', serverAuthPkcs1Padding: serverConfig.value.authPkcs1Padding } })
     serverRunning.value = true
   } catch (error) { log('ERROR', String(error)); errorDialog.value = { title: t('err.serverStartFailed'), message: String(error) } }
 }
@@ -838,7 +857,7 @@ onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyn
       <ConfigPanel
         v-if="side === 'hub' && dockedTabs.length"
         :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength" @detach="detachTab" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
+        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @pick-auth-key="pickServerAuthKey" @pick-auth-users="pickServerAuthUsers" @save-custom-length="saveCustomLength" @detach="detachTab" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
       />
       <ConfigPanel
         v-else-if="side === 'client'"
@@ -848,7 +867,7 @@ onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyn
       <ConfigPanel
         v-else-if="side === 'server'"
         detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="config = $event" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @save-custom-length="saveCustomLength" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
+        @update:config="config = $event" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @pick-auth-key="pickServerAuthKey" @pick-auth-users="pickServerAuthUsers" @save-custom-length="saveCustomLength" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
       />
       <div v-else class="panel config-panel dock-empty">
         <h2>{{ t('tab.detachedTitle') }}</h2>
