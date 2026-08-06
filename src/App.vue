@@ -698,9 +698,11 @@ function handleEvent(event: BackendEvent) {
     ((!currentTaskId || event.taskId === currentTaskId) || event.sessionId === clientSession.value)
   const isServer = event.taskId === 'server' && serverRunning.value
   if (!isClient && !isServer) {
-    // 诊断：客户端运行中收到无法归属的事件（排查队列卡住 / 事件串台）
-    if (clientRunning.value && event.taskId !== 'server' && event.type !== 'status') {
-      log('WARN', `忽略无法归属的事件：${event.type} 任务=${event.taskId} 会话=${event.sessionId.slice(0, 8)} 当前任务=${currentTaskId || '无'} 当前会话=${clientSession.value.slice(0, 8) || '无'}`)
+    // 任务切换瞬间，上一任务的迟到事件（引擎报告器最后一次 flush 与 complete
+    // 乱序，先 complete 后尾部日志）属正常现象，静默丢弃；仅对 taskId 不属于
+    // 队列任何项的异常事件告警（排查事件串台用）
+    if (clientRunning.value && event.taskId !== 'server' && event.type !== 'status' && !queue.value.includes(event.taskId)) {
+      log('WARN', `收到不属于队列任何任务的事件：${event.type} 任务=${event.taskId} 会话=${event.sessionId.slice(0, 8)}`)
     }
     return
   }
