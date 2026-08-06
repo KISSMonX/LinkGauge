@@ -649,7 +649,10 @@ async function runNext() {
   if (queueIndex.value >= queue.value.length) { finishRun(true); return }
   const taskId = queue.value[queueIndex.value]
   const item = items.value.find((i) => i.id === taskId); if (item) item.status = 'running'
-  progress.value = Math.round((queueIndex.value / Math.max(1, queue.value.length)) * 100)
+  // 进度按「当前正在测试的项」显示：进入下一项即前进一格，与「开始{label}」日志
+  // 同步。此前只在完成时更新，任务运行期间进度条冻结在上一项的完成值——表现为
+  // 「进度卡在第 4 项、日志却显示已在测第 5 项」
+  progress.value = Math.round(((queueIndex.value + 1) / Math.max(1, queue.value.length)) * 100)
   // 每个任务独立缓存：开始时清空实时数据，完成后快照到 completedPoints
   points.value = []
   log('INFO', t('log.startTask', { label: item ? itemLabel(item.id) : t('st.serverRunning') }))
@@ -760,6 +763,9 @@ function completeCurrent(status: TestItem['status']) {
   completedPoints.value = [...points.value]
   snapshotItem(queue.value[queueIndex.value], status)
   if (item) completedLabel.value = itemLabel(item.id)
+  // 每项完成的客户端日志：与「开始{label}」配对，队列推进的可见反馈。此前只有
+  // 开始/失败有日志，快任务在日志里跳着走，叠加进度条冻结容易误判为卡死
+  if (status === 'success') log('INFO', t('log.taskDone', { label: item ? itemLabel(item.id) : '' }))
   progress.value = Math.round(((queueIndex.value + 1) / queue.value.length) * 100)
   if (status === 'failed') { failCurrent(t('log.processExited')); return }
   // 仅驱动窗口启动下一项，避免多个窗口重复拉起同一个任务
