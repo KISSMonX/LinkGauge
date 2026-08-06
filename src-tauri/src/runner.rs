@@ -90,8 +90,8 @@ pub fn kill_all_children_sync(state: &AppState) {
 }
 
 #[tauri::command]
-pub async fn start_test(
-    app: AppHandle,
+pub async fn start_test<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     request: TestRequest,
 ) -> Result<String, String> {
@@ -176,7 +176,7 @@ pub async fn stop_test(state: State<'_, AppState>, session_id: String) -> Result
 
 /// 用系统文件管理器打开测试日志目录，返回目录路径
 #[tauri::command]
-pub async fn open_log_dir(app: AppHandle) -> Result<String, String> {
+pub async fn open_log_dir<R: tauri::Runtime>(app: AppHandle<R>) -> Result<String, String> {
     let dir = app
         .path()
         .app_log_dir()
@@ -397,8 +397,8 @@ struct TestLog {
 }
 type SessionLog = Arc<TestLog>;
 
-async fn run_engine_client(
-    app: AppHandle,
+async fn run_engine_client<R: tauri::Runtime>(
+    app: AppHandle<R>,
     session_id: String,
     request: TestRequest,
     rx: watch::Receiver<Option<String>>,
@@ -533,8 +533,8 @@ const BUSY_RETRY_DELAY: Duration = Duration::from_secs(2);
 ///
 /// 必须每次重试都重新构造：`build()` 会消费 builder，其中的回调闭包也随之被移走。
 #[allow(clippy::too_many_arguments)]
-fn engine_client_builder(
-    app: &AppHandle,
+fn engine_client_builder<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     session_id: &str,
     request: &TestRequest,
     params: &ClientParams,
@@ -708,8 +708,8 @@ struct ServerInterval {
     peer_port: u16,
 }
 
-async fn run_engine_server(
-    app: AppHandle,
+async fn run_engine_server<R: tauri::Runtime>(
+    app: AppHandle<R>,
     session_id: String,
     request: TestRequest,
     rx: watch::Receiver<Option<String>>,
@@ -1199,8 +1199,8 @@ async fn run_engine_server(
 // ping 任务（保留系统进程调用，riperf3 不支持 ICMP）
 // ---------------------------------------------------------------------------
 
-async fn run_ping(
-    app: AppHandle,
+async fn run_ping<R: tauri::Runtime>(
+    app: AppHandle<R>,
     session_id: String,
     request: TestRequest,
     cancelled: Arc<AtomicBool>,
@@ -1354,8 +1354,8 @@ fn parse_ping_metric(line: &str) -> Option<MetricPoint> {
 // ---------------------------------------------------------------------------
 
 /// 创建测试日志文件并写入文件头，失败时发出错误事件
-async fn setup_log(
-    app: &AppHandle,
+async fn setup_log<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     session_id: &str,
     request: &TestRequest,
     local_ip: &str,
@@ -1446,8 +1446,8 @@ fn append_log(log: &SessionLog, line: &str) {
 }
 
 /// 客户端结束时按 RunOutcome 归类结果：成功 / 手动停止 / 失败
-async fn finish_engine(
-    app: &AppHandle,
+async fn finish_engine<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     session_id: &str,
     task_id: &str,
     log: &SessionLog,
@@ -1609,8 +1609,8 @@ fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &st
 }
 
 /// 补发一个最终指标点：携带对端方向的抖动/丢包与全程平均带宽，供前端汇总统计
-fn emit_final_metric(
-    app: &AppHandle,
+fn emit_final_metric<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     session_id: &str,
     task_id: &str,
     report: &riperf3::Report,
@@ -1683,8 +1683,8 @@ fn format_interval_line(
     line
 }
 
-async fn finish_ok(
-    app: &AppHandle,
+async fn finish_ok<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     session_id: &str,
     task_id: &str,
     log: &SessionLog,
@@ -1695,8 +1695,8 @@ async fn finish_ok(
     emit_complete(app, session_id, task_id, status, log_path);
 }
 
-async fn fail_engine(
-    app: &AppHandle,
+async fn fail_engine<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     session_id: &str,
     task_id: &str,
     log: &SessionLog,
@@ -1748,7 +1748,13 @@ fn task_label(id: &str) -> &str {
     }
 }
 
-fn emit_log(app: &AppHandle, session: &str, task: &str, level: &str, message: String) {
+fn emit_log<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session: &str,
+    task: &str,
+    level: &str,
+    message: String,
+) {
     let _ = app.emit(
         "test-event",
         TestEvent {
@@ -1763,7 +1769,12 @@ fn emit_log(app: &AppHandle, session: &str, task: &str, level: &str, message: St
         },
     );
 }
-fn emit_metric(app: &AppHandle, session: &str, task: &str, metric: MetricPoint) {
+fn emit_metric<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session: &str,
+    task: &str,
+    metric: MetricPoint,
+) {
     let _ = app.emit(
         "test-event",
         TestEvent {
@@ -1778,7 +1789,13 @@ fn emit_metric(app: &AppHandle, session: &str, task: &str, metric: MetricPoint) 
         },
     );
 }
-fn emit_complete(app: &AppHandle, session: &str, task: &str, status: &str, path: String) {
+fn emit_complete<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session: &str,
+    task: &str,
+    status: &str,
+    path: String,
+) {
     let _ = app.emit(
         "test-event",
         TestEvent {
@@ -1793,7 +1810,13 @@ fn emit_complete(app: &AppHandle, session: &str, task: &str, status: &str, path:
         },
     );
 }
-fn emit_error(app: &AppHandle, session: &str, task: &str, message: String, path: Option<String>) {
+fn emit_error<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session: &str,
+    task: &str,
+    message: String,
+    path: Option<String>,
+) {
     let _ = app.emit(
         "test-event",
         TestEvent {
@@ -2217,5 +2240,126 @@ mod tests {
         let mut bad = request("tcp-single", "client", "tcp");
         bad.transfer_mode = "packets".into();
         assert!(validate(&bad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tauri::Listener;
+
+    /// 基础请求（tests 模块的 request 为兄弟模块私有，此处内联构造）
+    fn base_request(task_id: &str, port: u16) -> TestRequest {
+        TestRequest {
+            task_id: task_id.into(),
+            mode: "client".into(),
+            protocol: String::new(),
+            server_ip: "127.0.0.1".into(),
+            local_ip: "127.0.0.1".into(),
+            bind_ip: String::new(),
+            locale: String::new(),
+            port,
+            duration: 60,
+            parallel: 1,
+            bandwidth: 0,
+            packet_length: 131072,
+            udp_packet_length: 1460,
+            interval: 1,
+            omit_secs: 0,
+            window_kb: 0,
+            cport: 0,
+            ip_version: 0,
+            get_server_output: false,
+            transfer_mode: "time".into(),
+            transfer_amount: 1, // 1MB：快任务
+            dscp: 0,
+            congestion_algo: String::new(),
+            udp_dont_fragment: false,
+            mptcp: false,
+            auth_username: String::new(),
+            auth_password: String::new(),
+            auth_public_key_path: String::new(),
+            auth_pkcs1_padding: false,
+            server_auth_enabled: false,
+            server_auth_private_key_path: String::new(),
+            server_auth_users_path: String::new(),
+            server_auth_pkcs1_padding: false,
+            server_idle_timeout: 0,
+            server_max_duration: 0,
+            server_bitrate_limit_mbps: 0,
+        }
+    }
+
+    /// 快任务链端到端：tcp-bytes → udp-bytes → tcp-blocks 连续毫秒级任务，
+    /// 每个都必须收到 complete（复现「卡在第 N 项」——若后端事件缺失此处直接失败）
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fast_task_chain_emits_complete_per_item() {
+        // 固定端口：UDP 任务的控制与 demux 必须同端口（port 0 会错开）
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        // 服务端：循环 run_once 持续服务，测试结束发中断退出
+        let (server_tx, server_rx) = tokio::sync::watch::channel(None);
+        let server = riperf3::ServerBuilder::new()
+            .port(Some(port))
+            .one_off(true)
+            .json_output(true)
+            .emit_output(false)
+            .interrupt(server_rx)
+            .build()
+            .unwrap();
+        let bound = server.bind().await.unwrap();
+        let server_task = tokio::spawn(async move {
+            loop {
+                if bound.run_once().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // mock app + test-event 捕获（app.emit 会触发 Rust 侧 listen 处理器）
+        let app = tauri::test::mock_builder()
+            .manage(AppState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let handle = app.handle().clone();
+        let events: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let hook = events.clone();
+        handle.listen("test-event", move |e| {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(e.payload()) {
+                let task = value["taskId"].as_str().unwrap_or("").to_string();
+                let kind = value["type"].as_str().unwrap_or("").to_string();
+                hook.lock().unwrap().push((task, kind));
+            }
+        });
+
+        for task_id in ["tcp-bytes", "udp-bytes", "tcp-blocks"] {
+            let state = app.state::<AppState>();
+            let session = start_test(handle.clone(), state, base_request(task_id, port))
+                .await
+                .expect("start_test 应成功");
+            // 等待该任务的 complete（30 秒超时）
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let done = events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(t, ty)| t == task_id && ty == "complete");
+                if done {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{task_id} 未收到 complete（session {session}）"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+
+        server_tx.send(Some("stop".into())).unwrap();
+        let _ = server_task.await;
     }
 }
