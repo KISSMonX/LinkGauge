@@ -670,8 +670,15 @@ function handleEvent(event: BackendEvent) {
       }
     } catch { /* ignore */ }
   }
-  const isClient = event.sessionId === clientSession.value
-  const isServer = event.sessionId === serverSession.value
+  // 会话匹配：任务极快完成时（如按量测试在回环上毫秒级传完），complete/日志
+  // 事件可能早于 invoke('start_test') 返回（clientSession 尚未更新）到达，
+  // 按 sessionId 匹配会被丢弃、队列卡死（AGENTS.md 的 loopback 时序问题——
+  // localPort 有特例处理，普通事件没有）。改为按任务匹配：客户端事件对应当前
+  // 队列任务 id，服务端事件对应 server 会话；两者都是串行单会话，上一个任务
+  // 的迟到事件会被当前任务 id 过滤掉
+  const currentTaskId = queue.value[queueIndex.value]
+  const isClient = event.taskId !== 'server' && clientRunning.value && (!currentTaskId || event.taskId === currentTaskId)
+  const isServer = event.taskId === 'server' && serverRunning.value
   if (!isClient && !isServer) return
   if (event.type === 'log') log(event.level || 'INFO', event.message || '', event.taskId)
   if (event.logPath && !summary.logPaths.includes(event.logPath)) summary.logPaths.push(event.logPath)
