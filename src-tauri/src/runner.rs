@@ -217,6 +217,16 @@ fn validate(request: &TestRequest) -> Result<(), String> {
     if !matches!(request.ip_version, 0 | 4 | 6) {
         return Err("IP 协议族只能是 0（自动）、4 或 6".into());
     }
+    // 服务端防护参数范围（与界面输入框上限一致，0 = 不限制）
+    if request.server_idle_timeout > 86400 {
+        return Err("服务端空闲超时不能超过 86400 秒".into());
+    }
+    if request.server_max_duration > 86400 {
+        return Err("单次测试最大时长不能超过 86400 秒".into());
+    }
+    if request.server_bitrate_limit_mbps > 1_000_000 {
+        return Err("服务端带宽上限不能超过 1000000 Mbps".into());
+    }
     Ok(())
 }
 
@@ -621,16 +631,48 @@ async fn run_engine_server(
     } else {
         String::new()
     };
+    // 防护参数标注（0 = 不限制的不显示）：空闲超时 / 单测时长上限 / 带宽上限
+    let mut limits: Vec<String> = Vec::new();
+    if request.server_idle_timeout > 0 {
+        limits.push(tr_format!(
+            &locale,
+            "空闲超时 {}s",
+            "idle timeout {}s",
+            request.server_idle_timeout
+        ));
+    }
+    if request.server_max_duration > 0 {
+        limits.push(tr_format!(
+            &locale,
+            "单测上限 {}s",
+            "max duration {}s",
+            request.server_max_duration
+        ));
+    }
+    if request.server_bitrate_limit_mbps > 0 {
+        limits.push(tr_format!(
+            &locale,
+            "限速 {} Mbps",
+            "rate cap {} Mbps",
+            request.server_bitrate_limit_mbps
+        ));
+    }
+    let limits_display = if limits.is_empty() {
+        String::new()
+    } else {
+        format!("，{}", limits.join("，"))
+    };
     append_log(
         &log,
         &tr_format!(
             locale,
-            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务{}\n\n",
-            "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: bind {}, listen port {}, serving continuously{}\n\n",
+            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务{}{}\n\n",
+            "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: bind {}, listen port {}, serving continuously{}{}\n\n",
             riperf3::VERSION,
             bind_display,
             request.port,
-            auth_display
+            auth_display,
+            limits_display
         ),
     );
 
@@ -654,6 +696,19 @@ async fn run_engine_server(
         if request.server_auth_pkcs1_padding {
             server_builder = server_builder.use_pkcs1_padding(true);
         }
+    }
+    // 服务端防护参数（0 = 不限制）：空闲超时自动停止 / 拒绝超长测试 / 终止超速测试。
+    // 注意 idle_timeout 在 one_off 模式下到期返回 Aborted("idle timeout")，
+    // 监听循环据此按「空闲超时停止」退出而非继续监听
+    if request.server_idle_timeout > 0 {
+        server_builder = server_builder.idle_timeout(request.server_idle_timeout);
+    }
+    if request.server_max_duration > 0 {
+        server_builder = server_builder.server_max_duration(request.server_max_duration);
+    }
+    if request.server_bitrate_limit_mbps > 0 {
+        server_builder = server_builder
+            .server_bitrate_limit(request.server_bitrate_limit_mbps.saturating_mul(1_000_000));
     }
     server_builder = server_builder.on_interval({
         let serving = serving.clone();
@@ -977,31 +1032,34 @@ async fn run_engine_server(
             Err(error) => {
                 serving.store(false, Ordering::Relaxed);
                 *latest.lock().unwrap() = None;
-                // 空闲时收到停止信号返回 Aborted，正常退出
-                if matches!(error, riperf3::RiperfError::Aborted(_)) {
+                // 空闲时收到停止信号返回 Aborted，正常退出；idle_timeout 到期
+                // 同样以 Aborted("idle timeout") 返回（one_off 下退出而非重启），
+                // 按原因区分日志文案
+                if let riperf3::RiperfError::Aborted(msg) = &error {
                     heartbeat.abort();
-                    append_log(
-                        &log,
-                        &format!(
-                            "\n{}",
-                            tr(
-                                &locale,
-                                "测试结果: 服务端已停止（手动停止）",
-                                "Result: server stopped (manual stop)"
-                            )
-                        ),
-                    );
+                    let (result_zh, result_en) = if msg == "idle timeout" {
+                        (
+                            "测试结果: 服务端已停止（空闲超时）",
+                            "Result: server stopped (idle timeout)",
+                        )
+                    } else {
+                        (
+                            "测试结果: 服务端已停止（手动停止）",
+                            "Result: server stopped (manual stop)",
+                        )
+                    };
+                    let (reason_zh, reason_en) = if msg == "idle timeout" {
+                        ("服务端已停止（空闲超时）", "Server stopped (idle timeout)")
+                    } else {
+                        ("服务端已停止（手动停止）", "Server stopped (manual stop)")
+                    };
+                    append_log(&log, &format!("\n{}", tr(&locale, result_zh, result_en)));
                     emit_log(
                         &app,
                         &session_id,
                         &request.task_id,
                         "INFO",
-                        tr(
-                            &locale,
-                            "服务端已停止（手动停止）",
-                            "Server stopped (manual stop)",
-                        )
-                        .into(),
+                        tr(&locale, reason_zh, reason_en).into(),
                     );
                     finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
                     return;
@@ -1642,6 +1700,9 @@ mod tests {
             server_auth_private_key_path: String::new(),
             server_auth_users_path: String::new(),
             server_auth_pkcs1_padding: false,
+            server_idle_timeout: 0,
+            server_max_duration: 0,
+            server_bitrate_limit_mbps: 0,
         }
     }
 
@@ -1837,5 +1898,28 @@ mod tests {
             req.ip_version = invalid;
             assert!(validate(&req).is_err(), "ip_version={invalid} 应被拒绝");
         }
+    }
+
+    #[test]
+    fn server_protection_params_validated() {
+        let mut req = request("server", "server", "tcp");
+        req.duration = 0;
+        // 默认 0 = 不限制：全部通过
+        assert!(validate(&req).is_ok());
+        // 上限边界：86400 通过，超限拒绝
+        req.server_idle_timeout = 86400;
+        req.server_max_duration = 86400;
+        assert!(validate(&req).is_ok());
+        req.server_idle_timeout = 86401;
+        assert!(validate(&req).is_err());
+        req.server_idle_timeout = 0;
+        req.server_max_duration = 86401;
+        assert!(validate(&req).is_err());
+        req.server_max_duration = 0;
+        // 带宽上限：1_000_000 Mbps 通过，超限拒绝
+        req.server_bitrate_limit_mbps = 1_000_000;
+        assert!(validate(&req).is_ok());
+        req.server_bitrate_limit_mbps = 1_000_001;
+        assert!(validate(&req).is_err());
     }
 }

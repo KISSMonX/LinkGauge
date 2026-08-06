@@ -58,6 +58,12 @@ export interface ServerConfig {
   authUsersPath: string
   /** 对 iperf3 < 3.17 的客户端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP） */
   authPkcs1Padding: boolean
+  /** 空闲超时（秒，0 = 不限制）：N 秒无客户端连接则自动停止服务 */
+  idleTimeout: number
+  /** 单次测试最大时长（秒，0 = 不限制），超限测试在参数交换阶段被拒绝 */
+  maxDuration: number
+  /** 服务端带宽上限（Mbps，0 = 不限制），聚合吞吐超限的测试被终止 */
+  bitrateLimit: number
 }
 
 /** 服务端页的 SSH 远程控制台连接参数（密码与私钥口令不落盘，仅在内存与窗口间流转） */

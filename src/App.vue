@@ -22,7 +22,7 @@ const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 
 const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, omitSecs: 0, windowKb: 0, cport: 0, ipVersion: 0, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
-const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1, authEnabled: false, authPrivateKeyPath: '', authUsersPath: '', authPkcs1Padding: false }
+const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1, authEnabled: false, authPrivateKeyPath: '', authUsersPath: '', authPkcs1Padding: false, idleTimeout: 0, maxDuration: 0, bitrateLimit: 0 }
 const sshDefaults: SshConfig = { host: '', port: 22, username: '', authMethod: 'password', password: '', privateKeyPath: '', passphrase: '' }
 const config = ref<TestConfig>({ ...defaults })
 const serverConfig = ref<ServerConfig>({ ...serverDefaults })
@@ -592,6 +592,8 @@ async function startServer() {
   if (serverRunning.value) return
   if (serverConfig.value.port < 1 || serverConfig.value.port > 65535) { errorDialog.value = { title: t('err.paramError'), message: t('err.port') }; return }
   if (serverConfig.value.interval < 1 || serverConfig.value.interval > 60) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverInterval') }; return }
+  if (serverConfig.value.idleTimeout > 86400 || serverConfig.value.maxDuration > 86400) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverLimitRange') }; return }
+  if (serverConfig.value.bitrateLimit > 1000000) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverRateRange') }; return }
   if (serverConfig.value.authEnabled && (!serverConfig.value.authPrivateKeyPath.trim() || !serverConfig.value.authUsersPath.trim())) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverAuthIncomplete') }; return }
   const bindTarget = serverConfig.value.bindIp.trim() || local.value.ip
   log('INFO', t('log.startServer', { addr: serverConfig.value.bindIp.trim() ? serverConfig.value.bindIp : t('sdash.allAdapters'), port: serverConfig.value.port }))
@@ -600,7 +602,7 @@ async function startServer() {
   serverUptime.value = 0; serverCompleted.value = 0; serverServing.value = false; serverPoints.value = []
   serverPeerIp.value = ''; serverPeerPort.value = 0
   try {
-    serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, locale: locale.value, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval, serverAuthEnabled: serverConfig.value.authEnabled, serverAuthPrivateKeyPath: serverConfig.value.authEnabled ? serverConfig.value.authPrivateKeyPath.trim() : '', serverAuthUsersPath: serverConfig.value.authEnabled ? serverConfig.value.authUsersPath.trim() : '', serverAuthPkcs1Padding: serverConfig.value.authPkcs1Padding } })
+    serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, locale: locale.value, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval, serverAuthEnabled: serverConfig.value.authEnabled, serverAuthPrivateKeyPath: serverConfig.value.authEnabled ? serverConfig.value.authPrivateKeyPath.trim() : '', serverAuthUsersPath: serverConfig.value.authEnabled ? serverConfig.value.authUsersPath.trim() : '', serverAuthPkcs1Padding: serverConfig.value.authPkcs1Padding, serverIdleTimeout: serverConfig.value.idleTimeout, serverMaxDuration: serverConfig.value.maxDuration, serverBitrateLimitMbps: serverConfig.value.bitrateLimit } })
     serverRunning.value = true
   } catch (error) { log('ERROR', String(error)); errorDialog.value = { title: t('err.serverStartFailed'), message: String(error) } }
 }

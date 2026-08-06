@@ -405,3 +405,61 @@ async fn cport_and_ip_version_work_end_to_end() {
     let server_outcome = server_task.await.unwrap().unwrap();
     assert_eq!(server_outcome.termination, Termination::Completed);
 }
+
+/// 服务端防护参数（--idle-timeout / --server-max-duration / --server-bitrate-limit）
+/// 端到端：全部设置后正常测试仍应完成（runner.rs 的防护参数接线）
+#[tokio::test(flavor = "multi_thread")]
+async fn server_protection_params_allow_normal_test() {
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .json_output(true)
+        .emit_output(false)
+        .idle_timeout(60)
+        .server_max_duration(60)
+        .server_bitrate_limit(1_000_000_000_000) // 1 Tbps，回环不可能触发
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let addr = bound.local_addr().unwrap();
+    let server_task = tokio::spawn(async move { bound.run_once().await });
+
+    let client = ClientBuilder::new("127.0.0.1")
+        .port(Some(addr.port()))
+        .protocol(TransportProtocol::Tcp)
+        .duration(1)
+        .interval(1.0)
+        .json_output(true)
+        .emit_output(false)
+        .build()
+        .unwrap();
+    let outcome = client.run().await.unwrap();
+    assert_eq!(outcome.termination, Termination::Completed);
+
+    let server_outcome = server_task.await.unwrap().unwrap();
+    assert_eq!(server_outcome.termination, Termination::Completed);
+}
+
+/// 空闲超时语义（runner.rs 循环依赖它退出）：one_off 服务端在 N 秒无客户端
+/// 连接后，run_once 返回 Aborted("idle timeout")
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_timeout_aborts_with_specific_message() {
+    let (_server_tx, server_rx) = watch::channel(None);
+    let server = ServerBuilder::new()
+        .port(Some(0))
+        .one_off(true)
+        .idle_timeout(1)
+        .interrupt(server_rx)
+        .build()
+        .unwrap();
+    let bound = server.bind().await.unwrap();
+    let started = std::time::Instant::now();
+    let result = bound.run_once().await;
+    assert!(
+        matches!(&result, Err(riperf3::RiperfError::Aborted(msg)) if msg == "idle timeout"),
+        "空闲超时应返回 Aborted(\"idle timeout\")，实际：{result:?}"
+    );
+    assert!(started.elapsed().as_secs() < 10, "空闲超时应在一秒左右触发");
+}
