@@ -654,9 +654,14 @@ async function runNext() {
   points.value = []
   log('INFO', t('log.startTask', { label: item ? itemLabel(item.id) : t('st.serverRunning') }))
   if (!isTauri()) { simulateTask(taskId); return }
+  // 看门狗必须在 invoke 之前武装：若 invoke 挂起（后端无响应），队列会无限期
+  // 卡在当前项且没有任何事件触发兜底——「卡在第 N 项、日志不刷新」的最后一条
+  // 静默路径。invoke 正常返回后由其后的 complete/error 事件解除。
+  armWatchdog(taskId)
   try {
-    clientSession.value = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, locale: locale.value, ...config.value, ...authPayload() } })
-    armWatchdog(taskId)
+    const sid = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, locale: locale.value, ...config.value, ...authPayload() } })
+    // invoke 挂起期间看门狗可能已判失败并推进队列，迟到的会话 id 不能覆盖新任务
+    if (queue.value[queueIndex.value] === taskId) clientSession.value = sid
   } catch (error) {
     failCurrent(String(error))
   }

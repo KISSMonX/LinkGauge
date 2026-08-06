@@ -38,3 +38,7 @@ strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# 集成测试：tauri::test mock（事件链路验证）
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
