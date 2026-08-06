@@ -777,6 +777,10 @@ async fn run_engine_server(
         server_builder = server_builder
             .server_bitrate_limit(request.server_bitrate_limit_mbps.saturating_mul(1_000_000));
     }
+    // 服务端统计采样间隔（-i，本地补丁）：与界面「日志输出间隔」一致。
+    // 引擎原本固定 1s（无服务端 -i 旋钮），此接线让服务端视角曲线的
+    // 采样频率跟随设置
+    server_builder = server_builder.interval(request.interval as f64);
     server_builder = server_builder.on_interval({
         let serving = serving.clone();
         let latest = latest.clone();
