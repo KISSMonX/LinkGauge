@@ -502,3 +502,4 @@ Third-party components retain their own licenses:
 - [ESnet iperf3](https://github.com/esnet/iperf) for the wire protocol this tool interoperates with
 - [Tauri](https://tauri.app/) for the desktop application framework
 - [Vue](https://vuejs.org/) and [Chart.js](https://www.chartjs.org/) for the frontend and visualization stack
+- [DeepSeek](https://deepseek.com/) for AI-assisted development — the iperf3 option set, server improvements, and the bug fixes in this release
