@@ -55,6 +55,9 @@ pub struct AppState {
     pub(crate) child_pids: Arc<AsyncMutex<HashSet<u32>>>,
     /// 界面语言（zh / en，空 = zh）：运行时可变，切换语言后运行中会话的引擎日志实时跟随
     pub(crate) locale: Arc<RwLock<String>>,
+    /// 当前服务端会话（单例）：重复启动服务端时拒绝。Windows 的 SO_REUSEADDR
+    /// 允许同一端口双绑，双会话会造成心跳日志冲突、客户端连接随机分发
+    pub(crate) server_session: Arc<AsyncMutex<Option<String>>>,
 }
 
 /// 读取当前界面语言（日志输出时调用，避免使用会话启动时的快照）
@@ -118,15 +121,28 @@ pub async fn start_test(
             sessions.lock().await.remove(&spawned_id);
         });
     } else if request.mode == "server" || request.task_id == "server" {
+        // 服务端单例：已有会话时拒绝重复启动。Windows 的 SO_REUSEADDR 允许
+        // 同端口双绑——重复启动会得到两个监听同一端口的心跳会话（日志冲突、
+        // 连接随机分发），前端 serverRunning 状态一旦与真实状态脱节就会触发
+        {
+            let mut guard = state.server_session.lock().await;
+            if guard.is_some() {
+                return Err("服务端已在运行，请先停止当前服务端".into());
+            }
+            *guard = Some(session_id.clone());
+        }
         let (tx, rx) = watch::channel(None);
         state
             .sessions
             .lock()
             .await
             .insert(session_id.clone(), SessionSignal::Engine(tx));
+        let server_session = state.server_session.clone();
         tauri::async_runtime::spawn(async move {
             run_engine_server(app, spawned_id.clone(), request, rx, locale_handle).await;
             sessions.lock().await.remove(&spawned_id);
+            // 会话结束（手动停止 / 异常退出）清除单例标记，允许再次启动
+            *server_session.lock().await = None;
         });
     } else {
         let (tx, rx) = watch::channel(None);
