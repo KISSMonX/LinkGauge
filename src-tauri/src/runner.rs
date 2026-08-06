@@ -292,6 +292,8 @@ struct ClientParams {
     congestion_algo: Option<String>,
     /// UDP 禁止分片标志（仅 IPv4）
     udp_dont_fragment: bool,
+    /// MPTCP 多路径（需两端内核支持）
+    mptcp: bool,
 }
 
 fn client_params_for(request: &TestRequest) -> ClientParams {
@@ -336,6 +338,7 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
         congestion_algo: (!request.congestion_algo.trim().is_empty())
             .then(|| request.congestion_algo.trim().to_string()),
         udp_dont_fragment: request.udp_dont_fragment,
+        mptcp: request.mptcp,
     };
     match request.task_id.as_str() {
         "tcp-parallel" => params.num_streams = request.parallel.max(1) as u32,
@@ -615,6 +618,10 @@ fn engine_client_builder(
     // UDP 禁止分片（--dont-fragment）：仅 IPv4，Unix 平台生效
     if params.udp_dont_fragment {
         builder = builder.dont_fragment(true);
+    }
+    // MPTCP 多路径（-m/--multipath）：需两端内核支持，不支持时连接阶段报错
+    if params.mptcp {
+        builder = builder.mptcp(true);
     }
     // iperf3 认证：服务端以 --rsa-private-key-path + --authorized-users-path 启动时，
     // 客户端须用服务端公钥加密「用户名+密码」。未启用时前端已把三项清空，这里自然跳过。
@@ -1794,6 +1801,7 @@ mod tests {
             dscp: 0,
             congestion_algo: String::new(),
             udp_dont_fragment: false,
+            mptcp: false,
             auth_username: String::new(),
             auth_password: String::new(),
             auth_public_key_path: String::new(),
@@ -2096,5 +2104,14 @@ mod tests {
         let params = client_params_for(&request("udp-bandwidth", "client", "udp"));
         assert_eq!(params.congestion_algo, None);
         assert!(!params.udp_dont_fragment);
+    }
+
+    #[test]
+    fn mptcp_maps_through_params() {
+        let mut req = request("tcp-single", "client", "tcp");
+        req.mptcp = true;
+        assert!(client_params_for(&req).mptcp);
+        // 默认关闭
+        assert!(!client_params_for(&request("tcp-single", "client", "tcp")).mptcp);
     }
 }

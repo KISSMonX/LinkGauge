@@ -44,6 +44,8 @@ export interface TestConfig {
   congestionAlgo: string
   /** UDP 数据报禁止分片（--dont-fragment；仅 IPv4） */
   udpDontFragment: boolean
+  /** 使用 MPTCP 多路径 TCP（-m/--multipath；需两端内核支持） */
+  mptcp: boolean
   /** 启用 iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path 启动时必需） */
   authEnabled: boolean
   authUsername: string

@@ -64,6 +64,10 @@ pub struct TestRequest {
     /// 仅 IPv4，Unix 平台生效）
     #[serde(default)]
     pub udp_dont_fragment: bool,
+    /// 使用 MPTCP 多路径 TCP（对应 iperf3 -m/--multipath；需两端内核支持，
+    /// 不支持的平台在连接时直接报错）
+    #[serde(default)]
+    pub mptcp: bool,
     // —— iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path
     // 启动时必需）。全部 default，旧版前端不传时等价于不启用 ——
     /// 认证用户名；为空表示不启用认证
