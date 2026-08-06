@@ -57,7 +57,6 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - HTML and PDF report generation
 - Pure-Rust riperf3 engine: interoperable with standard iperf3 servers, no runtime dependencies
 - iperf3 authentication in both directions — the client supplies username / password / RSA public key (with PKCS#1 padding for pre-3.17 peers), and the server can require credentials via its own RSA private key and an authorized-users file; passwords are never persisted
-- Automatic retry when the server is busy, so adjacent queue items don't knock each other out
 - Automated CI checks and tagged release builds for Windows x64, macOS x64 / arm64, and Linux x64 / arm64
 
 ## Architecture
@@ -441,10 +440,6 @@ Against servers older than 3.7 the `bidirectional` parameter is silently ignored
 - **The password is never written to local storage and is not included in exported config JSON** — re-enter it after restarting the app. The username and public key path are not secret and are saved normally.
 
 **Server side:** The server view has its own **Server Authentication** section. Enable it and pick the RSA private key (`--rsa-private-key-path`) plus an authorized-users file (`--authorized-users-path`); every client must then authenticate before any test runs, and unauthorized clients are refused. The users file lists one user per line as `username,sha256hex` — the hash of `sha256("{username}{password}")`, `#` comments allowed. Clients authenticate with the same username/password and must hold the server's matching public key (see "Client side" above). The key and users file paths are not secrets and are saved with the other server settings.
-
-### Automatic retry when the server is busy
-
-An iperf3 server serves one test at a time. Between adjacent items in the queue the peer may not have returned to its listening state yet, which yields a "server busy" refusal. The client retries 3 times at 2-second intervals; "Stop test" takes effect immediately during the wait. The item is only marked failed if every retry is refused.
 
 ### Other known differences
 

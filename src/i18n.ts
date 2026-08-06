@@ -15,7 +15,6 @@ const zh = {
   // 通用
   'common.confirm': '确定',
   'common.cancel': '取消',
-  'common.retry': '重试',
   'common.cancelDefault': '取消（默认第一个）',
   'common.client': '客户端',
   'common.server': '服务端',
@@ -430,7 +429,6 @@ export type MessageKey = keyof typeof zh
 const en: Record<MessageKey, string> = {
   'common.confirm': 'OK',
   'common.cancel': 'Cancel',
-  'common.retry': 'Retry',
   'common.cancelDefault': 'Cancel (first by default)',
   'common.client': 'Client',
   'common.server': 'Server',
