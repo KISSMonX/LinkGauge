@@ -44,6 +44,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Multi-NIC detection with an interface picker (the first interface is the default) and link-speed reporting
 - Bandwidth presets (100 / 1000 Mbps, unlimited) that default to the current NIC link speed
 - Warm-up omit period (`-O`), TCP socket buffer size (`-w`, 0 = auto), client source port (`--cport`), and explicit IPv4/IPv6 selection client options
+- DSCP marking (`--dscp`) and byte/block-limited tests (`-n` / `-k`, ending when the amount is transferred) client options
 - Optional fetch of the peer server's own output (`--get-server-output`), appended to the test log and report
 - Packet-length presets (TCP up to 1 MB, UDP up to 64 KB), with a custom length persisted to the config file
 - Real-time INFO, WARN, and ERROR logs with filtering
@@ -421,6 +422,8 @@ Against servers older than 3.7 the `bidirectional` parameter is silently ignored
 - **TCP socket buffer defaults to 0 (auto)**, matching iperf3's `-w` default; enter a size in KB to override it.
 - **Client source port defaults to 0 (auto)** (iperf3 `--cport` off); when set, data-stream `i` binds source port `cport + i`, like iperf3.
 - **IP version defaults to auto**; force IPv4 or IPv6 when the server address is a hostname on a dual-stack host.
+- **No DSCP marking by default** (0 = unset, like iperf3 without `--dscp`); values 1–63 map to the TOS upper 6 bits.
+- **Byte/block-limited tests are off by default**; when enabled (`-n` / `-k`) they end the run once the amount is transferred and ignore the duration, and the warm-up omit period is rejected, like the iperf3 CLI.
 
 ### Authentication
 

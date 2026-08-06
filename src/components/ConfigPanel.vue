@@ -120,6 +120,14 @@ const bandwidthOptions = computed(() => {
 
 // TCP 报文长度预设（最大 1MB，默认 128KB）
 const TCP_PRESETS = [1024, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
+// DSCP 常用取值（0-63，--dscp；标签为协议常量，无需翻译）
+const dscpOptions = [
+  { value: 8, label: 'CS1 (8)' }, { value: 16, label: 'CS2 (16)' }, { value: 24, label: 'CS3 (24)' },
+  { value: 32, label: 'CS4 (32)' }, { value: 40, label: 'CS5 (40)' }, { value: 48, label: 'CS6 (48)' },
+  { value: 56, label: 'CS7 (56)' }, { value: 46, label: 'EF (46)' }, { value: 44, label: 'VA (44)' },
+  { value: 10, label: 'AF11 (10)' }, { value: 18, label: 'AF21 (18)' }, { value: 26, label: 'AF31 (26)' },
+  { value: 34, label: 'AF41 (34)' }, { value: 1, label: 'LE (1)' }
+]
 // UDP 报文长度预设（最大 64KB，默认 1460 = iperf3 的 DEFAULT_UDP_BLKSIZE）。
 // 1460 与 1472 均不分片（1472 = 1500 MTU 上限），更大的值会触发 IP 分片
 const UDP_PRESETS = [128, 512, 1024, 1460, 1472, 4096, 8192, 16384, 32768, 65536]
@@ -205,7 +213,9 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <div class="section-title"><h2>{{ t('cfg.params') }}</h2><button class="text-button" :disabled="clientRunning" @click="emit('reset')">{{ t('cfg.reset') }}</button></div>
       <label><span>{{ t('cfg.serverIp') }}</span><span class="ip-row"><input :value="config.serverIp" :disabled="clientRunning" @input="set('serverIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="clientRunning" :title="t('nic.title')" @click="emit('pick-nic')">{{ t('cfg.nicBtn') }}</button></span></label>
       <label><span>{{ t('cfg.port') }}</span><input type="number" :value="config.port" min="1" max="65535" :disabled="clientRunning" @input="set('port', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><span>{{ t('cfg.duration') }}</span><input type="number" :value="config.duration" min="1" max="86400" :disabled="clientRunning" @input="set('duration', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label><span>{{ t('cfg.transferMode') }}</span><select :value="config.transferMode" :disabled="clientRunning" @change="set('transferMode', ($event.target as HTMLSelectElement).value as TestConfig['transferMode'])"><option value="time">{{ t('cfg.transferModeTime') }}</option><option value="bytes">{{ t('cfg.transferModeBytes') }}</option><option value="blocks">{{ t('cfg.transferModeBlocks') }}</option></select></label>
+      <label v-if="config.transferMode === 'time'"><span>{{ t('cfg.duration') }}</span><input type="number" :value="config.duration" min="1" max="86400" :disabled="clientRunning" @input="set('duration', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label v-else><span>{{ config.transferMode === 'bytes' ? t('cfg.transferAmountBytes') : t('cfg.transferAmountBlocks') }}</span><span class="field"><input type="number" :value="config.transferAmount" min="1" :disabled="clientRunning" @input="set('transferAmount', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('cfg.transferAmountNote') }}</small></span></label>
       <label><span>{{ t('cfg.parallel') }}</span><input type="number" :value="config.parallel" min="1" max="128" :disabled="clientRunning" @input="set('parallel', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('cfg.parallelNote') }}</small></label>
       <label><span>{{ t('cfg.bandwidth') }}</span><select :value="config.bandwidth" :disabled="clientRunning" @change="set('bandwidth', Number(($event.target as HTMLSelectElement).value))"><option v-for="option in bandwidthOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>{{ t('cfg.unlimited') }}</small></label>
       <label><span>{{ t('cfg.tcpLen') }}</span><select :value="tcpPacketSelect" :disabled="clientRunning" @change="onPacketChange('tcp', $event)"><option v-for="option in tcpPacketOptions" :key="option.value" :value="option.value">{{ option.label }}</option><option value="custom">{{ t('cfg.custom') }}</option></select></label>
@@ -215,6 +225,7 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <label><span>{{ t('cfg.window') }}</span><span class="field"><input type="number" :value="config.windowKb" min="0" max="16384" :disabled="clientRunning" @input="set('windowKb', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('cfg.windowNote') }}</small></span></label>
       <label><span>{{ t('cfg.cport') }}</span><span class="field"><input type="number" :value="config.cport" min="0" max="65535" :disabled="clientRunning" @input="set('cport', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('cfg.cportNote') }}</small></span></label>
       <label><span>{{ t('cfg.ipVersion') }}</span><select :value="config.ipVersion" :disabled="clientRunning" @change="set('ipVersion', Number(($event.target as HTMLSelectElement).value))"><option :value="0">{{ t('cfg.ipVersionAuto') }}</option><option :value="4">{{ t('cfg.ipVersion4') }}</option><option :value="6">{{ t('cfg.ipVersion6') }}</option></select></label>
+      <label><span>{{ t('cfg.dscp') }}</span><span class="field"><select :value="config.dscp" :disabled="clientRunning" @change="set('dscp', Number(($event.target as HTMLSelectElement).value))"><option :value="0">{{ t('cfg.dscpDefault') }}</option><option v-for="option in dscpOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>{{ t('cfg.dscpNote') }}</small></span></label>
       <label class="log-option"><input type="checkbox" :checked="config.getServerOutput" :disabled="clientRunning" @change="set('getServerOutput', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.getServerOutput') }}</span></label>
       <label><span>{{ t('cfg.engine') }}</span><select disabled><option>{{ t('cfg.engineValue') }}</option></select></label>
       <label><span>{{ t('cfg.direction') }}</span><select disabled><option>{{ t('cfg.directionValue') }}</option></select></label>

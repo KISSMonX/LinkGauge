@@ -21,7 +21,7 @@ import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, Met
 const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 
-const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, omitSecs: 0, windowKb: 0, cport: 0, ipVersion: 0, getServerOutput: false, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
+const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, omitSecs: 0, windowKb: 0, cport: 0, ipVersion: 0, getServerOutput: false, transferMode: 'time', transferAmount: 0, dscp: 0, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
 const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1, authEnabled: false, authPrivateKeyPath: '', authUsersPath: '', authPkcs1Padding: false, idleTimeout: 0, maxDuration: 0, bitrateLimit: 0 }
 const sshDefaults: SshConfig = { host: '', port: 22, username: '', authMethod: 'password', password: '', privateKeyPath: '', passphrase: '' }
 const config = ref<TestConfig>({ ...defaults })
@@ -414,8 +414,13 @@ function validate() {
   if (config.value.mode === 'client' && !/^([a-z\d-]+\.)*[a-z\d-]+$/i.test(config.value.serverIp) && !/^\d{1,3}(\.\d{1,3}){3}$/.test(config.value.serverIp)) return t('err.serverIp')
   if (config.value.port < 1 || config.value.port > 65535) return t('err.port')
   if (config.value.duration < 1) return t('err.duration')
-  // 预热必须落在测试时长内（iperf3 要求 -O < -t），否则统计区间为空
-  if (config.value.omitSecs > 0 && config.value.omitSecs >= config.value.duration) return t('err.omitTooLong')
+  // 预热与按量测试互斥（iperf3 CLI 同样拒绝 -O + -n/-k）
+  if (config.value.omitSecs > 0) {
+    if (config.value.transferMode !== 'time') return t('err.omitMode')
+    if (config.value.omitSecs >= config.value.duration) return t('err.omitTooLong')
+  }
+  if (config.value.transferMode !== 'time' && config.value.transferAmount < 1) return t('err.transferAmount')
+  if (config.value.dscp > 63) return t('err.dscpRange')
   if (config.value.windowKb > 16384) return t('err.windowTooLarge')
   if (config.value.cport > 65535) return t('err.cport')
   if (![0, 4, 6].includes(config.value.ipVersion)) return t('err.ipVersion')

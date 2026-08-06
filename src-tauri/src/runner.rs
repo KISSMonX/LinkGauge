@@ -184,8 +184,8 @@ pub async fn open_log_dir(app: AppHandle) -> Result<String, String> {
 }
 
 fn validate(request: &TestRequest) -> Result<(), String> {
-    // 服务端模式不需要持续时间（duration 恒为 0），只校验输出周期
-    if request.mode != "server" && request.duration == 0 {
+    // 服务端模式不需要持续时间（duration 恒为 0）；按量测试（-n/-k）忽略时长
+    if request.mode != "server" && request.transfer_mode == "time" && request.duration == 0 {
         return Err("持续时间必须大于 0".into());
     }
     if request.interval == 0 {
@@ -205,9 +205,15 @@ fn validate(request: &TestRequest) -> Result<(), String> {
     {
         return Err("启用认证后，RSA 私钥与授权用户文件路径均不能为空".into());
     }
-    // 预热必须在测试时长内（iperf3 要求 -O < -t），否则统计区间为空
-    if request.omit_secs > 0 && u64::from(request.omit_secs) >= request.duration {
-        return Err("预热时间必须小于测试时长".into());
+    // 预热与按量测试互斥（iperf3 CLI 同样拒绝 -O + -n/-k）；
+    // 按时长模式下预热必须落在测试时长内，否则统计区间为空
+    if request.omit_secs > 0 {
+        if request.transfer_mode != "time" {
+            return Err("预热（-O）仅支持按时长模式".into());
+        }
+        if u64::from(request.omit_secs) >= request.duration {
+            return Err("预热时间必须小于测试时长".into());
+        }
     }
     // 套接字缓冲区上限（KB）：与界面输入框上限一致，防溢出（引擎按 i32 字节接收）
     if request.window_kb > 16384 {
@@ -226,6 +232,17 @@ fn validate(request: &TestRequest) -> Result<(), String> {
     }
     if request.server_bitrate_limit_mbps > 1_000_000 {
         return Err("服务端带宽上限不能超过 1000000 Mbps".into());
+    }
+    // 结束条件与按量数量：time / bytes / blocks 三选一，按量必须大于 0
+    match request.transfer_mode.as_str() {
+        "time" => {}
+        "bytes" | "blocks" if request.transfer_amount > 0 => {}
+        "bytes" | "blocks" => return Err("按量测试的传输量必须大于 0".into()),
+        _ => return Err("测试结束条件只能是 time / bytes / blocks".into()),
+    }
+    // DSCP 范围 0-63（引擎 parse_dscp 同样约束，超出会被拒绝）
+    if request.dscp > 63 {
+        return Err("DSCP 值应在 0-63 之间".into());
     }
     Ok(())
 }
@@ -260,6 +277,11 @@ struct ClientParams {
     ip_version: u8,
     /// 测试结束后拉取服务端视角的输出（--get-server-output）
     get_server_output: bool,
+    /// 按量测试：bytes（-n）/ blocks（-k）优先于时长，二者互斥（引擎语义）
+    bytes_to_send: Option<u64>,
+    blocks_to_send: Option<u64>,
+    /// DSCP 值（0 = 不设置，1-63 映射到 TOS 高 6 位）
+    dscp: u32,
 }
 
 fn client_params_for(request: &TestRequest) -> ClientParams {
@@ -295,6 +317,11 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
         cport: request.cport,
         ip_version: request.ip_version,
         get_server_output: request.get_server_output,
+        // 按量测试：bytes/blocks 与时长互斥（引擎端条件优先级，iperf3 同款）
+        bytes_to_send: (request.transfer_mode == "bytes")
+            .then(|| request.transfer_amount.saturating_mul(1_000_000)),
+        blocks_to_send: (request.transfer_mode == "blocks").then_some(request.transfer_amount),
+        dscp: request.dscp,
     };
     match request.task_id.as_str() {
         "tcp-parallel" => params.num_streams = request.parallel.max(1) as u32,
@@ -555,6 +582,17 @@ fn engine_client_builder(
     // 拉取服务端视角输出（--get-server-output）：服务端为文本模式时随结果返回
     if params.get_server_output {
         builder = builder.get_server_output(true);
+    }
+    // 按量测试（-n / -k）：优先于时长；二者互斥由 transfer_mode 单选保证
+    if let Some(bytes) = params.bytes_to_send {
+        builder = builder.bytes(bytes);
+    }
+    if let Some(blocks) = params.blocks_to_send {
+        builder = builder.blocks(blocks);
+    }
+    // DSCP 标记（--dscp）：0 = 不设置；数值字符串由引擎解析并左移 2 位进 TOS 字节
+    if params.dscp > 0 {
+        builder = builder.dscp(&params.dscp.to_string());
     }
     // iperf3 认证：服务端以 --rsa-private-key-path + --authorized-users-path 启动时，
     // 客户端须用服务端公钥加密「用户名+密码」。未启用时前端已把三项清空，这里自然跳过。
@@ -1395,7 +1433,15 @@ async fn finish_engine(
                 append_log(log, &block);
                 emit_log(app, session_id, task_id, "INFO", block);
             }
-            emit_final_metric(app, session_id, task_id, report, request.duration as i64);
+            // 汇总终点即实测结束秒（按量模式 / 预热下与名义 duration 不同，须取实测值）
+            let measured_end = report
+                .end
+                .sum_sent
+                .as_ref()
+                .or(report.end.sum_received.as_ref())
+                .map(|s| s.end.round() as i64)
+                .unwrap_or(request.duration as i64);
+            emit_final_metric(app, session_id, task_id, report, measured_end);
             match outcome.termination {
                 Termination::Completed => {
                     append_log(
@@ -1717,6 +1763,9 @@ mod tests {
             cport: 0,
             ip_version: 0,
             get_server_output: false,
+            transfer_mode: "time".into(),
+            transfer_amount: 0,
+            dscp: 0,
             auth_username: String::new(),
             auth_password: String::new(),
             auth_public_key_path: String::new(),
@@ -1945,6 +1994,64 @@ mod tests {
         req.server_bitrate_limit_mbps = 1_000_000;
         assert!(validate(&req).is_ok());
         req.server_bitrate_limit_mbps = 1_000_001;
+        assert!(validate(&req).is_err());
+    }
+
+    #[test]
+    fn transfer_mode_maps_bytes_and_blocks() {
+        let mut req = request("tcp-single", "client", "tcp");
+        // bytes：MB → 字节（十进制）
+        req.transfer_mode = "bytes".into();
+        req.transfer_amount = 10;
+        let params = client_params_for(&req);
+        assert_eq!(params.bytes_to_send, Some(10_000_000));
+        assert_eq!(params.blocks_to_send, None);
+        // blocks：原样块数
+        req.transfer_mode = "blocks".into();
+        req.transfer_amount = 100;
+        let params = client_params_for(&req);
+        assert_eq!(params.blocks_to_send, Some(100));
+        assert_eq!(params.bytes_to_send, None);
+        // 默认按时长：两者皆不设置
+        let params = client_params_for(&request("tcp-single", "client", "tcp"));
+        assert_eq!(params.bytes_to_send, None);
+        assert_eq!(params.blocks_to_send, None);
+    }
+
+    #[test]
+    fn transfer_mode_validation_rules() {
+        let mut req = request("tcp-single", "client", "tcp");
+        // 按量模式数量必须大于 0
+        req.transfer_mode = "bytes".into();
+        req.transfer_amount = 0;
+        assert!(validate(&req).is_err());
+        req.transfer_amount = 1;
+        assert!(validate(&req).is_ok());
+        // 非法结束条件直接拒绝
+        req.transfer_mode = "packets".into();
+        assert!(validate(&req).is_err());
+        // 按量模式忽略时长校验：duration 为 0 也应通过（time 模式则拒绝）
+        req.transfer_mode = "time".into();
+        req.duration = 0;
+        assert!(validate(&req).is_err());
+        req.transfer_mode = "bytes".into();
+        req.transfer_amount = 1;
+        assert!(validate(&req).is_ok());
+        req.duration = 10;
+        // 预热与按量互斥
+        req.omit_secs = 1;
+        assert!(validate(&req).is_err());
+        req.transfer_mode = "time".into();
+        assert!(validate(&req).is_ok());
+        req.omit_secs = 0;
+    }
+
+    #[test]
+    fn dscp_range_validated() {
+        let mut req = request("tcp-single", "client", "tcp");
+        req.dscp = 63;
+        assert!(validate(&req).is_ok());
+        req.dscp = 64;
         assert!(validate(&req).is_err());
     }
 }

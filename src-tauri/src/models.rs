@@ -44,6 +44,18 @@ pub struct TestRequest {
     /// 仅客户端模式使用，服务端为文本模式时返回其汇总文本）
     #[serde(default)]
     pub get_server_output: bool,
+    /// 测试结束条件：time（按时长，默认）/ bytes（按传输字节数，-n）/ blocks（按块数，-k）。
+    /// bytes/blocks 优先于时长（引擎语义，与 iperf3 一致）
+    #[serde(default)]
+    pub transfer_mode: String,
+    /// 按量测试的数量：transfer_mode 为 bytes 时按 MB（十进制 ×1_000_000），
+    /// blocks 时即块数
+    #[serde(default)]
+    pub transfer_amount: u64,
+    /// DSCP 值（0 = 不设置，1-63 映射到 TOS 高 6 位，对应 iperf3 --dscp；
+    /// 仅客户端模式使用）
+    #[serde(default)]
+    pub dscp: u32,
     // —— iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path
     // 启动时必需）。全部 default，旧版前端不传时等价于不启用 ——
     /// 认证用户名；为空表示不启用认证
