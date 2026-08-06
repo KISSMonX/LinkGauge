@@ -422,7 +422,6 @@ async fn run_engine_client<R: tauri::Runtime>(
     append_run_summary(
         &app,
         &request,
-        &locale,
         &tr_format!(locale, "测试项目：{}", "Test item: {}", task_name),
     );
     let header = tr_format!(
@@ -447,12 +446,25 @@ async fn run_engine_client<R: tauri::Runtime>(
         request.interval,
     );
     append_log(&log, &header);
+    // 客户端运行汇总：执行过程（引擎/参数、执行行、间隔输出、重试告警）与
+    // 最终结果一并记录，一个文件即可还原整轮测试的执行过程
+    append_run_summary(&app, &request, &header);
     emit_log(
         &app,
         &session_id,
         &request.task_id,
         "INFO",
         tr_format!(
+            &locale,
+            "执行：riperf3 -c {}（内嵌引擎）",
+            "Running: riperf3 -c {} (embedded engine)",
+            request.server_ip
+        ),
+    );
+    append_run_summary(
+        &app,
+        &request,
+        &tr_format!(
             &locale,
             "执行：riperf3 -c {}（内嵌引擎）",
             "Running: riperf3 -c {} (embedded engine)",
@@ -511,6 +523,7 @@ async fn run_engine_client<R: tauri::Runtime>(
                     BUSY_RETRY_MAX
                 );
                 append_log(&log, &format!("[WARN] {message}"));
+                append_run_summary(&app, &request, &format!("[WARN] {message}"));
                 emit_log(&app, &session_id, &request.task_id, "WARN", message);
                 // 等待期间仍要响应「停止测试」，否则用户得干等完整个退避
                 let mut wait_rx = rx.clone();
@@ -557,6 +570,7 @@ fn engine_client_builder<R: tauri::Runtime>(
     let hook_task = request.task_id.clone();
     let hook_log = log.clone();
     let hook_locale = locale_handle.clone();
+    let hook_request = request.clone();
     let on_interval = move |interval: &riperf3::json_report::Interval| {
         if interval.sum.omitted {
             return;
@@ -572,13 +586,12 @@ fn engine_client_builder<R: tauri::Runtime>(
             retransmits: sum.retransmits.unwrap_or(0).max(0) as u64,
         };
         emit_metric(&hook_app, &hook_session, &hook_task, metric);
-        append_log(
-            &hook_log,
-            &format!(
-                "[INFO] {}",
-                format_interval_line(&current_locale(&hook_locale), second, sum)
-            ),
+        let line = format!(
+            "[INFO] {}",
+            format_interval_line(&current_locale(&hook_locale), second, sum)
         );
+        append_log(&hook_log, &line);
+        append_run_summary(&hook_app, &hook_request, &line);
     };
 
     let mut builder = ClientBuilder::new(&request.server_ip)
@@ -1235,7 +1248,6 @@ async fn run_ping<R: tauri::Runtime>(
     append_run_summary(
         &app,
         &request,
-        &locale,
         &tr_format!(locale, "测试项目：{}", "Test item: {}", task_name),
     );
     let args = if cfg!(windows) {
@@ -1243,14 +1255,10 @@ async fn run_ping<R: tauri::Runtime>(
     } else {
         vec!["-c".into(), "4".into(), request.server_ip.clone()]
     };
-    append_log(&log, &format!("[INFO] 执行：ping {}", args.join(" ")));
-    emit_log(
-        &app,
-        &session_id,
-        &request.task_id,
-        "INFO",
-        tr_format!(locale, "执行：ping {}", "Running: ping {}", args.join(" ")),
-    );
+    let exec_line = tr_format!(locale, "执行：ping {}", "Running: ping {}", args.join(" "));
+    append_log(&log, &format!("[INFO] {exec_line}"));
+    append_run_summary(&app, &request, &format!("[INFO] {exec_line}"));
+    emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
 
     let mut command = Command::new("ping");
     command
@@ -1308,7 +1316,9 @@ async fn run_ping<R: tauri::Runtime>(
             line = rx.recv() => {
                 if let Some((line, is_error)) = line {
                     let level = if is_error { "WARN" } else { "INFO" };
-                    append_log(&log, &format!("[{level}] {line}"));
+                    let output_line = format!("[{level}] {line}");
+                    append_log(&log, &output_line);
+                    append_run_summary(&app, &request, &output_line);
                     emit_log(&app, &session_id, &request.task_id, level, line.clone());
                     if let Some(metric) = parse_ping_metric(&line) {
                         emit_metric(&app, &session_id, &request.task_id, metric);
@@ -1343,7 +1353,6 @@ async fn run_ping<R: tauri::Runtime>(
     append_run_summary(
         &app,
         &request,
-        &locale,
         if final_stopped {
             tr(&locale, "测试结果: 手动停止", "Result: manual stop")
         } else if final_success {
@@ -1501,12 +1510,7 @@ fn append_log(log: &SessionLog, line: &str) {
 /// 服务端一次会话一个 Server-*.log）。前端每轮开始生成 startedAt 作为 runId；
 /// run_id 为 0（旧前端/预览）或路径不可用时静默跳过——汇总文件是补充信息，
 /// 不因写入失败影响测试本身
-fn append_run_summary<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    request: &TestRequest,
-    locale: &str,
-    line: &str,
-) {
+fn append_run_summary<R: tauri::Runtime>(app: &AppHandle<R>, request: &TestRequest, line: &str) {
     if request.run_id == 0 {
         return;
     }
@@ -1524,7 +1528,7 @@ fn append_run_summary<R: tauri::Runtime>(
         .join("tests");
     let name = format!(
         "{}-{}-{}-{}.log",
-        tr(locale, "客户端汇总", "Client-Summary"),
+        tr(&request.locale, "客户端汇总", "Client-Summary"),
         safe_name(&request.local_ip),
         safe_name(&request.server_ip),
         stamp
@@ -1602,7 +1606,6 @@ async fn finish_engine<R: tauri::Runtime>(
             append_run_summary(
                 app,
                 request,
-                locale,
                 tr(locale, "测试结果: 未完成", "Result: incomplete"),
             );
             fail_engine(app, session_id, task_id, log, locale, &message, fatal).await;
@@ -1621,7 +1624,7 @@ async fn finish_engine<R: tauri::Runtime>(
                 ),
             );
             append_engine_summary(log, report, locale);
-            append_run_summary(app, request, locale, &engine_summary_lines(report, locale));
+            append_run_summary(app, request, &engine_summary_lines(report, locale));
             // --get-server-output：服务端视角的汇总文本（标准 iperf3 服务端为
             // 文本模式时才会产生；本机 LinkGauge 服务端是 JSON 模式，通常为空）。
             // 写入测试日志并广播一条日志事件，随日志一并进入报告
@@ -1654,7 +1657,6 @@ async fn finish_engine<R: tauri::Runtime>(
                     append_run_summary(
                         app,
                         request,
-                        locale,
                         tr(locale, "测试结果: 完成", "Result: completed"),
                     );
                     finish_ok(app, session_id, task_id, log, "success").await;
@@ -1664,7 +1666,6 @@ async fn finish_engine<R: tauri::Runtime>(
                     append_run_summary(
                         app,
                         request,
-                        locale,
                         tr(locale, "测试结果: 手动停止", "Result: manual stop"),
                     );
                     finish_ok(app, session_id, task_id, log, "stopped").await;
@@ -1673,7 +1674,6 @@ async fn finish_engine<R: tauri::Runtime>(
                     append_run_summary(
                         app,
                         request,
-                        locale,
                         tr(locale, "测试结果: 未完成", "Result: incomplete"),
                     );
                     let message = tr(
@@ -1688,7 +1688,6 @@ async fn finish_engine<R: tauri::Runtime>(
                     append_run_summary(
                         app,
                         request,
-                        locale,
                         tr(locale, "测试结果: 未完成", "Result: incomplete"),
                     );
                     let message = tr_format!(
@@ -1703,7 +1702,6 @@ async fn finish_engine<R: tauri::Runtime>(
                     append_run_summary(
                         app,
                         request,
-                        locale,
                         tr(locale, "测试结果: 未完成", "Result: incomplete"),
                     );
                     let message = tr_format!(
@@ -2643,6 +2641,10 @@ mod queue_tests {
         assert!(
             content.contains("测试项目：TCP单向带宽"),
             "汇总文件应包含测试项目行"
+        );
+        assert!(
+            content.contains("执行：riperf3"),
+            "汇总文件应包含执行过程（执行行）"
         );
         assert_eq!(
             content.matches("测试结果: 完成").count(),
