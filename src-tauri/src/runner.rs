@@ -184,8 +184,10 @@ pub async fn open_log_dir(app: AppHandle) -> Result<String, String> {
 }
 
 fn validate(request: &TestRequest) -> Result<(), String> {
-    // 服务端模式不需要持续时间（duration 恒为 0）；按量测试（-n/-k）忽略时长
-    if request.mode != "server" && request.transfer_mode == "time" && request.duration == 0 {
+    // 服务端模式不需要持续时间（duration 恒为 0）；按量测试（-n/-k）忽略时长。
+    // 按量测试项强制 bytes/blocks，与全局 transfer_mode 同源推导
+    let transfer_mode = effective_transfer_mode(request);
+    if request.mode != "server" && transfer_mode == "time" && request.duration == 0 {
         return Err("持续时间必须大于 0".into());
     }
     if request.interval == 0 {
@@ -208,7 +210,7 @@ fn validate(request: &TestRequest) -> Result<(), String> {
     // 预热与按量测试互斥（iperf3 CLI 同样拒绝 -O + -n/-k）；
     // 按时长模式下预热必须落在测试时长内，否则统计区间为空
     if request.omit_secs > 0 {
-        if request.transfer_mode != "time" {
+        if transfer_mode != "time" {
             return Err("预热（-O）仅支持按时长模式".into());
         }
         if u64::from(request.omit_secs) >= request.duration {
@@ -234,7 +236,7 @@ fn validate(request: &TestRequest) -> Result<(), String> {
         return Err("服务端带宽上限不能超过 1000000 Mbps".into());
     }
     // 结束条件与按量数量：time / bytes / blocks 三选一，按量必须大于 0
-    match request.transfer_mode.as_str() {
+    match transfer_mode {
         "time" => {}
         "bytes" | "blocks" if request.transfer_amount > 0 => {}
         "bytes" | "blocks" => return Err("按量测试的传输量必须大于 0".into()),
@@ -296,6 +298,17 @@ struct ClientParams {
     mptcp: bool,
 }
 
+/// 按量模式推导：按量测试项（tcp-bytes / udp-bytes / tcp-blocks）强制
+/// bytes / blocks，其余取全局 transfer_mode。validate 与 client_params_for
+/// 共用同一推导，保证「队列里混排按量项 + 常规项」时各项口径一致
+fn effective_transfer_mode(request: &TestRequest) -> &str {
+    match request.task_id.as_str() {
+        "tcp-bytes" | "udp-bytes" => "bytes",
+        "tcp-blocks" => "blocks",
+        _ => request.transfer_mode.as_str(),
+    }
+}
+
 fn client_params_for(request: &TestRequest) -> ClientParams {
     // 协议由任务类型推断：udp-* 为 UDP，其余（含 stress）为 TCP，
     // 使 TCP/UDP 测试项可以在同一队列中混合执行
@@ -304,6 +317,7 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
     } else {
         TransportProtocol::Tcp
     };
+    let transfer_mode = effective_transfer_mode(request);
     let mut params = ClientParams {
         protocol,
         duration: request.duration as u32,
@@ -329,16 +343,17 @@ fn client_params_for(request: &TestRequest) -> ClientParams {
         cport: request.cport,
         ip_version: request.ip_version,
         get_server_output: request.get_server_output,
-        // 按量测试：bytes/blocks 与时长互斥（引擎端条件优先级，iperf3 同款）
-        bytes_to_send: (request.transfer_mode == "bytes")
+        // 按量测试：bytes/blocks 与时长互斥（引擎端条件优先级，iperf3 同款）；
+        // 按量测试项强制模式，其余取全局参数
+        bytes_to_send: (transfer_mode == "bytes")
             .then(|| request.transfer_amount.saturating_mul(1_000_000)),
-        blocks_to_send: (request.transfer_mode == "blocks").then_some(request.transfer_amount),
+        blocks_to_send: (transfer_mode == "blocks").then_some(request.transfer_amount),
         dscp: request.dscp,
         // 空字符串 = 不设置；其余原样下发（引擎在非 Linux/FreeBSD 上静默忽略）
         congestion_algo: (!request.congestion_algo.trim().is_empty())
             .then(|| request.congestion_algo.trim().to_string()),
-        udp_dont_fragment: request.udp_dont_fragment,
-        mptcp: request.mptcp,
+        udp_dont_fragment: request.udp_dont_fragment || request.task_id == "udp-df",
+        mptcp: request.mptcp || request.task_id == "tcp-mptcp",
     };
     match request.task_id.as_str() {
         "tcp-parallel" => params.num_streams = request.parallel.max(1) as u32,
@@ -2113,5 +2128,55 @@ mod tests {
         assert!(client_params_for(&req).mptcp);
         // 默认关闭
         assert!(!client_params_for(&request("tcp-single", "client", "tcp")).mptcp);
+    }
+
+    #[test]
+    fn byte_items_force_transfer_mode() {
+        // tcp-bytes：即使全局为按时长，也强制 bytes（数量取全局 transfer_amount）
+        let mut req = request("tcp-bytes", "client", "tcp");
+        req.transfer_mode = "time".into();
+        req.transfer_amount = 5;
+        let params = client_params_for(&req);
+        assert_eq!(params.bytes_to_send, Some(5_000_000));
+        assert_eq!(params.blocks_to_send, None);
+        // udp-bytes 同款；tcp-blocks 强制 blocks
+        let params = client_params_for(&request("udp-bytes", "client", "udp"));
+        assert_eq!(params.bytes_to_send, Some(0)); // amount 为 0 时仍强制 bytes（数量校验在 validate）
+        let params = client_params_for(&request("tcp-blocks", "client", "tcp"));
+        assert_eq!(params.blocks_to_send, Some(0));
+        // 普通项不受影响
+        let params = client_params_for(&request("tcp-single", "client", "tcp"));
+        assert_eq!(params.bytes_to_send, None);
+    }
+
+    #[test]
+    fn feature_items_force_flags() {
+        // tcp-mptcp / udp-df：无论全局开关，测试项强制对应标志
+        let req = request("tcp-mptcp", "client", "tcp");
+        assert!(client_params_for(&req).mptcp);
+        let req = request("udp-df", "client", "udp");
+        assert!(client_params_for(&req).udp_dont_fragment);
+        // 普通项跟随全局开关
+        let mut req = request("tcp-single", "client", "tcp");
+        req.mptcp = false;
+        assert!(!client_params_for(&req).mptcp);
+    }
+
+    #[test]
+    fn byte_items_require_amount_in_validate() {
+        // 按量测试项选中但全局按量数量为 0：必须拒绝（即使全局 mode 为 time）
+        let mut req = request("tcp-bytes", "client", "tcp");
+        req.transfer_mode = "time".into();
+        req.transfer_amount = 0;
+        assert!(validate(&req).is_err());
+        req.transfer_amount = 1;
+        assert!(validate(&req).is_ok());
+        // 按量项与预热互斥
+        req.omit_secs = 1;
+        assert!(validate(&req).is_err());
+        // 普通项 + 全局按量模式下：按量项校验仍生效
+        let mut mixed = request("tcp-single", "client", "tcp");
+        mixed.transfer_amount = 2;
+        assert!(validate(&mixed).is_ok());
     }
 }

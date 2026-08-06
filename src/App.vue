@@ -35,7 +35,13 @@ const items = ref<TestItem[]>([
   { id: 'udp-bandwidth', label: 'UDP 带宽', protocol: 'udp', enabled: true, status: 'waiting' },
   { id: 'udp-loss', label: 'UDP 抖动 / 丢包', protocol: 'udp', enabled: true, status: 'waiting' },
   { id: 'tcp-reverse', label: '反向测试（Reverse）', protocol: 'tcp', enabled: true, status: 'waiting' },
-  { id: 'stress', label: '持续时间压力测试', protocol: 'tcp', enabled: true, status: 'waiting' }
+  { id: 'stress', label: '持续时间压力测试', protocol: 'tcp', enabled: true, status: 'waiting' },
+  // —— 本次功能扩展新增的测试项（按量 / MPTCP / 禁止分片），默认关闭 ——
+  { id: 'tcp-bytes', label: 'TCP 按量传输测试', protocol: 'tcp', enabled: false, status: 'waiting' },
+  { id: 'udp-bytes', label: 'UDP 按量传输测试', protocol: 'udp', enabled: false, status: 'waiting' },
+  { id: 'tcp-blocks', label: 'TCP 按块传输测试', protocol: 'tcp', enabled: false, status: 'waiting' },
+  { id: 'tcp-mptcp', label: 'TCP MPTCP 多路径测试', protocol: 'tcp', enabled: false, status: 'waiting' },
+  { id: 'udp-df', label: 'UDP 无分片（DF）测试', protocol: 'udp', enabled: false, status: 'waiting' }
 ])
 const local = ref<NetworkInfo>({ ip: '127.0.0.1', mac: '--', hostname: 'localhost', interfaceName: '默认网卡', speedMbps: 0 })
 const logs = ref<LogEntry[]>([])
@@ -414,12 +420,15 @@ function validate() {
   if (config.value.mode === 'client' && !/^([a-z\d-]+\.)*[a-z\d-]+$/i.test(config.value.serverIp) && !/^\d{1,3}(\.\d{1,3}){3}$/.test(config.value.serverIp)) return t('err.serverIp')
   if (config.value.port < 1 || config.value.port > 65535) return t('err.port')
   if (config.value.duration < 1) return t('err.duration')
-  // 预热与按量测试互斥（iperf3 CLI 同样拒绝 -O + -n/-k）
+  // 按量测试项（tcp-bytes / udp-bytes / tcp-blocks）强制按量模式：与全局
+  // 按量模式同样要求数量大于 0、与预热互斥
+  const amountItems = ['tcp-bytes', 'udp-bytes', 'tcp-blocks']
+  const amountItemSelected = items.value.some((i) => amountItems.includes(i.id) && i.enabled)
   if (config.value.omitSecs > 0) {
-    if (config.value.transferMode !== 'time') return t('err.omitMode')
+    if (config.value.transferMode !== 'time' || amountItemSelected) return t('err.omitMode')
     if (config.value.omitSecs >= config.value.duration) return t('err.omitTooLong')
   }
-  if (config.value.transferMode !== 'time' && config.value.transferAmount < 1) return t('err.transferAmount')
+  if ((config.value.transferMode !== 'time' || amountItemSelected) && config.value.transferAmount < 1) return t('err.transferAmount')
   if (config.value.dscp > 63) return t('err.dscpRange')
   if (config.value.windowKb > 16384) return t('err.windowTooLarge')
   if (config.value.cport > 65535) return t('err.cport')
