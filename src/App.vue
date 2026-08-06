@@ -83,9 +83,8 @@ const elapsed = computed(() => { void nowTick.value; return startedAt.value ? Ma
 const connected = ref(false)
 /** 本次连接的客户端本地端口（控制连接建立时由后端广播） */
 const clientLocalPort = ref(0)
-/** 错误弹窗：retry=true 时才提供「重试」按钮（重试 = 重新开始客户端测试队列），
- *  服务端 / SSH / 文件操作类错误重试无意义，只给关闭 */
-const errorDialog = ref<{ title: string; message: string; retry?: boolean } | null>(null)
+/** 错误弹窗只用于展示失败原因，确认后关闭，不在测试过程中提供重试入口 */
+const errorDialog = ref<{ title: string; message: string } | null>(null)
 /** 信息弹窗（报告生成、预览模式等提示） */
 const infoDialog = ref<{ title: string; message: string } | null>(null)
 /** 设置弹窗：语言 / 主题 */
@@ -594,10 +593,10 @@ async function start() {
   if (clientRunning.value) { log('WARN', t('log.alreadyRunning')); return }
   // 开始即全新一轮测试：以当前勾选的项目为队列，不涉及上次未完成测试的恢复
   if (config.value.bandwidth < 0) config.value.bandwidth = local.value.speedMbps > 0 ? local.value.speedMbps : 0
-  const invalid = validate(); if (invalid) { errorDialog.value = { title: t('err.paramError'), message: invalid, retry: true }; return }
+  const invalid = validate(); if (invalid) { errorDialog.value = { title: t('err.paramError'), message: invalid }; return }
   // TCP / UDP 测试项可同时勾选，按列表顺序逐个执行
   const selected = items.value.filter((i) => i.enabled)
-  if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg'), retry: true }; return }
+  if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg') }; return }
   items.value.forEach((i) => { if (i.enabled) i.status = 'waiting' })
   points.value = []; progress.value = 0; connected.value = false; startedAt.value = Date.now()
   selectedHistoryId.value = '' // 新一轮测试开始：图表回到实时模式
@@ -688,7 +687,7 @@ function appendRunLog(level: string, message: string) {
   if (!isTauri()) return
   invoke('append_client_log', {
     request: { runId: startedAt.value, localIp: local.value.ip, serverIp: config.value.serverIp, locale: locale.value, level, message },
-  }).catch(() => {})
+  }).catch((e) => log('WARN', `运行日志补写失败（${String(e)}）——旧构建未注册 append_client_log 命令时需要重启应用`))
 }
 
 function armWatchdog(taskId: string) {
@@ -891,7 +890,7 @@ function failCurrent(message: string, abort = false) {
     if (driver.value === ownLabel) void runNext()
   }
   const lastLog = summary.logPaths.at(-1)
-  errorDialog.value = { title: t('err.alert'), message: lastLog ? `${(abort ? `${t('err.queueAborted')}\n\n` : '') + message}\n\n${t('err.logFile', { path: lastLog })}` : message, retry: !abort }
+  errorDialog.value = { title: t('err.alert'), message: lastLog ? `${(abort ? `${t('err.queueAborted')}\n\n` : '') + message}\n\n${t('err.logFile', { path: lastLog })}` : message }
 }
 function finishRun(completed: boolean) { disarmWatchdog(); clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100 } log('INFO', t('log.finish')) }
 async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); if (item) snapshotItem(item.id, 'stopped'); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; finishRun(false) }
@@ -1073,7 +1072,7 @@ onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyn
       <StatusPanel :mode="showServerView ? 'logs' : 'full'" :items="items" :logs="showServerView ? serverLogs : clientLogs" :server-running="serverRunning" :history="itemHistory" :history-selected="selectedHistoryId" :running="clientRunning" @select="selectedHistoryId = $event" @clear="clearLogs" @open-log-dir="openLogDir" @report="generateReport('html')" />
     </div>
     <ReportSummary v-if="side !== 'server'" :config="config" :summary="summary" @report="generateReport" @open-dir="openReportDir" />
-    <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button v-if="errorDialog?.retry" class="primary" @click="errorDialog = null; start()">{{ t('common.retry') }}</button><button v-else @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
+    <div v-if="errorDialog || infoDialog" class="modal-backdrop" @click.self="errorDialog = null; infoDialog = null"><div class="modal"><button class="modal-close" @click="errorDialog = null; infoDialog = null">×</button><h2>{{ (errorDialog || infoDialog)?.title }}</h2><div class="modal-body"><span :class="['modal-symbol', errorDialog ? 'error' : 'info']">{{ errorDialog ? '×' : 'i' }}</span><p>{{ (errorDialog || infoDialog)?.message }}</p></div><div class="modal-actions"><button @click="errorDialog = null; infoDialog = null">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="confirmDialog" class="modal-backdrop" @click.self="confirmDialog = null"><div class="modal"><button class="modal-close" @click="confirmDialog = null">×</button><h2>{{ confirmDialog.title }}</h2><div class="modal-body"><span class="modal-symbol info">i</span><p>{{ confirmDialog.message }}</p></div><div class="modal-actions"><button @click="confirmDialog = null">{{ t('common.cancel') }}</button><button class="danger" @click="confirmStop">{{ confirmDialog.action === 'exit' ? t('confirm.exitButton') : t('common.confirm') }}</button></div></div></div>
     <div v-if="settingsDialog" class="modal-backdrop" @click.self="settingsDialog = false"><div class="modal"><button class="modal-close" @click="settingsDialog = false">×</button><h2>{{ t('settings.title') }}</h2><div class="settings-form"><label><span>{{ t('settings.language') }}</span><select :value="locale" @change="onLocaleChange($event)"><option value="en">English</option><option value="zh">中文</option></select></label><label><span>{{ t('settings.theme') }}</span><select :value="theme" @change="onThemeChange($event)"><option value="light">{{ t('settings.light') }}</option><option value="dark">{{ t('settings.dark') }}</option></select></label></div><p class="settings-note">{{ t('settings.engineNote') }}</p><div class="modal-actions"><button class="primary" @click="settingsDialog = false">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="nicDialog" class="modal-backdrop"><div class="modal nic-modal"><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false">{{ t('nic.cancel') }}</button></div></div></div>
