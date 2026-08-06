@@ -257,14 +257,29 @@ function emitSync() {
 }
 async function applySync(payload: SyncState) {
   syncing = true
+  // 首次同步（新分离窗口的初始化应答）视为可信快照，全量采纳；之后进入来源过滤
+  const firstSync = !stateReady
   // 收到任何远端同步即视为已就绪（自己的广播在就绪前被抑制，此处收到的必为远端）
   stateReady = true
   config.value = payload.config
   serverConfig.value = payload.serverConfig
-  items.value = payload.items
   local.value = payload.local
   clientRunning.value = payload.clientRunning
   serverRunning.value = payload.serverRunning
+  // 队列运行中的展示状态（items 状态、进度、图表数据）只随驱动窗口同步：非驱动
+  // 窗口也会处理 complete 事件（本地更新状态但不推进队列），其副本总是滞后——
+  // 「已完成项仍标 running、新项还是 waiting」，整体替换会把驱动窗口的高亮/进度
+  // 回退。勾选（enabled）任意窗口可改，正常采纳；clientRunning=false（停止后）
+  // 恢复全量采纳，让 stopped/failed 标记与历史数据收敛。
+  if (firstSync || payload.source === payload.driver || !clientRunning.value) {
+    items.value = payload.items
+    progress.value = payload.progress
+    points.value = payload.points
+    completedPoints.value = payload.completedPoints
+    itemHistory.value = payload.itemHistory
+  } else {
+    items.value.forEach((item, i) => { const remote = payload.items[i]; if (remote) item.enabled = remote.enabled })
+  }
   serverSession.value = payload.serverSession
   // 队列推进状态（queue/queueIndex/clientSession/driver）只采纳驱动窗口的同步：
   // 非驱动窗口收到 complete 也会执行 completeCurrent（更新状态但不推进队列），
@@ -281,14 +296,9 @@ async function applySync(payload: SyncState) {
   savedTcpLength.value = payload.savedTcpLength
   savedUdpLength.value = payload.savedUdpLength
   Object.assign(summary, payload.summary)
-  // 运行中的瞬时数据整体替换（引擎日志来自同一批事件，替换后内容一致，不会重复累加）；
-  // 本窗口自己的 UI 日志保留在队首，与远端引擎日志合并
-  points.value = payload.points
-  completedPoints.value = payload.completedPoints
+  // 运行中的瞬时数据已在上方按驱动窗口来源处理；UI 日志本地保留，与远端引擎日志合并
   completedLabel.value = payload.completedLabel
-  itemHistory.value = payload.itemHistory
   selectedHistoryId.value = payload.selectedHistoryId
-  progress.value = payload.progress
   startedAt.value = payload.startedAt
   connected.value = payload.connected
   clientLocalPort.value = payload.clientLocalPort
