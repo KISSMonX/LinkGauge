@@ -419,8 +419,8 @@ async fn run_engine_client<R: tauri::Runtime>(
     let locale = current_locale(&locale_handle);
     let header = tr_format!(
         &locale,
-        "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: {}, 端口 {}, 时长 {}s, 并发 {}, 带宽 {}, 报文长度 {}, 输出周期 {}s\n\n",
-        "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: {}, port {}, duration {}s, streams {}, bandwidth {}, packet length {}, interval {}s\n\n",
+        "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: {}, 端口 {}, 时长 {}s, 并发 {}, 带宽 {}, 报文长度 {}, 输出周期 {}s\n",
+        "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: {}, port {}, duration {}s, streams {}, bandwidth {}, packet length {}, interval {}s\n",
         riperf3::VERSION,
         if client_params_for(&request).protocol == TransportProtocol::Udp { "UDP" } else { "TCP" },
         request.port,
@@ -782,8 +782,8 @@ async fn run_engine_server<R: tauri::Runtime>(
         &log,
         &tr_format!(
             locale,
-            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务{}{}\n\n",
-            "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: bind {}, listen port {}, serving continuously{}{}\n\n",
+            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务{}{}\n",
+            "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: bind {}, listen port {}, serving continuously{}{}\n",
             riperf3::VERSION,
             bind_display,
             request.port,
@@ -1098,13 +1098,10 @@ async fn run_engine_server<R: tauri::Runtime>(
                     heartbeat.abort();
                     append_log(
                         &log,
-                        &format!(
-                            "\n{}",
-                            tr(
-                                &locale,
-                                "测试结果: 服务端已停止（手动停止）",
-                                "Result: server stopped (manual stop)"
-                            )
+                        tr(
+                            &locale,
+                            "测试结果: 服务端已停止（手动停止）",
+                            "Result: server stopped (manual stop)",
                         ),
                     );
                     emit_log(
@@ -1130,7 +1127,7 @@ async fn run_engine_server<R: tauri::Runtime>(
                 append_log(
                     &log,
                     &format!(
-                        "\n[INFO] {}",
+                        "[INFO] {}",
                         tr_format!(
                             locale,
                             "客户端 {} 完成测试，汇总如下：",
@@ -1177,7 +1174,7 @@ async fn run_engine_server<R: tauri::Runtime>(
                     } else {
                         ("服务端已停止（手动停止）", "Server stopped (manual stop)")
                     };
-                    append_log(&log, &format!("\n{}", tr(&locale, result_zh, result_en)));
+                    append_log(&log, tr(&locale, result_zh, result_en));
                     emit_log(
                         &app,
                         &session_id,
@@ -1319,7 +1316,7 @@ async fn run_ping<R: tauri::Runtime>(
     append_log(
         &log,
         &format!(
-            "\n{}: {}",
+            "{}: {}",
             tr(&locale, "测试结果", "Result"),
             if final_success {
                 tr(&locale, "完成", "completed")
@@ -1447,8 +1444,8 @@ async fn setup_log<R: tauri::Runtime>(
     };
     let header = tr_format!(
         &request.locale,
-        "测试时间: {}\n客户端IP: {}\n服务端IP: {}\n测试模式: {}\n测试项目: {}\n",
-        "Test time: {}\nClient IP: {}\nServer IP: {}\nMode: {}\nTest item: {}\n",
+        "测试时间: {}\n客户端IP: {}\n服务端IP: {}\n测试模式: {}\n测试项目: {}",
+        "Test time: {}\nClient IP: {}\nServer IP: {}\nMode: {}\nTest item: {}",
         Local::now().format("%Y-%m-%d %H:%M:%S"),
         local_ip,
         request.server_ip,
@@ -1464,10 +1461,12 @@ async fn setup_log<R: tauri::Runtime>(
     Some(log)
 }
 
-/// 同步追加一行日志（实时回调与主任务共用）
+/// 同步追加一行日志（实时回调与主任务共用）。统一补换行：日志文件与界面日志
+/// 一样逐行呈现（此前只写内容不换行，多行输出在文件里粘成一行）
 fn append_log(log: &SessionLog, line: &str) {
     if let Ok(mut file) = log.file.lock() {
         let _ = file.write_all(line.as_bytes());
+        let _ = file.write_all(b"\n");
     }
 }
 
@@ -1538,7 +1537,7 @@ async fn finish_engine<R: tauri::Runtime>(
             append_log(
                 log,
                 &format!(
-                    "\n[INFO] {}",
+                    "[INFO] {}",
                     tr(
                         locale,
                         "测试结束，最终汇总：",
@@ -1560,7 +1559,7 @@ async fn finish_engine<R: tauri::Runtime>(
                     "服务端输出（--get-server-output）：",
                     "Server output (--get-server-output):",
                 );
-                let block = format!("\n[INFO] {header}\n{text}");
+                let block = format!("[INFO] {header}\n{text}");
                 append_log(log, &block);
                 emit_log(app, session_id, task_id, "INFO", block);
             }
@@ -1575,20 +1574,11 @@ async fn finish_engine<R: tauri::Runtime>(
             emit_final_metric(app, session_id, task_id, report, measured_end);
             match outcome.termination {
                 Termination::Completed => {
-                    append_log(
-                        log,
-                        &format!("\n{}", tr(locale, "测试结果: 完成", "Result: completed")),
-                    );
+                    append_log(log, tr(locale, "测试结果: 完成", "Result: completed"));
                     finish_ok(app, session_id, task_id, log, "success").await;
                 }
                 Termination::Interrupted => {
-                    append_log(
-                        log,
-                        &format!(
-                            "\n{}",
-                            tr(locale, "测试结果: 手动停止", "Result: manual stop")
-                        ),
-                    );
+                    append_log(log, tr(locale, "测试结果: 手动停止", "Result: manual stop"));
                     finish_ok(app, session_id, task_id, log, "stopped").await;
                 }
                 Termination::ServerTerminated => {
@@ -1765,7 +1755,7 @@ async fn fail_engine<R: tauri::Runtime>(
     append_log(log, &format!("[ERROR] {message}"));
     let log_path = finish_log(log, false).await;
     let full = format!(
-        "{message}\n{}",
+        "{message}{}",
         tr_format!(locale, "详细日志：{}", "Detailed log: {}", log_path)
     );
     emit_error(app, session_id, task_id, full, Some(log_path), fatal);
@@ -1898,9 +1888,34 @@ fn emit_error<R: tauri::Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::{client_params_for, is_server_unreachable, validate};
+    use super::{append_log, client_params_for, is_server_unreachable, validate, TestLog};
     use crate::models::TestRequest;
     use riperf3::TransportProtocol;
+    use std::sync::{Arc, Mutex};
+
+    /// 日志文件逐行换行：append_log 统一补 \n，多行内容与界面日志一样分行呈现
+    #[test]
+    fn append_log_separates_lines_with_newline() {
+        let dir = std::env::temp_dir().join(format!("linkgauge-log-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.log");
+        let file = std::fs::File::create(&path).unwrap();
+        let log = Arc::new(TestLog {
+            file: Arc::new(Mutex::new(file)),
+            working_path: path.clone(),
+            base_name: "test".into(),
+        });
+        append_log(&log, "[INFO] 第一行");
+        append_log(&log, "[INFO] 第二行");
+        append_log(&log, "多行内容\n内含换行");
+        drop(log);
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            content,
+            "[INFO] 第一行\n[INFO] 第二行\n多行内容\n内含换行\n"
+        );
+    }
 
     fn request(task_id: &str, mode: &str, protocol: &str) -> TestRequest {
         TestRequest {
