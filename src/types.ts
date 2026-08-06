@@ -34,6 +34,12 @@ export interface TestConfig {
   ipVersion: number
   /** 测试结束后拉取服务端视角的输出（--get-server-output） */
   getServerOutput: boolean
+  /** 测试结束条件：time = 按时长，bytes = 按传输字节数（-n），blocks = 按块数（-k） */
+  transferMode: 'time' | 'bytes' | 'blocks'
+  /** 按量测试的数量：bytes 模式为 MB，blocks 模式为块数 */
+  transferAmount: number
+  /** DSCP 值（0 = 不设置，1–63，对应 --dscp） */
+  dscp: number
   /** 启用 iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path 启动时必需） */
   authEnabled: boolean
   authUsername: string
