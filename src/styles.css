@@ -218,6 +218,8 @@ h2,h3,p { margin-top: 0; }
 .item-tooltip { position: fixed; z-index: 999; max-width: 280px; padding: 6px 10px; border-radius: 5px; font-size: 12px; line-height: 1.55; color: var(--tooltip-text); background: var(--tooltip-bg); box-shadow: 0 4px 14px #0000002e; pointer-events: none; white-space: normal; }
 .test-list label { display: flex; align-items: center; gap: 10px; height: 27px; cursor: pointer; }
 .test-list label.muted { opacity: .5; }
+.parameters label.muted { opacity: .5; }
+.log-option.muted { opacity: .5; }
 .test-list input[type=checkbox], .log-option input { width: 17px; height: 17px; accent-color: var(--blue); }
 .test-list .drag { margin-left: auto; color: var(--text-dim); font-size: 18px; transform: rotate(90deg); }
 .text-button { border: 0; padding: 2px; color: var(--text-secondary); background: transparent; }
