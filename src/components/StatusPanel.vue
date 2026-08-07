@@ -13,6 +13,7 @@ const filter = ref<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL')
 const logBox = ref<HTMLElement>()
 const visibleLogs = computed(() => filter.value === 'ALL' ? props.logs : props.logs.filter((l) => l.level === filter.value))
 const selected = computed(() => props.items.filter((i) => i.enabled))
+const completedCount = computed(() => selected.value.filter(i => i.status === 'success').length)
 const iconName = (status: TestItem['status']) => status === 'success' ? 'check' : status === 'running' ? 'play' : status === 'failed' ? 'info' : 'clock'
 const statusText = (status: TestItem['status']) => ({ waiting: t('st.waiting'), running: t('st.running'), success: t('st.success'), failed: t('st.failed'), stopped: t('st.stopped') })[status]
 const filterLabel = (item: 'ALL' | 'INFO' | 'WARN' | 'ERROR') => ({ ALL: t('st.filterAll'), INFO: t('st.filterInfo'), WARN: t('st.filterWarn'), ERROR: t('st.filterError') })[item]
@@ -28,7 +29,7 @@ watch(() => [props.logs.length, props.logs.at(-1)?.time ?? ''], async () => { aw
     <h2 class="panel-title">{{ mode === 'logs' ? t('st.logsOnly') : t('st.title') }}</h2>
     <template v-if="showQueue">
     <section class="queue-section">
-      <div class="section-title"><h3>⌄ {{ t('st.queue') }}</h3><span>{{ selected.filter(i => i.status === 'success').length }}/{{ selected.length }}</span></div>
+      <div class="section-title"><h3>⌄ {{ t('st.queue') }}</h3><span>{{ completedCount }}/{{ selected.length }}</span></div>
       <div v-if="serverRunning" class="server-badge"><Icon name="monitor" />{{ t('st.serverRunning') }}</div>
       <div class="task-row" v-for="(item, index) in selected" :key="item.id" :class="[item.status, { clickable: canView(item), selected: historySelected === item.id }]" :title="canView(item) ? t('st.viewHistory') : undefined" @click="canView(item) && emit('select', item.id)"><Icon :name="iconName(item.status)" /><span>{{ index + 1 }}. {{ itemLabel(item.id) }}</span><b>{{ statusText(item.status) }}</b></div>
       <div v-if="!selected.length" class="empty">{{ t('st.emptyQueue') }}</div>
