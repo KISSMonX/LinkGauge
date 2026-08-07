@@ -990,22 +990,28 @@ const reportStamp = () => {
   const p = (v: number) => String(v).padStart(2, '0')
   return `${n.getFullYear()}${p(n.getMonth() + 1)}${p(n.getDate())}${p(n.getHours())}${p(n.getMinutes())}${p(n.getSeconds())}`
 }
-/** 弹出系统保存对话框，让用户选择保存目录并自定义文件名，确认后生成报告 */
+/** HTML 使用保存对话框；PDF 复用同一 HTML，并交给系统打印窗口选择输出位置 */
 async function generateReport(format: 'html' | 'pdf' = 'html') {
   if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.report', { format: format.toUpperCase() }) }; return }
   try {
-    const dir = await invoke<string>('get_report_dir')
-    const path = await save({
-      title: t('report.saveTitle'),
-      defaultPath: `${dir}\\linkgauge-report-${reportStamp()}.${format}`,
-      filters: [{ name: format.toUpperCase(), extensions: [format] }]
-    })
-    if (!path) return // 用户取消
     // 报告按测试项目分组：包含全部有历史缓存的项目（固定顺序），每项输出数据曲线与数据表
     const reportItems = items.value
       .filter((i) => itemHistory.value[i.id])
       .map((i) => ({ label: itemLabel(i.id), status: itemHistory.value[i.id].status, points: itemHistory.value[i.id].points }))
-    const saved = await invoke<string>('generate_report', { request: { format, savePath: path, locale: locale.value, config: config.value, summary: { ...summary }, points: chartPoints.value, items: reportItems, logs: logs.value } })
+    const request = { format, locale: locale.value, config: config.value, summary: { ...summary }, points: chartPoints.value, items: reportItems, logs: logs.value }
+    if (format === 'pdf') {
+      await invoke<string>('generate_report', { request })
+      log('INFO', t('report.printOpened'))
+      return
+    }
+    const dir = await invoke<string>('get_report_dir')
+    const path = await save({
+      title: t('report.saveTitle'),
+      defaultPath: `${dir}\\linkgauge-report-${reportStamp()}.html`,
+      filters: [{ name: 'HTML', extensions: ['html'] }]
+    })
+    if (!path) return // 用户取消
+    const saved = await invoke<string>('generate_report', { request: { ...request, savePath: path } })
     infoDialog.value = { title: t('report.generated'), message: saved }
   } catch (error) { errorDialog.value = { title: t('err.reportFailed'), message: String(error) } }
 }

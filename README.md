@@ -54,7 +54,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Per-test log files with completed/incomplete status in the filename
 - Graceful test cancellation (no queue recovery — every start is a fresh run)
 - JSON configuration import, export, and local persistence
-- HTML and PDF report generation
+- HTML reports and PDF output through the native system print dialog, both using the same charts and tables
 - Pure-Rust riperf3 engine: interoperable with standard iperf3 servers, no runtime dependencies
 - iperf3 authentication in both directions — the client supplies username / password / RSA public key (with PKCS#1 padding for pre-3.17 peers), and the server can require credentials via its own RSA private key and an authorized-users file; passwords are never persisted
 - Automated CI checks and tagged release builds for Windows x64, macOS x64 / arm64, and Linux x64 / arm64
@@ -108,7 +108,7 @@ The application uses Tauri's two-process model:
 | `get_network_interfaces` | Enumerate all up IPv4 interfaces with MAC address and link speed |
 | `get_custom_packet_length` | Read the persisted custom packet length from the settings file |
 | `save_custom_packet_length` | Validate and persist a custom packet length to the settings file |
-| `generate_report` | Generate an HTML or PDF report in the application data directory |
+| `generate_report` | Save an HTML report or open its print-ready rendering for native PDF output |
 | `ssh_connect` | Open an SSH session with a PTY-backed interactive shell on a remote host |
 | `ssh_send` | Write to the remote shell (command text, `Ctrl+C`, …) |
 | `ssh_resize` | Sync the remote PTY size with the console viewport |
@@ -350,7 +350,7 @@ Pick the artifact matching your architecture: `*_amd64.*` for x64, `*_arm64.*` /
 3. In client mode, enter the server address, port, duration, and protocol-specific parameters.
 4. Start the test and monitor the task queue, live chart, statistics, and logs.
 5. Stop a test when necessary. Failed test items can be reviewed in the logs and the report.
-6. Generate an HTML or PDF report after one or more tasks finish.
+6. Generate an HTML report after one or more tasks finish, or choose PDF and select **Save as PDF** in the native print dialog.
 
 ### Operating the peer server over SSH
 
@@ -378,7 +378,7 @@ The peer must be reachable, its firewall must allow the configured TCP/UDP port,
 - Configuration can be imported or exported as JSON.
 - **Save Settings** persists the client and server settings automatically in the local WebView storage.
 - Test logs are written under the OS-specific Tauri application log directory in `tests/`.
-- Reports are written under the OS-specific Tauri application data directory in `reports/`.
+- HTML reports default to the OS-specific Tauri application data directory in `reports/`; PDF reports are saved to the location selected in the native print dialog.
 - The custom packet length is persisted to `settings.json` in the OS-specific Tauri application config directory.
 - SSH connection settings (host, port, username, auth method, private key path) are persisted alongside the other settings. The login password and the key passphrase are **not** — like the iperf3 auth password, they are held in memory only, excluded from exported configs, and must be re-entered after a restart.
 
