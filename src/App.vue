@@ -16,8 +16,10 @@ import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
 import { useI18n, type Locale, type MessageKey } from './i18n'
 import { theme, setTheme, type Theme } from './theme'
-import { clearTerminal, createTerminal, writeTerminal } from './terminal'
-import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, NetworkSnapshot, ServerConfig, ServerRuntimeStatus, SshConfig, SshEvent, SshSnapshot, SshStatus, SyncState, TestConfig, TestItem, TestSummary } from './types'
+import { clearTerminal } from './terminal'
+import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, NetworkSnapshot, ServerConfig, SshConfig, SshEvent, SyncState, TestConfig, TestItem, TestSummary } from './types'
+import { useServer } from './composables/useServer'
+import { useSshConsole } from './composables/useSshConsole'
 
 const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
@@ -100,13 +102,11 @@ const chartLive = computed(() => !!current.value)
 /** 图表标题的项目名：查看历史时用所选项目名，否则用最近一次完成项 */
 const historyLabel = computed(() => selectedHistoryId.value ? itemLabel(selectedHistoryId.value) : completedLabel.value)
 const clientRunning = ref(false)
-const serverRunning = ref(false)
 const clientSession = ref('')
 /** 后端活动队列会话：不参与跨窗口同步，防止旧快照改写 clientSession 后丢弃真实事件。 */
 let activeClientQueueSession = ''
 /** 已处理的后端 start 序号（取队列下标）：不受响应式同步包回退影响。 */
 let activeQueueEventIndex = -1
-const serverSession = ref('')
 const activeTab = ref<'client' | 'server'>('client')
 const queue = ref<string[]>([])
 const queueIndex = ref(-1)
@@ -143,32 +143,12 @@ const nicSelected = ref(0)
 const nicTarget = ref<'serverIp' | 'bindIp'>('serverIp')
 /** 服务端 IP 尚未被用户手动修改时，重选网卡会同步更新它 */
 const autoServerIp = ref(false)
-/** 服务端独立统计（来自后端 status 事件广播，各窗口各自维护同一份数据） */
-const serverUptime = ref(0)
-const serverCompleted = ref(0)
-const serverServing = ref(false)
-const serverPoints = ref<MetricPoint[]>([])
-/** 最近一次连接服务端的客户端地址（服务端概览「对端=客户端」） */
-const serverPeerIp = ref('')
-const serverPeerPort = ref(0)
+/** 服务端视角中间栏当前显示的视图（各窗口独立，不跨窗口同步） */
+const serverView = ref<'overview' | 'ssh'>('overview')
 /** 服务端视角只显示服务端自身日志（引擎日志 + SSH 会话日志 + 本窗口 UI 日志），与客户端日志独立 */
 const serverLogs = computed(() => logs.value.filter((l) => l.module === 'server' || l.module === 'ssh' || l.module === 'UI'))
 /** 客户端视角只显示客户端自身日志（客户端任务 + 本窗口 UI 日志），与服务器日志独立 */
 const clientLogs = computed(() => logs.value.filter((l) => l.module !== 'server' && l.module !== 'ssh'))
-// —— SSH 远程控制台（服务端视角）：在远端主机上操作 iperf3 服务端 ——
-const sshSession = ref('')
-const sshStatus = ref<SshStatus>('idle')
-/** 控制台行缓冲：切换到概览标签时不销毁，故由 App 持有而非控制台组件 */
-const sshTerminal = reactive(createTerminal())
-/** 回放缓冲的结束偏移：偏移小于它的实时数据块已包含在回放内容里，需丢弃 */
-const sshPrimed = ref(0)
-/** 拉取回放缓冲期间到达的实时数据块（拉取完成后按偏移去重补写） */
-let sshPending: SshEvent[] | null = null
-/** 远端 PTY 尺寸（由控制台组件按可视区域测算） */
-let sshCols = 120
-let sshRows = 24
-/** 服务端视角中间栏当前显示的视图（各窗口独立，不跨窗口同步） */
-const serverView = ref<'overview' | 'ssh'>('overview')
 let unlistenSsh: UnlistenFn | undefined
 let ticker: number | undefined
 let unlisten: UnlistenFn | undefined
@@ -205,6 +185,36 @@ const current = computed(() => items.value.find((i) => i.status === 'running'))
 const summary = reactive<TestSummary>({ startedAt: '', completed: 0, total: 0, averageBandwidth: 0, maxBandwidth: 0, minBandwidth: 0, totalTransferMb: 0, pingAverage: 0, lossPercent: 0, jitterMs: 0, logPaths: [] })
 const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false })
 const log = (level: LogEntry['level'], message: string, module = 'UI') => logs.value.push({ time: now(), level, module, message })
+// ---- Composables: extracted state + operations (must be after isTauri/log declarations) ----
+const {
+  serverRunning, serverSession, serverUptime, serverCompleted, serverServing,
+  serverPoints, serverPeerIp, serverPeerPort,
+  refreshServerState, startServer, stopServer,
+} = useServer(isTauri, log, errorDialog, t, locale, serverConfig, local)
+const {
+  sshSession, sshStatus, sshTerminal, sshPrimed,
+  pickPrivateKey, sshConnect, sshDisconnect, sshSend, sshResize,
+  primeConsole, handleSshEvent,
+} = useSshConsole(isTauri, log, errorDialog, infoDialog, t, sshConfig, serverView)
+
+/** 选择服务端认证用的 RSA 私钥文件（对应 --rsa-private-key-path） */
+async function pickServerAuthKey() {
+  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
+  try {
+    const path = await open({ title: t('srv.authKeyPick'), multiple: false, directory: false, filters: [{ name: t('cfg.authKeyFilter'), extensions: ['pem', 'key', 'crt'] }] })
+    if (typeof path === 'string') { serverConfig.value = { ...serverConfig.value, authPrivateKeyPath: path }; log('INFO', t('log.authServerKeyPicked', { path }), 'server') }
+  } catch (e) { errorDialog.value = { title: t('err.openDirFailed'), message: String(e) } }
+}
+
+/** 选择服务端认证用的授权用户文件（对应 --authorized-users-path） */
+async function pickServerAuthUsers() {
+  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
+  try {
+    const path = await open({ title: t('srv.authUsersPick'), multiple: false, directory: false })
+    if (typeof path === 'string') { serverConfig.value = { ...serverConfig.value, authUsersPath: path }; log('INFO', t('log.authUsersPicked', { path }), 'server') }
+  } catch (e) { errorDialog.value = { title: t('err.openDirFailed'), message: String(e) } }
+}
+
 /** 图表旁指标区显示的汇总：查看某项目历史时按该项目数据推导（与实时 watch 同一套公式），否则用整体汇总 */
 const viewSummary = computed<TestSummary>(() => {
   if (current.value || !selectedHistoryId.value) return summary
@@ -564,111 +574,6 @@ async function pickPublicKey() {
   } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
 }
 
-// —— SSH 远程控制台：连接远端主机，在控制台里直接操作对端的 iperf3 服务端 ——
-
-/** 选择服务端认证用的 RSA 私钥文件（对应 --rsa-private-key-path） */
-async function pickServerAuthKey() {
-  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
-  try {
-    const path = await open({ title: t('srv.authKeyPick'), multiple: false, directory: false, filters: [{ name: t('cfg.authKeyFilter'), extensions: ['pem', 'key', 'crt'] }] })
-    if (typeof path === 'string') { serverConfig.value = { ...serverConfig.value, authPrivateKeyPath: path }; log('INFO', t('log.authServerKeyPicked', { path }), 'server') }
-  } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
-}
-
-/** 选择服务端认证用的授权用户文件（对应 --authorized-users-path） */
-async function pickServerAuthUsers() {
-  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
-  try {
-    const path = await open({ title: t('srv.authUsersPick'), multiple: false, directory: false })
-    if (typeof path === 'string') { serverConfig.value = { ...serverConfig.value, authUsersPath: path }; log('INFO', t('log.authUsersPicked', { path }), 'server') }
-  } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
-}
-
-/** 选择 SSH 登录用的私钥文件 */
-async function pickPrivateKey() {
-  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.pickKey') }; return }
-  try {
-    const path = await open({ title: t('ssh.keyPick'), multiple: false, directory: false })
-    if (typeof path === 'string') { sshConfig.value = { ...sshConfig.value, privateKeyPath: path }; log('INFO', t('ssh.log.keyPicked', { path }), 'ssh') }
-  } catch (error) { errorDialog.value = { title: t('err.openDirFailed'), message: String(error) } }
-}
-
-async function sshConnect() {
-  if (sshStatus.value !== 'idle') return
-  if (!isTauri()) { infoDialog.value = { title: t('preview.title'), message: t('preview.ssh') }; return }
-  // 新会话从空白控制台开始（断开后保留上一次输出，便于回看）
-  clearTerminal(sshTerminal)
-  sshPrimed.value = 0
-  serverView.value = 'ssh'
-  sshStatus.value = 'connecting'
-  try {
-    sshSession.value = await invoke<string>('ssh_connect', { request: { ...sshConfig.value, cols: sshCols, rows: sshRows } })
-  } catch (error) {
-    sshStatus.value = 'idle'
-    log('ERROR', String(error), 'ssh')
-    errorDialog.value = { title: t('ssh.failedTitle'), message: String(error) }
-  }
-}
-async function sshDisconnect() {
-  if (!sshSession.value) { sshStatus.value = 'idle'; return }
-  try { if (isTauri()) await invoke('ssh_disconnect', { sessionId: sshSession.value }) } catch (e) { log('WARN', String(e), 'ssh') }
-}
-/** 向远端 shell 写入数据（命令自带换行，Ctrl+C 为 \x03） */
-async function sshSend(data: string) {
-  if (!sshSession.value || !isTauri()) return
-  try { await invoke('ssh_send', { sessionId: sshSession.value, data }) } catch (e) { log('WARN', String(e), 'ssh') }
-}
-/** 控制台尺寸变化：同步远端 PTY 窗口大小，让远端命令按实际宽度换行 */
-function sshResize(cols: number, rows: number) {
-  if (cols === sshCols && rows === sshRows) return
-  sshCols = cols; sshRows = rows
-  if (sshSession.value && isTauri()) invoke('ssh_resize', { sessionId: sshSession.value, cols, rows }).catch(() => {})
-}
-
-/** 拉取会话快照写入控制台并对齐连接状态；拉取期间到达的实时数据先暂存，之后按偏移去重补写。
- *  它同时兜住了「connected 事件早于 ssh_connect 返回」的竞态：那一刻事件因会话 id 未知被丢弃，
- *  快照里的 connected 会把状态补回来 */
-async function primeConsole(sessionId: string) {
-  if (!isTauri()) return
-  sshPending = []
-  try {
-    const snapshot = await invoke<SshSnapshot>('ssh_scrollback', { sessionId })
-    if (sshSession.value !== sessionId) return
-    clearTerminal(sshTerminal)
-    writeTerminal(sshTerminal, snapshot.text)
-    sshPrimed.value = snapshot.endOffset
-    for (const event of sshPending) {
-      if (event.sessionId === sessionId && (event.offset ?? 0) >= snapshot.endOffset) writeTerminal(sshTerminal, event.message || '')
-    }
-    if (snapshot.connected) sshStatus.value = 'connected'
-  } catch {
-    // 会话已结束（结束事件也可能早于会话 id 到达）：控制台内容保留，状态复位
-    if (sshSession.value === sessionId) { sshSession.value = ''; sshStatus.value = 'idle' }
-  }
-  finally { sshPending = null }
-}
-
-function handleSshEvent(event: SshEvent) {
-  if (!sshSession.value || event.sessionId !== sshSession.value) return
-  if (event.type === 'data') {
-    if (sshPending) { sshPending.push(event); return }
-    // 回放缓冲已经包含的数据块直接丢弃，避免重复显示
-    if ((event.offset ?? 0) < sshPrimed.value) return
-    writeTerminal(sshTerminal, event.message || '')
-    return
-  }
-  if (event.type === 'status') { if (event.message === 'connected' || event.message === 'connecting') sshStatus.value = event.message; return }
-  if (event.type === 'log') { log(event.level || 'INFO', event.message || '', 'ssh'); return }
-  if (event.type === 'closed' || event.type === 'error') {
-    const message = event.message || ''
-    writeTerminal(sshTerminal, `\r\n[${message}]\r\n`)
-    log(event.type === 'error' ? 'ERROR' : 'INFO', message, 'ssh')
-    sshStatus.value = 'idle'
-    sshSession.value = ''
-    sshPrimed.value = 0
-  }
-}
-
 /** 打开外部链接（「关于」页的项目地址 / 提交反馈）：桌面端经后端调系统默认浏览器，预览模式用 window.open */
 function openLink(url: string) {
   if (isTauri()) invoke('open_url', { url }).catch((e) => log('WARN', String(e)))
@@ -730,61 +635,6 @@ async function confirmStop() {
 /** 主窗口退出确认后：结束整个应用（后端 exit_app 退出主进程，子窗口一并关闭） */
 async function exitApp() {
   try { if (isTauri()) await invoke('exit_app') } catch (e) { log('ERROR', String(e)) }
-}
-
-/** 启动 riperf3 服务端（独立于客户端任务队列，两者可同时运行） */
-async function refreshServerState(announce = false) {
-  if (!isTauri()) return serverRunning.value
-  const status = await invoke<ServerRuntimeStatus | null>('get_server_status')
-  if (!status) {
-    serverRunning.value = false
-    serverSession.value = ''
-    return false
-  }
-  const recovered = !serverRunning.value || serverSession.value !== status.sessionId
-  serverSession.value = status.sessionId
-  serverRunning.value = true
-  serverConfig.value = { ...serverConfig.value, bindIp: status.bindIp, port: status.port, interval: status.interval }
-  if (announce && recovered) log('INFO', t('log.serverRecovered', { addr: status.bindIp || t('sdash.allAdapters'), port: status.port }))
-  return true
-}
-
-async function startServer() {
-  if (serverRunning.value) return
-  if (isTauri()) {
-    try { if (await refreshServerState(true)) return } catch (e) { log('WARN', String(e)) }
-  }
-  if (serverConfig.value.port < 1 || serverConfig.value.port > 65535) { errorDialog.value = { title: t('err.paramError'), message: t('err.port') }; return }
-  if (serverConfig.value.interval < 1 || serverConfig.value.interval > 60) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverInterval') }; return }
-  if (serverConfig.value.idleTimeout > 86400 || serverConfig.value.maxDuration > 86400) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverLimitRange') }; return }
-  if (serverConfig.value.bitrateLimit > 1000000) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverRateRange') }; return }
-  if (serverConfig.value.authEnabled && (!serverConfig.value.authPrivateKeyPath.trim() || !serverConfig.value.authUsersPath.trim())) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverAuthIncomplete') }; return }
-  const bindTarget = serverConfig.value.bindIp.trim() || local.value.ip
-  log('INFO', t('log.startServer', { addr: serverConfig.value.bindIp.trim() ? serverConfig.value.bindIp : t('sdash.allAdapters'), port: serverConfig.value.port }))
-  if (!isTauri()) { serverRunning.value = true; log('INFO', t('log.previewServer')); return }
-  // 新一轮服务端会话：清空上一次的概览统计与曲线
-  serverUptime.value = 0; serverCompleted.value = 0; serverServing.value = false; serverPoints.value = []
-  serverPeerIp.value = ''; serverPeerPort.value = 0
-  try {
-    serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', transferMode: 'time', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, locale: locale.value, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval, serverAuthEnabled: serverConfig.value.authEnabled, serverAuthPrivateKeyPath: serverConfig.value.authEnabled ? serverConfig.value.authPrivateKeyPath.trim() : '', serverAuthUsersPath: serverConfig.value.authEnabled ? serverConfig.value.authUsersPath.trim() : '', serverAuthPkcs1Padding: serverConfig.value.authPkcs1Padding, serverIdleTimeout: serverConfig.value.idleTimeout, serverMaxDuration: serverConfig.value.maxDuration, serverBitrateLimitMbps: serverConfig.value.bitrateLimit } })
-    serverRunning.value = true
-  } catch (error) {
-    // 查询与启动之间若另一窗口刚好启动成功，直接接管真实会话，不再弹重复启动错误。
-    try { if (await refreshServerState(true)) return } catch { /* 保留原始启动错误 */ }
-    log('ERROR', String(error)); errorDialog.value = { title: t('err.serverStartFailed'), message: String(error) }
-  }
-}
-async function stopServer() {
-  if (!serverRunning.value) return
-  try {
-    if (isTauri() && serverSession.value) await invoke('stop_test', { sessionId: serverSession.value })
-    serverRunning.value = false; serverSession.value = ''
-    log('INFO', t('log.stopServer'))
-  } catch (e) {
-    // 后端尚未确认退出时保持运行态，禁止用户立即重启撞上仍在清理的单例会话
-    log('WARN', String(e))
-    errorDialog.value = { title: t('err.serverError'), message: String(e) }
-  }
 }
 
 /** 前端生成的队列级日志补写客户端运行日志文件：这类日志不在后端事件流里
