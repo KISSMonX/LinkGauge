@@ -1,7 +1,10 @@
+mod client;
 mod error;
 mod models;
+mod ping;
 mod report;
 mod runner;
+mod server;
 mod settings;
 mod ssh;
 mod system;

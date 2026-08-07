@@ -1,30 +1,29 @@
+use crate::client::{self, ClientTaskResult};
 use crate::error::ValidationError;
 use crate::models::{ClientLogAppend, MetricPoint, ServerRuntimeStatus, TestEvent, TestRequest};
+use crate::ping;
+use crate::server;
 use chrono::{Local, TimeZone};
-use regex::Regex;
-use riperf3::{ClientBuilder, ServerBuilder, Termination, TransportProtocol};
+use riperf3::Termination;
 use std::{
     collections::{HashMap, HashSet},
     fs::File as StdFile,
     io::Write as StdWrite,
-    process::Stdio,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
     },
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     fs::{self, OpenOptions},
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-    sync::{mpsc, watch, Mutex as AsyncMutex},
+    sync::{watch, Mutex as AsyncMutex},
     time::{sleep, Duration},
 };
 use uuid::Uuid;
 
 /// 按界面语言选择消息文案（locale 为空时默认中文）
-fn tr<'a>(locale: &str, zh: &'a str, en: &'a str) -> &'a str {
+pub(crate) fn tr<'a>(locale: &str, zh: &'a str, en: &'a str) -> &'a str {
     if locale == "en" {
         en
     } else {
@@ -33,6 +32,7 @@ fn tr<'a>(locale: &str, zh: &'a str, en: &'a str) -> &'a str {
 }
 
 /// 按界面语言选择格式化模板（模板必须是字面量，format! 才能编译期检查）
+#[macro_export]
 macro_rules! tr_format {
     ($locale:expr, $zh:literal, $en:literal $(, $arg:expr)* $(,)?) => {{
         if $locale == "en" {
@@ -135,7 +135,7 @@ pub async fn start_test<R: tauri::Runtime>(
             .await
             .insert(session_id.clone(), SessionSignal::Ping(cancelled.clone()));
         tauri::async_runtime::spawn(async move {
-            run_ping(
+            ping::run_ping(
                 app,
                 spawned_id.clone(),
                 request,
@@ -180,7 +180,7 @@ pub async fn start_test<R: tauri::Runtime>(
         }
         let server_session = state.server_session.clone();
         tauri::async_runtime::spawn(async move {
-            run_engine_server(app, spawned_id.clone(), request, rx, locale_handle).await;
+            server::run_engine_server(app, spawned_id.clone(), request, rx, locale_handle).await;
             // 先按 ID 清除单例标记再移除会话；若期间已有新服务端启动，旧任务
             // 绝不能把新会话的标记清空。
             {
@@ -202,7 +202,7 @@ pub async fn start_test<R: tauri::Runtime>(
             .await
             .insert(session_id.clone(), SessionSignal::Engine(tx));
         tauri::async_runtime::spawn(async move {
-            run_engine_client(app, spawned_id.clone(), request, rx, locale_handle).await;
+            client::run_engine_client(app, spawned_id.clone(), request, rx, locale_handle).await;
             sessions.lock().await.remove(&spawned_id);
         });
     }
@@ -287,7 +287,7 @@ pub async fn start_test_queue<R: tauri::Runtime>(
                         forward_cancelled.store(true, Ordering::SeqCst);
                     }
                 });
-                let result = run_ping(
+                let result = ping::run_ping(
                     app.clone(),
                     spawned_id.clone(),
                     request,
@@ -299,7 +299,7 @@ pub async fn start_test_queue<R: tauri::Runtime>(
                 forward.abort();
                 result
             } else {
-                run_engine_client(
+                client::run_engine_client(
                     app.clone(),
                     spawned_id.clone(),
                     request,
@@ -410,7 +410,7 @@ pub async fn open_log_dir<R: tauri::Runtime>(app: AppHandle<R>) -> Result<String
 fn validate(request: &TestRequest) -> Result<(), ValidationError> {
     // 服务端模式不需要持续时间（duration 恒为 0）；按量测试（-n/-k）忽略时长。
     // 按量测试项强制 bytes/blocks，与全局 transfer_mode 同源推导
-    let transfer_mode = effective_transfer_mode(request);
+    let transfer_mode = client::effective_transfer_mode(request);
     if request.mode != "server" && transfer_mode == "time" && request.duration == 0 {
         return Err(ValidationError::DurationRequired);
     }
@@ -483,1168 +483,26 @@ fn validate(request: &TestRequest) -> Result<(), ValidationError> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// riperf3 客户端任务
-// ---------------------------------------------------------------------------
-
-/// 客户端参数映射（纯函数，便于单测）——与旧 CLI 参数一一对应
-#[derive(Debug, PartialEq)]
-struct ClientParams {
-    protocol: TransportProtocol,
-    duration: u32,
-    num_streams: u32,
-    blksize: Option<usize>,
-    reverse: bool,
-    bidir: bool,
-    /// 带宽限制（bps），0 = 不限制。必须无条件下发给引擎，不能「为 0 就不设置」：
-    /// riperf3 未调用 bandwidth() 时 UDP 会套用 iperf3 的 UDP_RATE 默认值
-    /// （1 Mibit/s，见 vendor/riperf3 的 utils.rs），导致界面选「不限制」的 UDP
-    /// 测试实际被限速到约 1 Mbps；显式传 0 才是引擎语义下的不限制。
-    bandwidth_bps: u64,
-    interval: f64,
-    bind_address: Option<String>,
-    /// 预热秒数（0 = 不预热）：on_interval 回调已跳过 omitted 区间，仅影响统计口径
-    omit_secs: u32,
-    /// 套接字缓冲区（KB，0 = 自动）
-    window_kb: u32,
-    /// 数据流源端口（0 = 自动；第 i 条流绑定 cport+i，对应 iperf3 --cport）
-    cport: u16,
-    /// IP 协议族（0 = 自动，4 / 6 = 强制）
-    ip_version: u8,
-    /// 测试结束后拉取服务端视角的输出（--get-server-output）
-    get_server_output: bool,
-    /// 按量测试：bytes（-n）/ blocks（-k）优先于时长，二者互斥（引擎语义）
-    bytes_to_send: Option<u64>,
-    blocks_to_send: Option<u64>,
-    /// DSCP 值（0 = 不设置，1-63 映射到 TOS 高 6 位）
-    dscp: u32,
-    /// TCP 拥塞控制算法（None = 默认；仅 Linux/FreeBSD 生效）
-    congestion_algo: Option<String>,
-    /// UDP 禁止分片标志（仅 IPv4）
-    udp_dont_fragment: bool,
-    /// MPTCP 多路径（需两端内核支持）
-    mptcp: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClientTaskResult {
-    Success,
-    Failed,
-    Fatal,
-    Stopped,
-}
-
-/// 每项任务的后端硬时限。前端定时器可能随 WebView 被节流或销毁，因此这里只用
-/// Tokio 时钟裁决；按量任务根据限速估算传输时间，其余为配置时长加 30 秒余量。
-fn client_task_timeout(request: &TestRequest) -> Duration {
-    let seconds = match effective_transfer_mode(request) {
-        mode @ ("bytes" | "blocks") if request.bandwidth > 0 => {
-            let bytes = if mode == "bytes" {
-                u128::from(request.transfer_amount).saturating_mul(1_000_000)
-            } else {
-                u128::from(request.transfer_amount).saturating_mul(u128::from(
-                    if request.packet_length == 0 {
-                        131_072
-                    } else {
-                        request.packet_length
-                    },
-                ))
-            };
-            let bits_per_second = u128::from(request.bandwidth).saturating_mul(1_000_000);
-            let estimated = bytes
-                .saturating_mul(8)
-                .saturating_add(bits_per_second.saturating_sub(1))
-                / bits_per_second.max(1);
-            u64::try_from(estimated)
-                .unwrap_or(u64::MAX)
-                .saturating_add(15)
-                .max(30)
-        }
-        "bytes" | "blocks" => 300,
-        _ if request.task_id == "ping" => 30,
-        _ => request.duration.saturating_add(30).max(30),
-    };
-    Duration::from_secs(seconds)
-}
-
-/// 按量模式推导：按量测试项（tcp-bytes / udp-bytes / tcp-blocks）强制
-/// bytes / blocks，其余取全局 transfer_mode。validate 与 client_params_for
-/// 共用同一推导，保证「队列里混排按量项 + 常规项」时各项口径一致。
-/// 空串（服务端等不传 transfer_mode 的旧请求，serde 缺省）归一化为 "time"，
-/// 非空非法值（如 "packets"）原样返回由调用方拒绝
-fn effective_transfer_mode(request: &TestRequest) -> &str {
-    match request.task_id.as_str() {
-        "tcp-bytes" | "udp-bytes" => "bytes",
-        "tcp-blocks" => "blocks",
-        _ => {
-            let mode = request.transfer_mode.as_str();
-            if mode.is_empty() {
-                "time"
-            } else {
-                mode
-            }
-        }
-    }
-}
-
-fn client_params_for(request: &TestRequest) -> ClientParams {
-    // 协议由任务类型推断：udp-* 为 UDP，其余（含 stress）为 TCP，
-    // 使 TCP/UDP 测试项可以在同一队列中混合执行
-    let protocol = if request.task_id.starts_with("udp-") {
-        TransportProtocol::Udp
-    } else {
-        TransportProtocol::Tcp
-    };
-    let transfer_mode = effective_transfer_mode(request);
-    let mut params = ClientParams {
-        protocol,
-        duration: request.duration as u32,
-        num_streams: 1,
-        // TCP/UDP 报文长度分开设置：UDP 取 udp_packet_length（默认 8KB，上限 64KB），
-        // TCP 取 packet_length（默认 128KB，上限 1MB）
-        blksize: {
-            let length = if protocol == TransportProtocol::Udp {
-                request.udp_packet_length
-            } else {
-                request.packet_length as u64
-            };
-            (length > 0).then_some(length as usize)
-        },
-        reverse: false,
-        bidir: false,
-        // 0（界面「不限制」）原样传递，交由引擎按 0 = 不限制处理
-        bandwidth_bps: request.bandwidth.saturating_mul(1_000_000),
-        interval: request.interval as f64,
-        bind_address: (!request.local_ip.trim().is_empty()).then(|| request.local_ip.clone()),
-        omit_secs: request.omit_secs,
-        window_kb: request.window_kb,
-        cport: request.cport,
-        ip_version: request.ip_version,
-        get_server_output: request.get_server_output,
-        // 按量测试：bytes/blocks 与时长互斥（引擎端条件优先级，iperf3 同款）；
-        // 按量测试项强制模式，其余取全局参数
-        bytes_to_send: (transfer_mode == "bytes")
-            .then(|| request.transfer_amount.saturating_mul(1_000_000)),
-        blocks_to_send: (transfer_mode == "blocks").then_some(request.transfer_amount),
-        dscp: request.dscp,
-        // 空字符串 = 不设置；其余原样下发（引擎在非 Linux/FreeBSD 上静默忽略）
-        congestion_algo: (!request.congestion_algo.trim().is_empty())
-            .then(|| request.congestion_algo.trim().to_string()),
-        udp_dont_fragment: request.udp_dont_fragment || request.task_id == "udp-df",
-        mptcp: request.mptcp || request.task_id == "tcp-mptcp",
-    };
-    match request.task_id.as_str() {
-        "tcp-parallel" => params.num_streams = request.parallel.max(1) as u32,
-        "tcp-reverse" => params.reverse = true,
-        "tcp-bidir" => params.bidir = true,
-        _ => {}
-    }
-    params
-}
-
 /// 日志文件句柄：回调（同步）与主任务（异步）共用，加锁串行写入
-struct TestLog {
-    file: Arc<Mutex<StdFile>>,
-    working_path: std::path::PathBuf,
-    base_name: String,
+pub(crate) struct TestLog {
+    pub(crate) file: Arc<Mutex<StdFile>>,
+    pub(crate) working_path: std::path::PathBuf,
+    pub(crate) base_name: String,
     /// 客户端运行日志：一轮队列的所有测试项共用并持续追加，finish 时不重命名；
     /// false = 服务端单会话文件，完成时重命名为 -completed/-incomplete
-    shared: bool,
+    pub(crate) shared: bool,
 }
-type SessionLog = Arc<TestLog>;
+pub(crate) type SessionLog = Arc<TestLog>;
 
-async fn run_engine_client<R: tauri::Runtime>(
-    app: AppHandle<R>,
-    session_id: String,
-    request: TestRequest,
-    rx: watch::Receiver<Option<String>>,
-    locale_handle: Arc<RwLock<String>>,
-) -> ClientTaskResult {
-    let task_name = task_label(&request.locale, &request.task_id);
-    let local_ip = if request.local_ip.trim().is_empty() {
-        local_ip_address::local_ip()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|_| "127.0.0.1".into())
-    } else {
-        request.local_ip.clone()
-    };
-    let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
-        return ClientTaskResult::Failed;
-    };
-    // 界面语言运行时可变：日志输出点实时读取，切换语言后立即生效
-    let locale = current_locale(&locale_handle);
-    let header = tr_format!(
-        &locale,
-        "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: {}, 端口 {}, 时长 {}s, 并发 {}, 带宽 {}, 报文长度 {}, 输出周期 {}s\n",
-        "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: {}, port {}, duration {}s, streams {}, bandwidth {}, packet length {}, interval {}s\n",
-        riperf3::VERSION,
-        if client_params_for(&request).protocol == TransportProtocol::Udp { "UDP" } else { "TCP" },
-        request.port,
-        request.duration,
-        client_params_for(&request).num_streams,
-        if request.bandwidth > 0 {
-            format!("{}M", request.bandwidth)
-        } else {
-            tr(&locale, "不限制", "unlimited").into()
-        },
-        if client_params_for(&request).protocol == TransportProtocol::Udp {
-            request.udp_packet_length
-        } else {
-            request.packet_length as u64
-        },
-        request.interval,
-    );
-    append_log(&log, &header);
-    // 执行行同时写入运行日志（此前只发事件，运行日志缺执行过程）
-    let exec_line = tr_format!(
-        &locale,
-        "执行：riperf3 -c {}（内嵌引擎）",
-        "Running: riperf3 -c {} (embedded engine)",
-        request.server_ip
-    );
-    append_log(&log, &format!("[INFO] {exec_line}"));
-    emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
 
-    let params = client_params_for(&request);
-    let builder = engine_client_builder(
-        &app,
-        &session_id,
-        &request,
-        &params,
-        &log,
-        &locale_handle,
-        rx,
-    );
-    let client = match builder.build() {
-        Ok(client) => client,
-        Err(error) => {
-            fail_engine(
-                &app,
-                &session_id,
-                &request.task_id,
-                &log,
-                &locale,
-                &tr_format!(
-                    &locale,
-                    "测试配置无效：{}",
-                    "Invalid test configuration: {}",
-                    error
-                ),
-                false,
-            )
-            .await;
-            return ClientTaskResult::Failed;
-        }
-    };
-    let outcome = match tokio::time::timeout(client_task_timeout(&request), client.run()).await {
-        Ok(outcome) => outcome,
-        Err(_) => {
-            let message = tr_format!(
-                &locale,
-                "任务超过后端硬时限，已终止并继续下一项",
-                "The task exceeded the backend hard timeout and was stopped; continuing with the next item"
-            );
-            fail_engine(
-                &app,
-                &session_id,
-                &request.task_id,
-                &log,
-                &locale,
-                &message,
-                false,
-            )
-            .await;
-            return ClientTaskResult::Failed;
-        }
-    };
-    finish_engine(
-        &app,
-        &session_id,
-        &request.task_id,
-        &log,
-        &request,
-        &locale,
-        outcome,
-    )
-    .await
-}
 
-/// 构造一次 riperf3 客户端 builder。
-#[allow(clippy::too_many_arguments)]
-fn engine_client_builder<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    session_id: &str,
-    request: &TestRequest,
-    params: &ClientParams,
-    log: &SessionLog,
-    locale_handle: &Arc<RwLock<String>>,
-    rx: watch::Receiver<Option<String>>,
-) -> ClientBuilder {
-    // 实时指标回调：每输出周期触发一次，发出 metric 事件并写入日志
-    let hook_app = app.clone();
-    let hook_session = session_id.to_string();
-    let hook_task = request.task_id.clone();
-    let hook_log = log.clone();
-    let hook_locale = locale_handle.clone();
-    let on_interval = move |interval: &riperf3::json_report::Interval| {
-        if interval.sum.omitted {
-            return;
-        }
-        let sum = &interval.sum;
-        let second = sum.end.round() as i64;
-        let metric = MetricPoint {
-            second,
-            bandwidth_mbps: sum.bits_per_second / 1_000_000.0,
-            transfer_mb: sum.bytes as f64 / 1_000_000.0,
-            jitter_ms: sum.jitter_ms.unwrap_or(0.0),
-            loss_percent: sum.lost_percent.unwrap_or(0.0),
-            retransmits: sum.retransmits.unwrap_or(0).max(0) as u64,
-        };
-        emit_metric(&hook_app, &hook_session, &hook_task, metric);
-        let message = format_interval_line(&current_locale(&hook_locale), second, sum);
-        let line = format!("[INFO] {message}");
-        append_log(&hook_log, &line);
-        // 指标不仅驱动图表，也同步到界面日志；长时测试若只显示“开始测试”，
-        // 即使引擎正常运行也会被误判为卡死。
-        emit_log(&hook_app, &hook_session, &hook_task, "INFO", message);
-    };
-
-    let mut builder = ClientBuilder::new(&request.server_ip)
-        .port(Some(request.port))
-        .protocol(params.protocol)
-        .duration(params.duration)
-        .num_streams(params.num_streams)
-        .interval(params.interval)
-        .json_output(true)
-        .emit_output(false)
-        .interrupt(rx)
-        .on_interval(on_interval)
-        .on_connect({
-            // 控制连接建立即广播本地端口（客户端「连接状态」展示本次连接的本地端口）
-            let app = app.clone();
-            let session_id = session_id.to_string();
-            let task_id = request.task_id.clone();
-            move |addr| {
-                let payload = format!(r#"{{"localPort":{}}}"#, addr.port());
-                let _ = app.emit(
-                    "test-event",
-                    TestEvent {
-                        session_id: session_id.clone(),
-                        task_id: task_id.clone(),
-                        event_type: "status".into(),
-                        status: None,
-                        level: None,
-                        message: Some(payload),
-                        metric: None,
-                        log_path: None,
-                        fatal: None,
-                    },
-                );
-            }
-        });
-    if let Some(size) = params.blksize {
-        builder = builder.blksize(size);
-    }
-    if params.reverse {
-        builder = builder.reverse(true);
-    }
-    if params.bidir {
-        builder = builder.bidir(true);
-    }
-    // 无条件下发（0 = 不限制）：省略调用会让 UDP 落到引擎的 1 Mibit/s 默认值
-    builder = builder.bandwidth(params.bandwidth_bps);
-    if let Some(addr) = &params.bind_address {
-        builder = builder.bind_address(addr);
-    }
-    // 预热：跳过前 N 秒的统计（排除 TCP 慢启动）；on_interval 回调已跳过
-    // omitted 区间，实时图表/日志与最终报告口径一致
-    if params.omit_secs > 0 {
-        builder = builder.omit(params.omit_secs);
-    }
-    // 套接字缓冲区（KB → 字节）：0 = 引擎默认（等价 iperf3 的 -w 0 = 自动）。
-    // 用 u64 换算防溢出：UI 上限 16384 KB，但请求来自 IPC 边界，不可信
-    if params.window_kb > 0 {
-        builder = builder.window((params.window_kb as u64 * 1024).min(i32::MAX as u64) as i32);
-    }
-    // 数据流源端口（--cport）：0 = 不设置，走临时端口
-    if params.cport > 0 {
-        builder = builder.cport(params.cport);
-    }
-    // IP 协议族：0 = 自动，仅显式 4 / 6 时下发给引擎（validate 已保证取值合法）
-    if params.ip_version == 4 || params.ip_version == 6 {
-        builder = builder.ip_version(params.ip_version);
-    }
-    // 拉取服务端视角输出（--get-server-output）：服务端为文本模式时随结果返回
-    if params.get_server_output {
-        builder = builder.get_server_output(true);
-    }
-    // 按量测试（-n / -k）：优先于时长；二者互斥由 transfer_mode 单选保证
-    if let Some(bytes) = params.bytes_to_send {
-        builder = builder.bytes(bytes);
-    }
-    if let Some(blocks) = params.blocks_to_send {
-        builder = builder.blocks(blocks);
-    }
-    // DSCP 标记（--dscp）：0 = 不设置；数值字符串由引擎解析并左移 2 位进 TOS 字节
-    if params.dscp > 0 {
-        builder = builder.dscp(&params.dscp.to_string());
-    }
-    // 拥塞控制算法（-C）：仅 Linux/FreeBSD 生效，其余平台引擎静默忽略
-    if let Some(algo) = &params.congestion_algo {
-        builder = builder.congestion(algo);
-    }
-    // UDP 禁止分片（--dont-fragment）：仅 IPv4，Unix 平台生效
-    if params.udp_dont_fragment {
-        builder = builder.dont_fragment(true);
-    }
-    // MPTCP 多路径（-m/--multipath）：需两端内核支持，不支持时连接阶段报错
-    if params.mptcp {
-        builder = builder.mptcp(true);
-    }
-    // iperf3 认证：服务端以 --rsa-private-key-path + --authorized-users-path 启动时，
-    // 客户端须用服务端公钥加密「用户名+密码」。未启用时前端已把三项清空，这里自然跳过。
-    if !request.auth_username.trim().is_empty() {
-        builder = builder.username(request.auth_username.trim());
-    }
-    if !request.auth_password.is_empty() {
-        builder = builder.password(&request.auth_password);
-    }
-    if !request.auth_public_key_path.trim().is_empty() {
-        builder = builder.rsa_public_key_path(request.auth_public_key_path.trim());
-    }
-    // iperf3 3.17 起默认 OAEP 填充，更早的服务端只认 PKCS#1 v1.5
-    if request.auth_pkcs1_padding {
-        builder = builder.use_pkcs1_padding(true);
-    }
-    builder
-}
-
-// ---------------------------------------------------------------------------
-// riperf3 服务端任务：持续监听直到手动停止
-// ---------------------------------------------------------------------------
-
-/// 数值防护：NaN / Infinity 无法表示为 JSON 数字，直接格式化会产生非法 JSON
-/// （前端 JSON.parse 失败后整条 status 事件被丢弃，服务端概览全部不刷新），统一归零
-fn safe_f64(value: f64) -> f64 {
-    if value.is_finite() {
-        value
-    } else {
-        0.0
-    }
-}
-
-/// 服务端最近一个输出周期的统计快照（on_interval 回调写入，心跳任务读取并广播给前端）；
-/// 同时记录最近一次连接的客户端地址（服务端概览「对端=客户端」的数据源）
-#[derive(Default, Clone)]
-struct ServerInterval {
-    bandwidth_mbps: f64,
-    transfer_mb: f64,
-    jitter_ms: f64,
-    loss_percent: f64,
-    retransmits: u64,
-    peer_ip: String,
-    peer_port: u16,
-}
-
-async fn run_engine_server<R: tauri::Runtime>(
-    app: AppHandle<R>,
-    session_id: String,
-    request: TestRequest,
-    rx: watch::Receiver<Option<String>>,
-    locale_handle: Arc<RwLock<String>>,
-) {
-    let task_name = task_label(&request.locale, &request.task_id);
-    let local_ip = if request.local_ip.trim().is_empty() {
-        local_ip_address::local_ip()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|_| "127.0.0.1".into())
-    } else {
-        request.local_ip.clone()
-    };
-    let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
-        return;
-    };
-    let bind_display = if request.bind_ip.trim().is_empty() {
-        "0.0.0.0（所有网卡）".to_string()
-    } else {
-        request.bind_ip.clone()
-    };
-    // 界面语言运行时可变：头部日志用启动时语言，循环内每次迭代实时读取
-    let locale = current_locale(&locale_handle);
-    // 认证启用时在头部日志标注：服务端持有私钥与用户文件，客户端需按「客户端 → 认证」配置
-    let auth_display = if request.server_auth_enabled {
-        tr_format!(
-            &locale,
-            "，认证已启用（私钥 {}，用户文件 {}）",
-            ", auth enabled (private key {}, users file {})",
-            request.server_auth_private_key_path,
-            request.server_auth_users_path
-        )
-    } else {
-        String::new()
-    };
-    // 防护参数标注（0 = 不限制的不显示）：空闲超时 / 单测时长上限 / 带宽上限
-    let mut limits: Vec<String> = Vec::new();
-    if request.server_idle_timeout > 0 {
-        limits.push(tr_format!(
-            &locale,
-            "空闲超时 {}s",
-            "idle timeout {}s",
-            request.server_idle_timeout
-        ));
-    }
-    if request.server_max_duration > 0 {
-        limits.push(tr_format!(
-            &locale,
-            "单测上限 {}s",
-            "max duration {}s",
-            request.server_max_duration
-        ));
-    }
-    if request.server_bitrate_limit_mbps > 0 {
-        limits.push(tr_format!(
-            &locale,
-            "限速 {} Mbps",
-            "rate cap {} Mbps",
-            request.server_bitrate_limit_mbps
-        ));
-    }
-    let limits_display = if limits.is_empty() {
-        String::new()
-    } else {
-        format!("，{}", limits.join("，"))
-    };
-    append_log(
-        &log,
-        &tr_format!(
-            locale,
-            "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: 绑定 {}，监听端口 {}，持续服务{}{}\n",
-            "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: bind {}, listen port {}, serving continuously{}{}\n",
-            riperf3::VERSION,
-            bind_display,
-            request.port,
-            auth_display,
-            limits_display
-        ),
-    );
-
-    // 服务端支持绑定指定 IP（留空 = 绑定所有网卡）；测试进行中由 on_interval 回调标记，
-    // 该回调同时采样当前测试的间隔统计（服务端视角的实时曲线数据源）
-    let serving = Arc::new(AtomicBool::new(false));
-    let latest = Arc::new(Mutex::new(None::<ServerInterval>));
-    let mut server_builder = ServerBuilder::new();
-    if !request.bind_ip.trim().is_empty() {
-        server_builder = server_builder.bind_address(&request.bind_ip);
-    }
-    // 服务端认证：私钥 + 授权用户文件必须同时提供（对应 iperf3 的
-    // --rsa-private-key-path + --authorized-users-path）。凭据解密或校验失败时
-    // 引擎按协议直接关闭控制连接（见 riperf3 server.rs 的 authenticate），
-    // 客户端表现为「访问被拒」，服务端日志记录具体原因
-    if request.server_auth_enabled {
-        server_builder = server_builder
-            .rsa_private_key_path(request.server_auth_private_key_path.trim())
-            .authorized_users_path(request.server_auth_users_path.trim());
-        // iperf3 3.17 起默认 OAEP 填充，更早的客户端只认 PKCS#1 v1.5
-        if request.server_auth_pkcs1_padding {
-            server_builder = server_builder.use_pkcs1_padding(true);
-        }
-    }
-    // 服务端防护参数（0 = 不限制）：空闲超时自动停止 / 拒绝超长测试 / 终止超速测试。
-    // 注意 idle_timeout 在 one_off 模式下到期返回 Aborted("idle timeout")，
-    // 监听循环据此按「空闲超时停止」退出而非继续监听
-    if request.server_idle_timeout > 0 {
-        server_builder = server_builder.idle_timeout(request.server_idle_timeout);
-    }
-    if request.server_max_duration > 0 {
-        server_builder = server_builder.server_max_duration(request.server_max_duration);
-    }
-    if request.server_bitrate_limit_mbps > 0 {
-        server_builder = server_builder
-            .server_bitrate_limit(request.server_bitrate_limit_mbps.saturating_mul(1_000_000));
-    }
-    // 服务端统计采样间隔（-i，本地补丁）：与界面「日志输出间隔」一致。
-    // 引擎原本固定 1s（无服务端 -i 旋钮），此接线让服务端视角曲线的
-    // 采样频率跟随设置
-    server_builder = server_builder.interval(request.interval as f64);
-    server_builder = server_builder.on_interval({
-        let serving = serving.clone();
-        let latest = latest.clone();
-        move |interval: &riperf3::json_report::Interval| {
-            serving.store(true, Ordering::Relaxed);
-            if interval.sum.omitted {
-                return;
-            }
-            let sum = &interval.sum;
-            // 只更新统计字段，保留对端（客户端）地址
-            let mut guard = latest.lock().unwrap();
-            let peer = guard
-                .as_ref()
-                .map(|s| (s.peer_ip.clone(), s.peer_port))
-                .unwrap_or_default();
-            *guard = Some(ServerInterval {
-                bandwidth_mbps: safe_f64(sum.bits_per_second / 1_000_000.0),
-                transfer_mb: safe_f64(sum.bytes as f64 / 1_000_000.0),
-                jitter_ms: safe_f64(sum.jitter_ms.unwrap_or(0.0)),
-                loss_percent: safe_f64(sum.lost_percent.unwrap_or(0.0)),
-                retransmits: sum.retransmits.unwrap_or(0).max(0) as u64,
-                peer_ip: peer.0,
-                peer_port: peer.1,
-            });
-        }
-    });
-    // 客户端一建立控制连接就实时广播对端地址（服务端概览「对端=客户端」无需等待测试结束）
-    server_builder = server_builder.on_connect({
-        let app = app.clone();
-        let session_id = session_id.clone();
-        let task_id = request.task_id.clone();
-        let log = log.clone();
-        let locale_handle = locale_handle.clone();
-        let latest = latest.clone();
-        move |addr| {
-            // 界面语言运行时可变：连接日志实时读取当前语言
-            let locale = current_locale(&locale_handle);
-            let host = addr.ip().to_canonical().to_string();
-            let port = addr.port();
-            // 记录对端（客户端）地址到快照，后续心跳事件持续携带。
-            // 注意：锁必须在 if-let 外统一获取——if-let 的条件临时值（MutexGuard）
-            // 存活到整个 if-let 语句结束，在 else 分支里再次 lock 会对同一线程
-            // 重复获取 std Mutex 而死锁（客户端首次连接、快照为 None 时必现）
-            let mut snapshot_guard = latest.lock().unwrap();
-            if let Some(snapshot) = snapshot_guard.as_mut() {
-                snapshot.peer_ip = host.clone();
-                snapshot.peer_port = port;
-            } else {
-                *snapshot_guard = Some(ServerInterval {
-                    peer_ip: host.clone(),
-                    peer_port: port,
-                    ..Default::default()
-                });
-            }
-            let connected = tr_format!(
-                &locale,
-                "客户端 {}:{} 已连接",
-                "Client {}:{} connected",
-                host,
-                port
-            );
-            append_log(&log, &format!("[INFO] {connected}"));
-            emit_log(&app, &session_id, &task_id, "INFO", connected);
-            let payload = format!(
-                r#"{{"serving":true,"peerIp":"{}","peerPort":{}}}"#,
-                host, port
-            );
-            let _ = app.emit(
-                "test-event",
-                TestEvent {
-                    session_id: session_id.clone(),
-                    task_id: task_id.clone(),
-                    event_type: "status".into(),
-                    status: None,
-                    level: None,
-                    message: Some(payload),
-                    metric: None,
-                    log_path: None,
-                    fatal: None,
-                },
-            );
-        }
-    });
-    let server = match server_builder
-        .port(Some(request.port))
-        .one_off(true)
-        .json_output(true)
-        .emit_output(false)
-        .interrupt(rx)
-        .build()
-    {
-        Ok(server) => server,
-        Err(error) => {
-            fail_engine(
-                &app,
-                &session_id,
-                &request.task_id,
-                &log,
-                &locale,
-                &tr_format!(
-                    &locale,
-                    "服务端配置无效：{}",
-                    "Invalid server configuration: {}",
-                    error
-                ),
-                false,
-            )
-            .await;
-            return;
-        }
-    };
-    let bound = match server.bind().await {
-        Ok(bound) => bound,
-        Err(error) => {
-            fail_engine(
-                &app,
-                &session_id,
-                &request.task_id,
-                &log,
-                &locale,
-                &tr_format!(
-                    &locale,
-                    "无法监听端口 {}：{}",
-                    "Cannot listen on port {}: {}",
-                    request.port,
-                    error
-                ),
-                false,
-            )
-            .await;
-            return;
-        }
-    };
-    append_log(
-        &log,
-        &format!(
-            "[INFO] {}",
-            tr_format!(
-                locale,
-                "服务端已就绪，监听 {}:{}",
-                "Server ready, listening on {}:{}",
-                bind_display,
-                request.port
-            )
-        ),
-    );
-    emit_log(
-        &app,
-        &session_id,
-        &request.task_id,
-        "INFO",
-        tr_format!(
-            locale,
-            "服务端已就绪，监听 {}:{}",
-            "Server ready, listening on {}:{}",
-            bind_display,
-            request.port
-        ),
-    );
-
-    // 周期状态输出：按「日志输出间隔」每隔 N 秒写一次运行日志与统计信息（并发于监听循环）
-    let interval_secs = request.interval.max(1);
-    let completed = Arc::new(AtomicU64::new(0));
-    let bind_short = if request.bind_ip.trim().is_empty() {
-        "0.0.0.0".to_string()
-    } else {
-        request.bind_ip.clone()
-    };
-    let port = request.port;
-    let heartbeat = {
-        let log = log.clone();
-        let app = app.clone();
-        let session_id = session_id.clone();
-        let task_id = request.task_id.clone();
-        let completed = completed.clone();
-        let serving = serving.clone();
-        let latest = latest.clone();
-        let locale_handle = locale_handle.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
-            ticker.tick().await; // 跳过立即触发的第一次
-            let started = std::time::Instant::now();
-            loop {
-                ticker.tick().await;
-                // 界面语言运行时可变：心跳日志与状态事件实时读取当前语言
-                let locale = current_locale(&locale_handle);
-                let uptime = started.elapsed().as_secs();
-                let is_serving = serving.load(Ordering::Relaxed);
-                let done = completed.load(Ordering::Relaxed);
-                let snapshot = latest.lock().unwrap().clone();
-                // 文本日志行（写文件 + 广播）
-                let status_text = if is_serving {
-                    tr(&locale, "测试进行中", "test in progress")
-                } else {
-                    tr(&locale, "空闲", "idle")
-                };
-                let message = tr_format!(
-                    &locale,
-                    "运行状态：监听 {}:{}，已运行 {}s，累计完成 {} 次测试，当前{}",
-                    "Status: listening on {}:{}, up {}s, {} tests completed, currently {}",
-                    bind_short,
-                    port,
-                    uptime,
-                    done,
-                    status_text
-                );
-                append_log(&log, &format!("[INFO] {message}"));
-                emit_log(&app, &session_id, &task_id, "INFO", message);
-                // 结构化统计事件：供服务端窗口的概览与实时曲线使用（携带当前测试的间隔统计与最近客户端地址）
-                let stats = match &snapshot {
-                    Some(s) => format!(
-                        r#","bandwidthMbps":{},"transferMb":{},"jitterMs":{},"lossPercent":{},"retransmits":{}"#,
-                        safe_f64(s.bandwidth_mbps),
-                        safe_f64(s.transfer_mb),
-                        safe_f64(s.jitter_ms),
-                        safe_f64(s.loss_percent),
-                        s.retransmits
-                    ),
-                    None => String::new(),
-                };
-                let peer = match &snapshot {
-                    Some(s) if !s.peer_ip.is_empty() => {
-                        format!(r#","peerIp":"{}","peerPort":{}"#, s.peer_ip, s.peer_port)
-                    }
-                    _ => String::new(),
-                };
-                let payload = format!(
-                    r#"{{"uptime":{},"completed":{},"serving":{}{}{}}}"#,
-                    uptime, done, is_serving, stats, peer
-                );
-                let _ = app.emit(
-                    "test-event",
-                    TestEvent {
-                        session_id: session_id.clone(),
-                        task_id: task_id.clone(),
-                        event_type: "status".into(),
-                        status: None,
-                        level: None,
-                        message: Some(payload),
-                        metric: None,
-                        log_path: None,
-                        fatal: None,
-                    },
-                );
-            }
-        })
-    };
-
-    loop {
-        // 每次迭代实时读取界面语言（切换语言后服务端日志立即跟随）
-        let locale = current_locale(&locale_handle);
-        match bound.run_once().await {
-            Ok(outcome) => {
-                serving.store(false, Ordering::Relaxed);
-                completed.fetch_add(1, Ordering::Relaxed);
-                // 记录本次连接的客户端地址（服务端概览「对端=客户端」的数据源）
-                let peer = outcome
-                    .report
-                    .start
-                    .connected
-                    .first()
-                    .map(|c| (c.remote_host.clone(), c.remote_port));
-                // 测试结束（客户端已断开）：清空对端地址与统计，心跳事件不再携带
-                *latest.lock().unwrap() = None;
-                if outcome.termination == Termination::Interrupted {
-                    heartbeat.abort();
-                    append_log(
-                        &log,
-                        tr(
-                            &locale,
-                            "测试结果: 服务端已停止（手动停止）",
-                            "Result: server stopped (manual stop)",
-                        ),
-                    );
-                    emit_log(
-                        &app,
-                        &session_id,
-                        &request.task_id,
-                        "INFO",
-                        tr(
-                            &locale,
-                            "服务端已停止（手动停止）",
-                            "Server stopped (manual stop)",
-                        )
-                        .into(),
-                    );
-                    finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
-                    return;
-                }
-                // 单次测试结束：写入汇总并继续监听
-                let peer_text = peer
-                    .as_ref()
-                    .map(|(ip, p)| format!("{ip}:{p}"))
-                    .unwrap_or_else(|| tr(&locale, "未知地址", "unknown address").to_string());
-                append_log(
-                    &log,
-                    &format!(
-                        "[INFO] {}",
-                        tr_format!(
-                            locale,
-                            "客户端 {} 完成测试，汇总如下：",
-                            "Client {} finished a test, summary:",
-                            peer_text
-                        )
-                    ),
-                );
-                append_engine_summary(&log, &outcome.report, &locale);
-                emit_log(
-                    &app,
-                    &session_id,
-                    &request.task_id,
-                    "INFO",
-                    tr_format!(
-                        locale,
-                        "一次测试完成（客户端 {}），继续监听…",
-                        "Test finished (client {}), still listening…",
-                        peer_text
-                    ),
-                );
-            }
-            Err(error) => {
-                serving.store(false, Ordering::Relaxed);
-                *latest.lock().unwrap() = None;
-                // 空闲时收到停止信号返回 Aborted，正常退出；idle_timeout 到期
-                // 同样以 Aborted("idle timeout") 返回（one_off 下退出而非重启），
-                // 按原因区分日志文案
-                if let riperf3::RiperfError::Aborted(msg) = &error {
-                    heartbeat.abort();
-                    let (result_zh, result_en) = if msg == "idle timeout" {
-                        (
-                            "测试结果: 服务端已停止（空闲超时）",
-                            "Result: server stopped (idle timeout)",
-                        )
-                    } else {
-                        (
-                            "测试结果: 服务端已停止（手动停止）",
-                            "Result: server stopped (manual stop)",
-                        )
-                    };
-                    let (reason_zh, reason_en) = if msg == "idle timeout" {
-                        ("服务端已停止（空闲超时）", "Server stopped (idle timeout)")
-                    } else {
-                        ("服务端已停止（手动停止）", "Server stopped (manual stop)")
-                    };
-                    append_log(&log, tr(&locale, result_zh, result_en));
-                    emit_log(
-                        &app,
-                        &session_id,
-                        &request.task_id,
-                        "INFO",
-                        tr(&locale, reason_zh, reason_en).into(),
-                    );
-                    finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
-                    return;
-                }
-                let warn = tr_format!(
-                    locale,
-                    "一次连接处理失败：{}，继续监听",
-                    "Failed to handle a connection: {}, still listening",
-                    error
-                );
-                append_log(&log, &format!("[WARN] {warn}"));
-                emit_log(&app, &session_id, &request.task_id, "WARN", warn);
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ping 任务（保留系统进程调用，riperf3 不支持 ICMP）
-// ---------------------------------------------------------------------------
-
-async fn run_ping<R: tauri::Runtime>(
-    app: AppHandle<R>,
-    session_id: String,
-    request: TestRequest,
-    cancelled: Arc<AtomicBool>,
-    child_pids: Arc<AsyncMutex<HashSet<u32>>>,
-    locale_handle: Arc<RwLock<String>>,
-) -> ClientTaskResult {
-    let task_name = task_label(&request.locale, &request.task_id);
-    // 界面语言运行时可变：ping 日志实时读取当前语言
-    let locale = current_locale(&locale_handle);
-    let local_ip = if request.local_ip.trim().is_empty() {
-        local_ip_address::local_ip()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|_| "127.0.0.1".into())
-    } else {
-        request.local_ip.clone()
-    };
-    let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
-        return ClientTaskResult::Failed;
-    };
-    let args = if cfg!(windows) {
-        vec!["-n".into(), "4".into(), request.server_ip.clone()]
-    } else {
-        vec!["-c".into(), "4".into(), request.server_ip.clone()]
-    };
-    let exec_line = tr_format!(locale, "执行：ping {}", "Running: ping {}", args.join(" "));
-    append_log(&log, &format!("[INFO] {exec_line}"));
-    emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
-
-    let mut command = Command::new("ping");
-    command
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            let message = tr_format!(
-                locale,
-                "启动 ping 失败：{}",
-                "Failed to start ping: {}",
-                error
-            );
-            append_log(&log, &format!("[ERROR] {message}"));
-            fail_engine(
-                &app,
-                &session_id,
-                &request.task_id,
-                &log,
-                &locale,
-                &message,
-                false,
-            )
-            .await;
-            return ClientTaskResult::Failed;
-        }
-    };
-    let pid = child.id();
-    if let Some(pid) = pid {
-        child_pids.lock().await.insert(pid);
-    }
-    let (tx, mut rx) = mpsc::channel::<(String, bool)>(128);
-    if let Some(stdout) = child.stdout.take() {
-        let tx = tx.clone();
-        tokio::spawn(read_lines(stdout, tx, false));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        let tx = tx.clone();
-        tokio::spawn(read_lines(stderr, tx, true));
-    }
-    drop(tx);
-    let mut ping_sample = 0;
-    let mut final_success = false;
-    let mut final_stopped = false;
-    let mut final_timed_out = false;
-    let hard_timeout = sleep(client_task_timeout(&request));
-    tokio::pin!(hard_timeout);
-    loop {
-        tokio::select! {
-            status = child.wait() => {
-                final_success = status.map(|value| value.success()).unwrap_or(false);
-                break;
-            }
-            line = rx.recv() => {
-                if let Some((line, is_error)) = line {
-                    let level = if is_error { "WARN" } else { "INFO" };
-                    let output_line = format!("[{level}] {line}");
-                    append_log(&log, &output_line);
-                    emit_log(&app, &session_id, &request.task_id, level, line.clone());
-                    if let Some(metric) = parse_ping_metric(&line, ping_sample + 1) {
-                        ping_sample += 1;
-                        emit_metric(&app, &session_id, &request.task_id, metric);
-                    }
-                }
-            }
-            _ = sleep(Duration::from_millis(100)) => {
-                if cancelled.load(Ordering::SeqCst) {
-                    final_stopped = true;
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    break;
-                }
-            }
-            _ = &mut hard_timeout => {
-                final_timed_out = true;
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                break;
-            }
-        }
-    }
-    if let Some(pid) = pid {
-        child_pids.lock().await.remove(&pid);
-    }
-    append_log(
-        &log,
-        &format!(
-            "{}: {}",
-            tr(&locale, "测试结果", "Result"),
-            if final_success {
-                tr(&locale, "完成", "completed")
-            } else {
-                tr(&locale, "未完成", "incomplete")
-            }
-        ),
-    );
-    if final_timed_out {
-        let message = tr(
-            &locale,
-            "Ping 超过后端硬时限，已终止并继续下一项",
-            "Ping exceeded the backend hard timeout and was stopped; continuing with the next item",
-        );
-        fail_engine(
-            &app,
-            &session_id,
-            &request.task_id,
-            &log,
-            &locale,
-            message,
-            false,
-        )
-        .await;
-        ClientTaskResult::Failed
-    } else if final_stopped {
-        finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
-        ClientTaskResult::Stopped
-    } else if final_success {
-        finish_ok(&app, &session_id, &request.task_id, &log, "success").await;
-        ClientTaskResult::Success
-    } else {
-        let message = tr(
-            &locale,
-            "ping 测试进程异常退出",
-            "Ping process exited unexpectedly",
-        )
-        .to_string();
-        fail_engine(
-            &app,
-            &session_id,
-            &request.task_id,
-            &log,
-            &locale,
-            &message,
-            false,
-        )
-        .await;
-        ClientTaskResult::Failed
-    }
-}
-
-async fn read_lines<R: tokio::io::AsyncRead + Unpin>(
-    reader: R,
-    tx: mpsc::Sender<(String, bool)>,
-    is_error: bool,
-) {
-    let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if tx.send((line, is_error)).await.is_err() {
-            break;
-        }
-    }
-}
-
-/// 每次调用不再重新编译正则：ping 输出解析在热点路径上（ping 的 stdout 每行都调），
-/// 用 LazyLock 确保只编译一次。
-static PING_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"(?i)(?:time|时间)[=<＝]\s*(\d+(?:\.\d+)?)\s*ms").unwrap()
-});
-
-fn parse_ping_metric(line: &str, second: i64) -> Option<MetricPoint> {
-    PING_RE.captures(line).map(|c| MetricPoint {
-        second,
-        jitter_ms: c[1].parse().unwrap_or(0.0),
-        ..Default::default()
-    })
-}
 
 // ---------------------------------------------------------------------------
 // 日志与结果处理
 // ---------------------------------------------------------------------------
 
 /// 创建测试日志文件并写入文件头，失败时发出错误事件
-async fn setup_log<R: tauri::Runtime>(
+pub(crate) async fn setup_log<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
     request: &TestRequest,
@@ -1768,7 +626,7 @@ async fn setup_log<R: tauri::Runtime>(
 
 /// 同步追加一行日志（实时回调与主任务共用）。统一补换行：日志文件与界面日志
 /// 一样逐行呈现（此前只写内容不换行，多行输出在文件里粘成一行）
-fn append_log(log: &SessionLog, line: &str) {
+pub(crate) fn append_log(log: &SessionLog, line: &str) {
     if let Ok(mut file) = log.file.lock() {
         let _ = file.write_all(line.as_bytes());
         let _ = file.write_all(b"\n");
@@ -1778,7 +636,7 @@ fn append_log(log: &SessionLog, line: &str) {
 /// 客户端运行日志的路径推导（与 setup_log 的客户端分支一致）：按 runId 时间戳
 /// 定位，前缀随界面语言（客户端 / Client）。运行中切换界面语言时前缀可能与
 /// 创建时不同，按时间戳在日志目录中找回既有文件，避免超时补写落到新文件
-fn client_run_log_path<R: tauri::Runtime>(
+pub(crate) fn client_run_log_path<R: tauri::Runtime>(
     app: &AppHandle<R>,
     run_id: i64,
     local_ip: &str,
@@ -1848,7 +706,7 @@ pub async fn append_client_log<R: tauri::Runtime>(app: AppHandle<R>, request: Cl
 /// 问题，队列里剩余引擎项必然同样失败。前端收到 fatal 事件后中止整个队列。
 /// 注意不能按 Io 错误一锅端：如 MPTCP 在不支持的平台上也是 Io(Unsupported)，
 /// 那种逐项失败（如 tcp-mptcp）应继续队列而不是中止。
-fn is_server_unreachable(error: &riperf3::RiperfError) -> bool {
+pub(crate) fn is_server_unreachable(error: &riperf3::RiperfError) -> bool {
     match error {
         riperf3::RiperfError::Io(e) => matches!(
             e.kind(),
@@ -1862,7 +720,7 @@ fn is_server_unreachable(error: &riperf3::RiperfError) -> bool {
 }
 
 /// 客户端结束时按 RunOutcome 归类结果：成功 / 手动停止 / 失败
-async fn finish_engine<R: tauri::Runtime>(
+pub(crate) async fn finish_engine<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
     task_id: &str,
@@ -2016,7 +874,7 @@ async fn finish_engine<R: tauri::Runtime>(
 /// 追加最终汇总（发送/接收方向的传输量与平均带宽，UDP 附抖动丢包）
 /// 最终汇总文本（发送/接收方向的传输量与平均带宽，UDP 附抖动丢包）：逐行
 /// [INFO] 前缀，测试项日志与客户端运行汇总文件共用
-fn engine_summary_lines(report: &riperf3::Report, locale: &str) -> String {
+pub(crate) fn engine_summary_lines(report: &riperf3::Report, locale: &str) -> String {
     let mut out = String::new();
     if let Some(sent) = &report.end.sum_sent {
         let mut line = tr_format!(
@@ -2066,7 +924,7 @@ fn engine_summary_lines(report: &riperf3::Report, locale: &str) -> String {
     out
 }
 
-fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &str) {
+pub(crate) fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &str) {
     let lines = engine_summary_lines(report, locale);
     if !lines.is_empty() {
         append_log(log, lines.trim_end());
@@ -2075,7 +933,7 @@ fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &st
 
 /// 最终汇总与区间采样语义不同：它是全程平均带宽与总传输量，不能追加到实时
 /// 曲线，否则最后会在同一时间坐标产生明显竖直突变。
-fn emit_final_summary<R: tauri::Runtime>(
+pub(crate) fn emit_final_summary<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
     task_id: &str,
@@ -2122,7 +980,7 @@ fn emit_final_summary<R: tauri::Runtime>(
 }
 
 /// 逐秒指标行的日志格式（近似 iperf3 文本输出）
-fn format_interval_line(
+pub(crate) fn format_interval_line(
     locale: &str,
     second: i64,
     sum: &riperf3::json_report::IntervalSum,
@@ -2157,7 +1015,7 @@ fn format_interval_line(
     line
 }
 
-async fn finish_ok<R: tauri::Runtime>(
+pub(crate) async fn finish_ok<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
     task_id: &str,
@@ -2169,7 +1027,7 @@ async fn finish_ok<R: tauri::Runtime>(
     emit_complete(app, session_id, task_id, status, log_path);
 }
 
-async fn fail_engine<R: tauri::Runtime>(
+pub(crate) async fn fail_engine<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
     task_id: &str,
@@ -2188,7 +1046,7 @@ async fn fail_engine<R: tauri::Runtime>(
 }
 
 /// 关闭日志文件并按完成状态重命名（完成/未完成/手动停止均保留日志）
-async fn finish_log(log: &SessionLog, success: bool) -> String {
+pub(crate) async fn finish_log(log: &SessionLog, success: bool) -> String {
     if let Ok(mut file) = log.file.lock() {
         let _ = file.flush();
     }
@@ -2205,7 +1063,7 @@ async fn finish_log(log: &SessionLog, success: bool) -> String {
     final_path.to_string_lossy().to_string()
 }
 
-fn safe_name(value: &str) -> String {
+pub(crate) fn safe_name(value: &str) -> String {
     value
         .chars()
         .map(|c| if "<>:\"/\\|?*".contains(c) { '_' } else { c })
@@ -2214,7 +1072,7 @@ fn safe_name(value: &str) -> String {
 
 /// 任务显示名：随界面语言输出，日志文件名（经 safe_name 净化）与日志头部共用——
 /// 英文模式下产出英文文件名（如 Client-…-TCP One-way Bandwidth-…）
-fn task_label(locale: &str, id: &str) -> &'static str {
+pub(crate) fn task_label(locale: &str, id: &str) -> &'static str {
     if locale == "en" {
         match id {
             "ping" => "Ping Connectivity",
@@ -2254,7 +1112,7 @@ fn task_label(locale: &str, id: &str) -> &'static str {
     }
 }
 
-fn emit_log<R: tauri::Runtime>(
+pub(crate) fn emit_log<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session: &str,
     task: &str,
@@ -2276,7 +1134,7 @@ fn emit_log<R: tauri::Runtime>(
         },
     );
 }
-fn emit_task_start<R: tauri::Runtime>(app: &AppHandle<R>, session: &str, task: &str) {
+pub(crate) fn emit_task_start<R: tauri::Runtime>(app: &AppHandle<R>, session: &str, task: &str) {
     let _ = app.emit(
         "test-event",
         TestEvent {
@@ -2292,7 +1150,7 @@ fn emit_task_start<R: tauri::Runtime>(app: &AppHandle<R>, session: &str, task: &
         },
     );
 }
-fn emit_queue_complete<R: tauri::Runtime>(
+pub(crate) fn emit_queue_complete<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session: &str,
     status: &str,
@@ -2328,7 +1186,7 @@ fn emit_queue_complete<R: tauri::Runtime>(
         },
     );
 }
-fn emit_metric<R: tauri::Runtime>(
+pub(crate) fn emit_metric<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session: &str,
     task: &str,
@@ -2349,7 +1207,7 @@ fn emit_metric<R: tauri::Runtime>(
         },
     );
 }
-fn emit_complete<R: tauri::Runtime>(
+pub(crate) fn emit_complete<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session: &str,
     task: &str,
@@ -2371,7 +1229,7 @@ fn emit_complete<R: tauri::Runtime>(
         },
     );
 }
-fn emit_error<R: tauri::Runtime>(
+pub(crate) fn emit_error<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session: &str,
     task: &str,
@@ -2398,10 +1256,12 @@ fn emit_error<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_log, client_params_for, client_task_timeout, is_server_unreachable,
-        parse_ping_metric, validate, TestLog,
+        append_log, is_server_unreachable,
+        validate, TestLog,
     };
+    use crate::client::{client_params_for, client_task_timeout};
     use crate::models::TestRequest;
+    use crate::ping::parse_ping_metric;
     use riperf3::TransportProtocol;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
