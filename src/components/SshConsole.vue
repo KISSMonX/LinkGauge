@@ -30,6 +30,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const connected = computed(() => props.status === 'connected')
+const isEmpty = computed(() => !props.lines.some(Boolean))
 const text = computed(() => props.lines.join('\n'))
 
 /** 远端 iperf3 服务端的常用操作：按服务端标签页的端口 / 间隔拼命令 */
@@ -129,7 +130,7 @@ onUnmounted(() => observer?.disconnect())
         <button @click="emit('clear')"><Icon name="trash" :size="13" />{{ t('st.clear') }}</button>
       </div>
     </div>
-    <pre ref="box" class="console-output" @scroll="onScroll">{{ text }}<span v-if="!lines.some(Boolean)" class="console-empty">{{ t('ssh.empty') }}</span></pre>
+    <pre ref="box" class="console-output" @scroll="onScroll">{{ text }}<span v-if="isEmpty" class="console-empty">{{ t('ssh.empty') }}</span></pre>
     <span ref="ruler" class="console-ruler" aria-hidden="true">0000000000</span>
     <form class="console-input" @submit.prevent="submit">
       <span class="console-prompt">$</span>
