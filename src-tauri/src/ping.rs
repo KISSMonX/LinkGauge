@@ -26,6 +26,75 @@ use tokio::{
 // ping 任务（保留系统进程调用，riperf3 不支持 ICMP）
 // ---------------------------------------------------------------------------
 
+/// 已启动的 ping 子进程及其 I/O 通道。
+struct PingChild {
+    child: tokio::process::Child,
+    rx: tokio::sync::mpsc::Receiver<(String, bool)>,
+    pid: Option<u32>,
+}
+
+/// 启动 ping 子进程，挂接 stdout / stderr 读取器。
+fn spawn_ping(args: &[String]) -> Result<PingChild, String> {
+    let mut command = Command::new("ping");
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let mut child = command.spawn().map_err(|error| format!("{error}"))?;
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel::<(String, bool)>(128);
+    if let Some(stdout) = child.stdout.take() {
+        let tx = tx.clone();
+        tokio::spawn(read_lines(stdout, tx, false));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let tx = tx.clone();
+        tokio::spawn(read_lines(stderr, tx, true));
+    }
+    drop(tx);
+    Ok(PingChild { child, rx, pid })
+}
+
+/// 处理 ping 退出结果：清理 PID、记录结果日志、发送结束事件。
+async fn finalize_ping<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    task_id: &str,
+    log: &crate::runner::SessionLog,
+    locale: &str,
+    final_success: bool,
+    final_stopped: bool,
+    final_timed_out: bool,
+) -> ClientTaskResult {
+    if final_timed_out {
+        let message = tr(
+            locale,
+            "Ping 超过后端硬时限，已终止并继续下一项",
+            "Ping exceeded the backend hard timeout and was stopped; continuing with the next item",
+        );
+        fail_engine(app, session_id, task_id, log, locale, message, false).await;
+        ClientTaskResult::Failed
+    } else if final_stopped {
+        finish_ok(app, session_id, task_id, log, "stopped").await;
+        ClientTaskResult::Stopped
+    } else if final_success {
+        finish_ok(app, session_id, task_id, log, "success").await;
+        ClientTaskResult::Success
+    } else {
+        let message = tr(
+            locale,
+            "ping 测试进程异常退出",
+            "Ping process exited unexpectedly",
+        )
+        .to_string();
+        fail_engine(app, session_id, task_id, log, locale, &message, false).await;
+        ClientTaskResult::Failed
+    }
+}
+
 pub(crate) async fn run_ping<R: tauri::Runtime>(
     app: AppHandle<R>,
     session_id: String,
@@ -55,16 +124,12 @@ pub(crate) async fn run_ping<R: tauri::Runtime>(
     append_log(&log, &format!("[INFO] {exec_line}"));
     emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
 
-    let mut command = Command::new("ping");
-    command
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let PingChild {
+        mut child,
+        mut rx,
+        pid,
+    } = match spawn_ping(&args) {
+        Ok(pc) => pc,
         Err(error) => {
             let message = crate::tr_format!(
                 locale,
@@ -86,20 +151,9 @@ pub(crate) async fn run_ping<R: tauri::Runtime>(
             return ClientTaskResult::Failed;
         }
     };
-    let pid = child.id();
     if let Some(pid) = pid {
         child_pids.lock().await.insert(pid);
     }
-    let (tx, mut rx) = mpsc::channel::<(String, bool)>(128);
-    if let Some(stdout) = child.stdout.take() {
-        let tx = tx.clone();
-        tokio::spawn(read_lines(stdout, tx, false));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        let tx = tx.clone();
-        tokio::spawn(read_lines(stderr, tx, true));
-    }
-    drop(tx);
     let mut ping_sample = 0;
     let mut final_success = false;
     let mut final_stopped = false;
@@ -155,48 +209,17 @@ pub(crate) async fn run_ping<R: tauri::Runtime>(
             }
         ),
     );
-    if final_timed_out {
-        let message = tr(
-            &locale,
-            "Ping 超过后端硬时限，已终止并继续下一项",
-            "Ping exceeded the backend hard timeout and was stopped; continuing with the next item",
-        );
-        fail_engine(
-            &app,
-            &session_id,
-            &request.task_id,
-            &log,
-            &locale,
-            message,
-            false,
-        )
-        .await;
-        ClientTaskResult::Failed
-    } else if final_stopped {
-        finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
-        ClientTaskResult::Stopped
-    } else if final_success {
-        finish_ok(&app, &session_id, &request.task_id, &log, "success").await;
-        ClientTaskResult::Success
-    } else {
-        let message = tr(
-            &locale,
-            "ping 测试进程异常退出",
-            "Ping process exited unexpectedly",
-        )
-        .to_string();
-        fail_engine(
-            &app,
-            &session_id,
-            &request.task_id,
-            &log,
-            &locale,
-            &message,
-            false,
-        )
-        .await;
-        ClientTaskResult::Failed
-    }
+    finalize_ping(
+        &app,
+        &session_id,
+        &request.task_id,
+        &log,
+        &locale,
+        final_success,
+        final_stopped,
+        final_timed_out,
+    )
+    .await
 }
 
 async fn read_lines<R: tokio::io::AsyncRead + Unpin>(
