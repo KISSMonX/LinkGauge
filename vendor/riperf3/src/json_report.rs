@@ -1802,8 +1802,22 @@ impl ReportInput {
         }
     }
 
+    /// (local LinkGauge patch) `-O` 预热后的汇总窗口几何（start / end / seconds）。
+    /// interval 已带 omitted 标记、汇总字节数也不含预热，唯独窗口用全程
+    /// elapsed，导致 bps = bytes/全程 被低估；这里对齐 iperf3 的 [SUM]
+    /// 行：start = omit，end = elapsed，seconds = elapsed - omit
+    /// （clamp 保护 -n/-k 等 elapsed 可能小于 omit 的边界）
+    fn measured_window(&self) -> (f64, f64, f64) {
+        let omit = self.omit.max(0) as f64;
+        (omit, self.elapsed, (self.elapsed - omit).max(0.0))
+    }
+
     fn end_stream(&self, s: &StreamReport) -> EndStream {
-        let dur = self.elapsed;
+        // (local LinkGauge patch) `-O` 预热段不进入汇总窗口。iperf3 的 [SUM]
+        // 行打印 "omit-end sec"，sum.start/end/seconds 只覆盖预热后的测量窗口；
+        // 原实现用全程 elapsed 做分母、start 恒为 0，而 bytes 已排除预热，
+        // 聚合带宽被低估（探针：3s/-O 1 → seconds=3，应为 2）
+        let (start, end, seconds) = self.measured_window();
         // Shape is driven by the test protocol, not by whether stats happen to be
         // present: a UDP stream with missing stats still emits a valid `udp`
         // object (zeroed datagram fields), never a TCP `{sender,receiver}` body.
@@ -1893,11 +1907,11 @@ impl ReportInput {
                 receiver: None,
                 udp: Some(UdpStreamEnd {
                     socket: s.id,
-                    start: 0.0,
-                    end: dur,
-                    seconds: dur,
+                    start,
+                    end,
+                    seconds,
                     bytes,
-                    bits_per_second: bps(bytes, dur),
+                    bits_per_second: bps(bytes, seconds),
                     jitter_ms: u.jitter_secs * 1000.0,
                     lost_packets: u.lost_packets,
                     packets,
@@ -1967,11 +1981,11 @@ impl ReportInput {
         let e = s.tcp_end.unwrap_or_default();
         let sender_side = |bytes: u64, retransmits: Option<i64>| TcpStreamSide {
             socket: s.id,
-            start: 0.0,
-            end: dur,
-            seconds: dur,
+            start,
+            end,
+            seconds,
             bytes,
-            bits_per_second: bps(bytes, dur),
+            bits_per_second: bps(bytes, seconds),
             retransmits: if emit_extras { retransmits } else { None },
             max_snd_cwnd: emit_extras.then_some(e.max_snd_cwnd),
             max_snd_wnd: emit_extras.then_some(e.max_snd_wnd),
@@ -1983,11 +1997,11 @@ impl ReportInput {
         };
         let receiver_side = |bytes: u64| TcpStreamSide {
             socket: s.id,
-            start: 0.0,
-            end: dur,
-            seconds: dur,
+            start,
+            end,
+            seconds,
             bytes,
-            bits_per_second: bps(bytes, dur),
+            bits_per_second: bps(bytes, seconds),
             retransmits: None,
             max_snd_cwnd: None,
             max_snd_wnd: None,
@@ -2100,13 +2114,14 @@ impl ReportInput {
     }
 
     fn tcp_sum(&self, bytes: u64, sender: bool, retransmits: Option<i64>) -> SumSide {
-        let dur = self.elapsed;
+        // (local LinkGauge patch) 汇总窗口排除预热段（见 measured_window）
+        let (start, end, seconds) = self.measured_window();
         SumSide {
-            start: 0.0,
-            end: dur,
-            seconds: dur,
+            start,
+            end,
+            seconds,
             bytes,
-            bits_per_second: bps(bytes, dur),
+            bits_per_second: bps(bytes, seconds),
             retransmits,
             jitter_ms: None,
             lost_packets: None,
@@ -2149,13 +2164,14 @@ impl ReportInput {
         jitter_secs: f64,
         pct_packets: i64,
     ) -> SumSide {
-        let dur = self.elapsed;
+        // (local LinkGauge patch) 汇总窗口排除预热段（见 measured_window）
+        let (start, end, seconds) = self.measured_window();
         SumSide {
-            start: 0.0,
-            end: dur,
-            seconds: dur,
+            start,
+            end,
+            seconds,
             bytes,
-            bits_per_second: bps(bytes, dur),
+            bits_per_second: bps(bytes, seconds),
             retransmits: None,
             jitter_ms: Some(jitter_secs * 1000.0),
             lost_packets: Some(lost),

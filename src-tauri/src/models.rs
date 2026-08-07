@@ -1,10 +1,29 @@
 use serde::{Deserialize, Serialize};
 
+/// 前端生成的队列级日志补写请求（看门狗超时等）：前端日志不在后端事件流里，
+/// 经 append_client_log 命令写入客户端运行日志文件
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientLogAppend {
+    /// 一轮队列的运行标识（前端 start() 的 startedAt），用于定位运行日志文件
+    pub run_id: i64,
+    pub local_ip: String,
+    pub server_ip: String,
+    pub locale: String,
+    pub level: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestRequest {
     pub task_id: String,
     pub mode: String,
+    /// 一轮队列测试的运行标识（前端 start() 的 startedAt 毫秒时间戳，0 = 无）：
+    /// 同一 runId 的客户端测试项写入同一个「客户端汇总」日志文件（类似服务端
+    /// 一次会话一个 Server-*.log）
+    #[serde(default)]
+    pub run_id: i64,
     /// 协议由 task_id 推断（udp-* 为 UDP），此字段仅兼容旧版前端，不再参与逻辑
     #[serde(default)]
     pub protocol: String,
@@ -27,6 +46,47 @@ pub struct TestRequest {
     #[serde(default)]
     pub udp_packet_length: u64,
     pub interval: u64,
+    /// 预热时间（秒，0 = 不预热，对应 iperf3 `-O`）：跳过前 N 秒的统计，
+    /// 排除 TCP 慢启动影响；必须小于 duration
+    #[serde(default)]
+    pub omit_secs: u32,
+    /// TCP 套接字缓冲区大小（KB，0 = 自动/默认，对应 iperf3 `-w`；仅客户端模式使用）
+    #[serde(default)]
+    pub window_kb: u32,
+    /// 客户端数据流源端口（0 = 自动，对应 iperf3 `--cport`；第 i 条流绑定 cport+i）
+    #[serde(default)]
+    pub cport: u16,
+    /// IP 协议族（0 = 自动，4 = 仅 IPv4，6 = 仅 IPv6；仅客户端模式使用）
+    #[serde(default)]
+    pub ip_version: u8,
+    /// 测试结束后拉取服务端视角的输出（对应 iperf3 --get-server-output；
+    /// 仅客户端模式使用，服务端为文本模式时返回其汇总文本）
+    #[serde(default)]
+    pub get_server_output: bool,
+    /// 测试结束条件：time（按时长，默认）/ bytes（按传输字节数，-n）/ blocks（按块数，-k）。
+    /// bytes/blocks 优先于时长（引擎语义，与 iperf3 一致）
+    #[serde(default)]
+    pub transfer_mode: String,
+    /// 按量测试的数量：transfer_mode 为 bytes 时按 MB（十进制 ×1_000_000），
+    /// blocks 时即块数
+    #[serde(default)]
+    pub transfer_amount: u64,
+    /// DSCP 值（0 = 不设置，1-63 映射到 TOS 高 6 位，对应 iperf3 --dscp；
+    /// 仅客户端模式使用）
+    #[serde(default)]
+    pub dscp: u32,
+    /// TCP 拥塞控制算法（空 = 不设置，对应 iperf3 -C；仅 Linux/FreeBSD 生效，
+    /// 其他平台引擎静默忽略）
+    #[serde(default)]
+    pub congestion_algo: String,
+    /// UDP 数据报设置禁止分片标志（对应 iperf3 --dont-fragment；
+    /// 仅 IPv4，Unix 平台生效）
+    #[serde(default)]
+    pub udp_dont_fragment: bool,
+    /// 使用 MPTCP 多路径 TCP（对应 iperf3 -m/--multipath；需两端内核支持，
+    /// 不支持的平台在连接时直接报错）
+    #[serde(default)]
+    pub mptcp: bool,
     // —— iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path
     // 启动时必需）。全部 default，旧版前端不传时等价于不启用 ——
     /// 认证用户名；为空表示不启用认证
@@ -41,6 +101,44 @@ pub struct TestRequest {
     /// 对 iperf3 < 3.17 的服务端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP）
     #[serde(default)]
     pub auth_pkcs1_padding: bool,
+    // —— 服务端 iperf3 认证（要求客户端提供 --username/--password 凭据）——
+    // 与客户端认证字段分开：服务端持有的是 RSA 私钥与授权用户文件，不涉及用户名/密码。
+    // 全部 default，旧版前端不传时等价于不启用 ——
+    /// 是否启用服务端认证（仅服务端模式使用）
+    #[serde(default)]
+    pub server_auth_enabled: bool,
+    /// 服务端 RSA 私钥文件路径（PEM，用于解密客户端凭据，对应 --rsa-private-key-path）
+    #[serde(default)]
+    pub server_auth_private_key_path: String,
+    /// 授权用户文件路径（对应 --authorized-users-path；格式见 riperf3 auth.rs：
+    /// 每行 `用户名,sha256hex`，哈希为 sha256("{用户名}{密码}")，# 开头为注释）
+    #[serde(default)]
+    pub server_auth_users_path: String,
+    /// 对 iperf3 < 3.17 的客户端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP）
+    #[serde(default)]
+    pub server_auth_pkcs1_padding: bool,
+    // —— 服务端防护参数（保护共享服务端；0 = 不限制，仅服务端模式使用）——
+    /// 空闲超时（秒，对应 iperf3 --idle-timeout）：N 秒内无客户端连接则退出监听
+    #[serde(default)]
+    pub server_idle_timeout: u32,
+    /// 单次测试最大时长（秒，对应 iperf3 --server-max-duration）：
+    /// 请求时长 + 预热超过上限的测试在参数交换阶段被拒绝
+    #[serde(default)]
+    pub server_max_duration: u32,
+    /// 服务端带宽上限（Mbps，对应 iperf3 --server-bitrate-limit，换算 ×1_000_000）：
+    /// 聚合吞吐超过上限的测试被终止
+    #[serde(default)]
+    pub server_bitrate_limit_mbps: u64,
+}
+
+/// 后端当前实际运行的服务端会话；窗口重建或同步状态丢失后据此恢复界面。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerRuntimeStatus {
+    pub session_id: String,
+    pub bind_ip: String,
+    pub port: u16,
+    pub interval: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -71,6 +169,10 @@ pub struct TestEvent {
     pub metric: Option<MetricPoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_path: Option<String>,
+    /// 环境性失败（服务端不可达等）：队列里剩余引擎项必然同样失败，
+    /// 前端据此中止整个队列而非逐项标失败
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fatal: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,6 +193,13 @@ pub struct InterfaceInfo {
     pub interface_name: String,
     /// 网卡链路速率（Mbps），0 表示未知
     pub speed_mbps: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSnapshot {
+    pub info: NetworkInfo,
+    pub interfaces: Vec<InterfaceInfo>,
 }
 
 /// 单个测试项目的历史数据（报告按测试项目分组输出：数据表 + 曲线）

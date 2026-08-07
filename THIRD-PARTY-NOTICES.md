@@ -14,6 +14,15 @@ under `vendor/riperf3` with a small local patch (see the repo README).
 Its dependencies (rsa, serde, tokio, socket2, etc.) are covered by their
 respective licenses; see the Cargo.lock for the exact versions.
 
+## windows-sys
+
+Windows network-interface discovery uses the official Rust for Windows
+`windows-sys` bindings to call the operating system's IP Helper API directly.
+No PowerShell process or packet-capture runtime is required.
+
+- Copyright: Microsoft Corporation
+- License: MIT OR Apache-2.0
+
 ## russh
 
 The SSH remote console uses [russh](https://github.com/warp-tech/russh), a

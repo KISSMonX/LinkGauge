@@ -31,27 +31,32 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - English / 中文 UI (English by default), switchable in **Settings**, synced across windows
 - Light / dark theme (light by default), switchable in **Settings**, synced across windows
 - Server can bind a specific IP and port, with a configurable log/statistics output interval (seconds)
+- Server-side protection options: idle timeout (auto-stop after N seconds without a client), per-test max duration (refuses longer requests), and an aggregate bandwidth cap (terminates over-rate tests)
 - SSH remote console on the server view: connect to a remote host (password or private key) and drive its iperf3 server from an in-app console with live output — pure-Rust [russh](https://github.com/warp-tech/russh), no system `ssh` client required
 - Separate TCP and UDP configuration views
 - Ping connectivity checks
 - TCP single-direction, bidirectional, parallel-stream, reverse, and stress tests
+- Byte/block-limited (`-n` / `-k`), MPTCP multipath, and UDP no-fragment (DF) test items, alongside the global options
 - UDP bandwidth, jitter, and packet-loss tests
 - Sequential test queue with waiting, running, successful, failed, and stopped states
 - Live bandwidth chart and aggregate statistics
 - Local and peer network information
 - Local port of the active connection shown in the client dashboard
-- Multi-NIC detection with an interface picker (the first interface is the default) and link-speed reporting
+- Multi-NIC detection with an interface picker (the first interface is the default) and link-speed reporting, using native OS APIs without helper processes on Windows
 - Bandwidth presets (100 / 1000 Mbps, unlimited) that default to the current NIC link speed
+- Warm-up omit period (`-O`), TCP socket buffer size (`-w`, 0 = auto), client source port (`--cport`), and explicit IPv4/IPv6 selection client options
+- DSCP marking (`--dscp`) and byte/block-limited tests (`-n` / `-k`, ending when the amount is transferred) client options
+- TCP congestion-control algorithm (`-C`, Linux/FreeBSD), UDP don't-fragment (`--dont-fragment`, IPv4), and MPTCP multipath (`-m`, kernel support required) client options
+- Optional fetch of the peer server's own output (`--get-server-output`), appended to the test log and report
 - Packet-length presets (TCP up to 1 MB, UDP up to 64 KB), with a custom length persisted to the config file
 - Real-time INFO, WARN, and ERROR logs with filtering
 - Engine logs follow the UI language switch at runtime
 - Per-test log files with completed/incomplete status in the filename
 - Graceful test cancellation (no queue recovery — every start is a fresh run)
 - JSON configuration import, export, and local persistence
-- HTML and PDF report generation
+- HTML reports and PDF output through the native system print dialog, both using the same charts and tables
 - Pure-Rust riperf3 engine: interoperable with standard iperf3 servers, no runtime dependencies
-- iperf3 authentication (username / password / RSA public key, with PKCS#1 padding for pre-3.17 servers); the password is never persisted
-- Automatic retry when the server is busy, so adjacent queue items don't knock each other out
+- iperf3 authentication in both directions — the client supplies username / password / RSA public key (with PKCS#1 padding for pre-3.17 peers), and the server can require credentials via its own RSA private key and an authorized-users file; passwords are never persisted
 - Automated CI checks and tagged release builds for Windows x64, macOS x64 / arm64, and Linux x64 / arm64
 
 ## Architecture
@@ -99,11 +104,10 @@ The application uses Tauri's two-process model:
 | --- | --- |
 | `start_test` | Validate configuration and run a Ping or riperf3 client/server task |
 | `stop_test` | Signal cancellation: kill the Ping process or gracefully interrupt the riperf3 run |
-| `get_network_info` | Read the local IP address, MAC address, hostname, and link speed |
-| `get_network_interfaces` | Enumerate all up IPv4 interfaces with MAC address and link speed |
+| `get_network_snapshot` | Read the hostname and all up IPv4 interfaces with MAC addresses and link speeds in one non-blocking snapshot |
 | `get_custom_packet_length` | Read the persisted custom packet length from the settings file |
 | `save_custom_packet_length` | Validate and persist a custom packet length to the settings file |
-| `generate_report` | Generate an HTML or PDF report in the application data directory |
+| `generate_report` | Save an HTML report or open its print-ready rendering for native PDF output |
 | `ssh_connect` | Open an SSH session with a PTY-backed interactive shell on a remote host |
 | `ssh_send` | Write to the remote shell (command text, `Ctrl+C`, …) |
 | `ssh_resize` | Sync the remote PTY size with the console viewport |
@@ -345,7 +349,7 @@ Pick the artifact matching your architecture: `*_amd64.*` for x64, `*_arm64.*` /
 3. In client mode, enter the server address, port, duration, and protocol-specific parameters.
 4. Start the test and monitor the task queue, live chart, statistics, and logs.
 5. Stop a test when necessary. Failed test items can be reviewed in the logs and the report.
-6. Generate an HTML or PDF report after one or more tasks finish.
+6. Generate an HTML report after one or more tasks finish, or choose PDF and select **Save as PDF** in the native print dialog.
 
 ### Operating the peer server over SSH
 
@@ -373,22 +377,22 @@ The peer must be reachable, its firewall must allow the configured TCP/UDP port,
 - Configuration can be imported or exported as JSON.
 - **Save Settings** persists the client and server settings automatically in the local WebView storage.
 - Test logs are written under the OS-specific Tauri application log directory in `tests/`.
-- Reports are written under the OS-specific Tauri application data directory in `reports/`.
+- HTML reports default to the OS-specific Tauri application data directory in `reports/`; PDF reports are saved to the location selected in the native print dialog.
 - The custom packet length is persisted to `settings.json` in the OS-specific Tauri application config directory.
 - SSH connection settings (host, port, username, auth method, private key path) are persisted alongside the other settings. The login password and the key passphrase are **not** — like the iperf3 auth password, they are held in memory only, excluded from exported configs, and must be re-entered after a restart.
 
 Log filenames follow this pattern (server and client logs are recorded separately):
 
 ```text
-Server-<local-ip>-<port>-<yyyyMMddHHmmss>-<completed|incomplete>.log   # server
-Client-<local-ip>-<server-ip>-<test-name>-<yyyyMMddHHmmss>-<completed|incomplete>.log   # client
+Server-<local-ip>-<port>-<yyyyMMddHHmmss>-<completed|incomplete>.log   # server (prefix follows the UI language: 服务端 / Server)
+Client-<local-ip>-<server-ip>-<yyyyMMddHHmmss>.log            # client: all test items of one run share a single run log (prefix follows the UI language: 客户端 / Client)
 ```
 
 ## Test Engine (riperf3)
 
 - Engine: [riperf3](https://github.com/therealevanhenry/riperf3) — a ground-up, wire-compatible Rust implementation of the iperf3 protocol, vendored at `vendor/riperf3` (upstream HEAD, version 0.9.0-dev).
 - The engine runs **in-process**: no iperf3 executable is installed, bundled, resolved, or spawned. Per-second metrics flow through typed callbacks; tests can be interrupted gracefully via a watch channel.
-- **Local patch:** upstream exposes interval results only after a run completes, so a small `on_interval` callback was added (see `vendor/riperf3` — `IntervalReporterConfig`, `ClientBuilder::on_interval`, `ServerBuilder::on_interval`). The patch is marked with `local LinkGauge patch` comments; re-apply it after upgrading the vendored source.
+- **Local patches:** (1) upstream exposes interval results only after a run completes, so a small `on_interval` callback was added (see `vendor/riperf3` — `IntervalReporterConfig`, `ClientBuilder::on_interval`, `ServerBuilder::on_interval`); (2) the final `sum_*` window now excludes the `-O` warm-up period (iperf3 prints its `[SUM]` row as "omit-end sec"), so the aggregate bitrate is not understated on warm-up runs; (3) the server's stats sampling interval is configurable via `ServerBuilder::interval` (upstream pins it at 1 s with no server `-i` knob). All patches are marked with `local LinkGauge patch` comments; re-apply them after upgrading the vendored source.
 - Interop: the engine is interoperable with real iperf3 servers and clients (verified upstream against iperf 3.21).
 - Known platform difference: TCP retransmission counts depend on `TCP_INFO`, which is unavailable on Windows; the app reports 0 there.
 
@@ -402,6 +406,9 @@ The client can test directly against a stock iperf3 server (`iperf3 -s`) — the
 | --- | --- | --- |
 | Ping connectivity | system `ping`, not iperf3 | none |
 | TCP single / parallel streams / stress | `-c` / `-P N` / `-t N` | any 3.x |
+| TCP byte/block-limited | `-n` / `-k` | any 3.x |
+| TCP MPTCP multipath | `-m` | 3.12+ |
+| UDP no-fragment | `--dont-fragment` | any 3.x |
 | TCP reverse | `-R` | 3.1+ |
 | **TCP bidirectional** | `--bidir` | **3.7+** |
 | UDP bandwidth / jitter & loss | `-u` | any 3.x |
@@ -414,22 +421,30 @@ Against servers older than 3.7 the `bidirectional` parameter is silently ignored
   > When upgrading from an older version, a stored value of 8192 is migrated to 1460 automatically; pick a larger value from the dropdown if you genuinely need one.
 - **TCP packet length defaults to 128 KB**, matching iperf3.
 - **Choosing "unlimited" bandwidth really is unlimited** (equivalent to `-b 0`). Note that the iperf3 CLI defaults `-u` to 1 Mbit/s when `-b` is omitted; LinkGauge does not inherit that default.
+- **No warm-up by default** (`-O` off). The omit period must be shorter than the test duration.
+- **TCP socket buffer defaults to 0 (auto)**, matching iperf3's `-w` default; enter a size in KB to override it.
+- **Client source port defaults to 0 (auto)** (iperf3 `--cport` off); when set, data-stream `i` binds source port `cport + i`, like iperf3.
+- **IP version defaults to auto**; force IPv4 or IPv6 when the server address is a hostname on a dual-stack host.
+- **No DSCP marking by default** (0 = unset, like iperf3 without `--dscp`); values 1–63 map to the TOS upper 6 bits.
+- **Byte/block-limited tests are off by default**; when enabled (`-n` / `-k`) they end the run once the amount is transferred and ignore the duration, and the warm-up omit period is rejected, like the iperf3 CLI.
+- **Congestion-control algorithm is unset by default**; the `-C` option applies on Linux/FreeBSD and is rejected with a clear message elsewhere.
+- **UDP don't-fragment is off by default**; when enabled it sets the DF flag on IPv4 UDP datagrams.
+- **MPTCP is off by default**; it requires kernel MPTCP support on both ends, and the connection fails with a socket error where unsupported.
 
 ### Authentication
 
-If the peer iperf3 runs with `--rsa-private-key-path` and `--authorized-users-path`, enable authentication in the client's "Authentication" section and supply a username, password, and the path to the server's RSA public key.
+**Client side:** If the peer iperf3 runs with `--rsa-private-key-path` and `--authorized-users-path`, enable authentication in the client's "Authentication" section and supply a username, password, and the path to the server's RSA public key.
 
 - iperf3 3.17 and later default to OAEP padding; tick "Use PKCS#1 padding" for older servers.
 - **The password is never written to local storage and is not included in exported config JSON** — re-enter it after restarting the app. The username and public key path are not secret and are saved normally.
 
-### Automatic retry when the server is busy
-
-An iperf3 server serves one test at a time. Between adjacent items in the queue the peer may not have returned to its listening state yet, which yields a "server busy" refusal. The client retries 3 times at 2-second intervals; "Stop test" takes effect immediately during the wait. The item is only marked failed if every retry is refused.
+**Server side:** The server view has its own **Server Authentication** section. Enable it and pick the RSA private key (`--rsa-private-key-path`) plus an authorized-users file (`--authorized-users-path`); every client must then authenticate before any test runs, and unauthorized clients are refused. The users file lists one user per line as `username,sha256hex` — the hash of `sha256("{username}{password}")`, `#` comments allowed. Clients authenticate with the same username/password and must hold the server's matching public key (see "Client side" above). The key and users file paths are not secrets and are saved with the other server settings.
 
 ### Other known differences
 
 - TCP retransmission counts are always 0 on Windows (`TCP_INFO` is unavailable there).
-- Server mode does not support authentication yet; it is configurable on the client side only.
+- The authorized-users file uses riperf3's `username,sha256hex` line format, not the JSON format of iperf3's official tooling.
+- With an idle timeout set, the LinkGauge server stops itself when it fires (the engine's one-off mode exits instead of restarting the listener).
 
 ## Troubleshooting
 
@@ -456,6 +471,11 @@ An iperf3 server serves one test at a time. Between adjacent items in the queue 
 - [ ] Test result history and multi-run comparison
 - [ ] Unit tests for key frontend logic
 
+## Contributors
+
+- **houming** — project author and maintainer
+- **DeepSeek** — AI-assisted development partner (iperf3 option set, server improvements, bug fixes in the 0.2.0 release cycle)
+
 ## Contributing
 
 Issues and pull requests are welcome after the repository is published.
@@ -481,3 +501,4 @@ Third-party components retain their own licenses:
 - [ESnet iperf3](https://github.com/esnet/iperf) for the wire protocol this tool interoperates with
 - [Tauri](https://tauri.app/) for the desktop application framework
 - [Vue](https://vuejs.org/) and [Chart.js](https://www.chartjs.org/) for the frontend and visualization stack
+- [DeepSeek](https://deepseek.com/) for AI-assisted development — the iperf3 option set, server improvements, and the bug fixes in this release

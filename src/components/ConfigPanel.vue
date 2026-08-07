@@ -5,7 +5,7 @@ import { useI18n, type MessageKey } from '../i18n'
 import Icon from './Icon.vue'
 
 /** tabs：主窗口已停靠的标签列表（undefined = 分离窗口，仅显示 detached 一侧） */
-const props = defineProps<{ tabs?: ('client' | 'server')[]; detached?: 'client' | 'server'; tab: 'client' | 'server'; config: TestConfig; serverConfig: ServerConfig; sshConfig: SshConfig; sshStatus: SshStatus; items: TestItem[]; clientRunning: boolean; serverRunning: boolean; local: NetworkInfo; savedCustomLength: number; savedCustomUdpLength: number }>()
+const props = defineProps<{ tabs?: ('client' | 'server')[]; detached?: 'client' | 'server'; tab: 'client' | 'server'; config: TestConfig; serverConfig: ServerConfig; sshConfig: SshConfig; sshStatus: SshStatus; items: TestItem[]; mptcpSupported: boolean; congestionControlSupported: boolean; clientRunning: boolean; serverRunning: boolean; local: NetworkInfo; savedCustomLength: number; savedCustomUdpLength: number }>()
 const emit = defineEmits<{
   'update:tab': [value: 'client' | 'server']
   'update:config': [value: TestConfig]
@@ -26,6 +26,10 @@ const emit = defineEmits<{
   'pick-nic-server': []
   /** 选择 iperf3 认证用的服务端 RSA 公钥文件 */
   'pick-public-key': []
+  /** 选择服务端认证用的 RSA 私钥文件 */
+  'pick-auth-key': []
+  /** 选择服务端认证用的授权用户文件 */
+  'pick-auth-users': []
   'save-custom-length': [protocol: 'tcp' | 'udp', value: number]
   /** 标签页被拖拽分离为独立窗口 */
   detach: [side: 'client' | 'server']
@@ -100,6 +104,43 @@ const setSsh = <K extends keyof SshConfig>(key: K, value: SshConfig[K]) => emit(
 /** SSH 参数在连接建立后锁定，断开后才能修改 */
 const sshLocked = computed(() => props.sshStatus !== 'idle')
 
+/** 按量测试项（tcp-bytes / udp-bytes / tcp-blocks）：勾选后传输量输入框必须可见 */
+const AMOUNT_ITEMS = ['tcp-bytes', 'udp-bytes', 'tcp-blocks']
+const amountItemSelected = computed(() => props.items.some((i) => AMOUNT_ITEMS.includes(i.id) && i.enabled))
+/** 全局按时长时始终显示时长；混合勾选按量项目时两个输入框同时显示，各管各的。 */
+const showDuration = computed(() => props.config.transferMode === 'time')
+const showAmount = computed(() => props.config.transferMode !== 'time' || amountItemSelected.value)
+/** 传输量单位标签：显式按块模式，或仅勾选按块项时显示块数，其余显示 MB */
+const amountLabel = computed(() => {
+  const blocksOnly = props.config.transferMode === 'blocks' ||
+    (props.config.transferMode === 'time' && amountItemSelected.value &&
+      !props.items.some((i) => (i.id === 'tcp-bytes' || i.id === 'udp-bytes') && i.enabled))
+  return blocksOnly ? t('cfg.transferAmountBlocks') : t('cfg.transferAmountBytes')
+})
+
+// —— 悬停/点击提示（测试项介绍 + 参数项注释共用）：
+// fixed 定位浮动层不受面板 overflow 裁剪；hover 跟随鼠标，点击固定显示 ——
+const tooltip = ref<{ text: string; x: number; y: number; pinned: boolean } | null>(null)
+/** 贴近视口右/下缘时回退坐标，避免提示被挤出屏幕 */
+const clampTip = (x: number, y: number) => ({ x: Math.min(x + 14, window.innerWidth - 280), y: Math.min(y + 14, window.innerHeight - 70) })
+function showTip(event: MouseEvent, text: string) {
+  tooltip.value = { text, ...clampTip(event.clientX, event.clientY), pinned: false }
+}
+function moveTip(event: MouseEvent) {
+  if (tooltip.value && !tooltip.value.pinned) tooltip.value = { ...tooltip.value, ...clampTip(event.clientX, event.clientY) }
+}
+/** 点击切换固定显示：再次点击同一提示关闭；固定期间鼠标移开不隐藏 */
+function pinTip(event: MouseEvent, text: string) {
+  if (tooltip.value?.pinned && tooltip.value.text === text) {
+    tooltip.value = null
+    return
+  }
+  tooltip.value = { text, ...clampTip(event.clientX, event.clientY), pinned: true }
+}
+function hideTip() {
+  if (!tooltip.value?.pinned) tooltip.value = null
+}
+
 /** 带宽限制选项：当前网卡速率（默认） + 100 / 1000 / 0（不限制），相同速率去重 */
 const bandwidthOptions = computed(() => {
   const nic = props.local.speedMbps > 0 ? props.local.speedMbps : 0
@@ -116,6 +157,14 @@ const bandwidthOptions = computed(() => {
 
 // TCP 报文长度预设（最大 1MB，默认 128KB）
 const TCP_PRESETS = [1024, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
+// DSCP 常用取值（0-63，--dscp；标签为协议常量，无需翻译）
+const dscpOptions = [
+  { value: 8, label: 'CS1 (8)' }, { value: 16, label: 'CS2 (16)' }, { value: 24, label: 'CS3 (24)' },
+  { value: 32, label: 'CS4 (32)' }, { value: 40, label: 'CS5 (40)' }, { value: 48, label: 'CS6 (48)' },
+  { value: 56, label: 'CS7 (56)' }, { value: 46, label: 'EF (46)' }, { value: 44, label: 'VA (44)' },
+  { value: 10, label: 'AF11 (10)' }, { value: 18, label: 'AF21 (18)' }, { value: 26, label: 'AF31 (26)' },
+  { value: 34, label: 'AF41 (34)' }, { value: 1, label: 'LE (1)' }
+]
 // UDP 报文长度预设（最大 64KB，默认 1460 = iperf3 的 DEFAULT_UDP_BLKSIZE）。
 // 1460 与 1472 均不分片（1472 = 1500 MTU 上限），更大的值会触发 IP 分片
 const UDP_PRESETS = [128, 512, 1024, 1460, 1472, 4096, 8192, 16384, 32768, 65536]
@@ -191,8 +240,8 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <div class="section-title"><h2>{{ t('cfg.tests') }}</h2></div>
       <p class="protocol-hint">{{ t('cfg.testsHint') }}</p>
       <div class="test-list">
-        <label v-for="(item, index) in items" :key="item.id">
-          <input type="checkbox" :checked="item.enabled" :disabled="clientRunning" @change="emit('toggle-item', item.id)" />
+        <label v-for="(item, index) in items" :key="item.id" :class="{ muted: item.supported === false || (item.id === 'udp-df' && config.udpDontFragment) }" @mouseenter="showTip($event, t(('cfg.itemDesc.' + item.id) as MessageKey))" @mousemove="moveTip" @mouseleave="hideTip">
+          <input type="checkbox" :checked="item.enabled" :disabled="clientRunning || item.supported === false || (item.id === 'udp-df' && config.udpDontFragment)" @change="emit('toggle-item', item.id)" />
           <span>{{ index + 1 }}. {{ itemLabel(item.id) }}</span><span class="drag">≡</span>
         </label>
       </div>
@@ -201,12 +250,23 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <div class="section-title"><h2>{{ t('cfg.params') }}</h2><button class="text-button" :disabled="clientRunning" @click="emit('reset')">{{ t('cfg.reset') }}</button></div>
       <label><span>{{ t('cfg.serverIp') }}</span><span class="ip-row"><input :value="config.serverIp" :disabled="clientRunning" @input="set('serverIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="clientRunning" :title="t('nic.title')" @click="emit('pick-nic')">{{ t('cfg.nicBtn') }}</button></span></label>
       <label><span>{{ t('cfg.port') }}</span><input type="number" :value="config.port" min="1" max="65535" :disabled="clientRunning" @input="set('port', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><span>{{ t('cfg.duration') }}</span><input type="number" :value="config.duration" min="1" max="86400" :disabled="clientRunning" @input="set('duration', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><span>{{ t('cfg.parallel') }}</span><input type="number" :value="config.parallel" min="1" max="128" :disabled="clientRunning" @input="set('parallel', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('cfg.parallelNote') }}</small></label>
-      <label><span>{{ t('cfg.bandwidth') }}</span><select :value="config.bandwidth" :disabled="clientRunning" @change="set('bandwidth', Number(($event.target as HTMLSelectElement).value))"><option v-for="option in bandwidthOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>{{ t('cfg.unlimited') }}</small></label>
+      <label><span>{{ t('cfg.transferMode') }}</span><select :value="config.transferMode" :disabled="clientRunning" @change="set('transferMode', ($event.target as HTMLSelectElement).value as TestConfig['transferMode'])"><option value="time">{{ t('cfg.transferModeTime') }}</option><option value="bytes">{{ t('cfg.transferModeBytes') }}</option><option value="blocks">{{ t('cfg.transferModeBlocks') }}</option></select></label>
+      <label v-if="showDuration"><span>{{ t('cfg.duration') }}</span><input type="number" :value="config.duration" min="1" max="86400" :disabled="clientRunning" @input="set('duration', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label v-if="showAmount"><span>{{ amountLabel }}</span><input type="number" :value="config.transferAmount" min="1" :disabled="clientRunning" @input="set('transferAmount', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.transferAmountNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.transferAmountNote'))" /></label>
+      <label><span>{{ t('cfg.parallel') }}</span><input type="number" :value="config.parallel" min="1" max="128" :disabled="clientRunning" @input="set('parallel', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.parallelNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.parallelNote'))" /></label>
+      <label><span>{{ t('cfg.bandwidth') }}</span><select :value="config.bandwidth" :disabled="clientRunning" @change="set('bandwidth', Number(($event.target as HTMLSelectElement).value))"><option v-for="option in bandwidthOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.unlimited'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.unlimited'))" /></label>
       <label><span>{{ t('cfg.tcpLen') }}</span><select :value="tcpPacketSelect" :disabled="clientRunning" @change="onPacketChange('tcp', $event)"><option v-for="option in tcpPacketOptions" :key="option.value" :value="option.value">{{ option.label }}</option><option value="custom">{{ t('cfg.custom') }}</option></select></label>
       <label><span>{{ t('cfg.udpLen') }}</span><select :value="udpPacketSelect" :disabled="clientRunning" @change="onPacketChange('udp', $event)"><option v-for="option in udpPacketOptions" :key="option.value" :value="option.value">{{ option.label }}</option><option value="custom">{{ t('cfg.custom') }}</option></select></label>
+      <label class="log-option"><input type="checkbox" :checked="config.udpDontFragment" :disabled="clientRunning" @change="set('udpDontFragment', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.udpDontFragment') }}</span><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.udpDontFragmentNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.udpDontFragmentNote'))" /></label>
+      <label class="log-option" :class="{ muted: !mptcpSupported }"><input type="checkbox" :checked="config.mptcp" :disabled="clientRunning || !mptcpSupported" @change="set('mptcp', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.mptcp') }}</span><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.mptcpNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.mptcpNote'))" /></label>
       <label><span>{{ t('cfg.interval') }}</span><input type="number" :value="config.interval" min="1" max="60" :disabled="clientRunning" @input="set('interval', Number(($event.target as HTMLInputElement).value))" /></label>
+      <label><span>{{ t('cfg.omit') }}</span><input type="number" :value="config.omitSecs" min="0" :disabled="clientRunning" @input="set('omitSecs', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.omitNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.omitNote'))" /></label>
+      <label><span>{{ t('cfg.window') }}</span><input type="number" :value="config.windowKb" min="0" max="16384" :disabled="clientRunning" @input="set('windowKb', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.windowNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.windowNote'))" /></label>
+      <label><span>{{ t('cfg.cport') }}</span><input type="number" :value="config.cport" min="0" max="65535" :disabled="clientRunning" @input="set('cport', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.cportNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.cportNote'))" /></label>
+      <label><span>{{ t('cfg.ipVersion') }}</span><select :value="config.ipVersion" :disabled="clientRunning" @change="set('ipVersion', Number(($event.target as HTMLSelectElement).value))"><option :value="0">{{ t('cfg.ipVersionAuto') }}</option><option :value="4">{{ t('cfg.ipVersion4') }}</option><option :value="6">{{ t('cfg.ipVersion6') }}</option></select></label>
+      <label><span>{{ t('cfg.dscp') }}</span><select :value="config.dscp" :disabled="clientRunning" @change="set('dscp', Number(($event.target as HTMLSelectElement).value))"><option :value="0">{{ t('cfg.dscpDefault') }}</option><option v-for="option in dscpOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.dscpNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.dscpNote'))" /></label>
+      <label :class="{ muted: !congestionControlSupported }"><span>{{ t('cfg.congestion') }}</span><input :value="config.congestionAlgo" :disabled="clientRunning || !congestionControlSupported" :placeholder="t('cfg.congestionPlaceholder')" @input="set('congestionAlgo', ($event.target as HTMLInputElement).value)" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.congestionNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.congestionNote'))" /></label>
+      <label class="log-option"><input type="checkbox" :checked="config.getServerOutput" :disabled="clientRunning" @change="set('getServerOutput', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.getServerOutput') }}</span><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.getServerOutputNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.getServerOutputNote'))" /></label>
       <label><span>{{ t('cfg.engine') }}</span><select disabled><option>{{ t('cfg.engineValue') }}</option></select></label>
       <label><span>{{ t('cfg.direction') }}</span><select disabled><option>{{ t('cfg.directionValue') }}</option></select></label>
       <label class="log-option"><input type="checkbox" checked disabled /><span>{{ t('cfg.logOption') }}</span></label>
@@ -217,7 +277,7 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <label class="log-option"><input type="checkbox" :checked="config.authEnabled" :disabled="clientRunning" @change="set('authEnabled', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.authEnable') }}</span></label>
       <template v-if="config.authEnabled">
         <label><span>{{ t('cfg.authUser') }}</span><input :value="config.authUsername" :disabled="clientRunning" autocomplete="off" @input="set('authUsername', ($event.target as HTMLInputElement).value)" /></label>
-        <label><span>{{ t('cfg.authPassword') }}</span><span class="field"><input type="password" :value="config.authPassword" :disabled="clientRunning" autocomplete="off" @input="set('authPassword', ($event.target as HTMLInputElement).value)" /><small>{{ t('cfg.authPasswordNote') }}</small></span></label>
+        <label><span>{{ t('cfg.authPassword') }}</span><input type="password" :value="config.authPassword" :disabled="clientRunning" autocomplete="off" @input="set('authPassword', ($event.target as HTMLInputElement).value)" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('cfg.authPasswordNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('cfg.authPasswordNote'))" /></label>
         <label><span>{{ t('cfg.authKey') }}</span><span class="ip-row"><input :value="config.authPublicKeyPath" :disabled="clientRunning" :placeholder="t('cfg.authKeyPlaceholder')" @input="set('authPublicKeyPath', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="clientRunning" @click="emit('pick-public-key')">{{ t('cfg.authKeyBrowse') }}</button></span></label>
         <label class="log-option"><input type="checkbox" :checked="config.authPkcs1Padding" :disabled="clientRunning" @change="set('authPkcs1Padding', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.authPkcs1') }}</span></label>
         <p class="server-hint">{{ t('cfg.authHint') }}</p>
@@ -233,9 +293,22 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <div class="section-title"><h2>{{ t('srv.title') }}</h2><span :class="['status-pill', serverRunning ? 'ok' : 'idle']">{{ serverRunning ? t('common.running') : t('common.notRunning') }}</span></div>
       <label><span>{{ t('srv.bindIp') }}</span><span class="ip-row"><input :value="serverConfig.bindIp" :disabled="serverRunning" :placeholder="t('srv.bindPlaceholder')" @input="setServer('bindIp', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="serverRunning" :title="t('nic.title')" @click="emit('pick-nic-server')">{{ t('cfg.nicBtn') }}</button></span></label>
       <label><span>{{ t('srv.port') }}</span><input type="number" :value="serverConfig.port" min="1" max="65535" :disabled="serverRunning" @input="setServer('port', Number(($event.target as HTMLInputElement).value))" /></label>
-      <label><span>{{ t('srv.interval') }}</span><span class="field"><input type="number" :value="serverConfig.interval" min="1" max="60" :disabled="serverRunning" @input="setServer('interval', Number(($event.target as HTMLInputElement).value))" /><small>{{ t('srv.intervalNote') }}</small></span></label>
+      <label><span>{{ t('srv.interval') }}</span><input type="number" :value="serverConfig.interval" min="1" max="60" :disabled="serverRunning" @input="setServer('interval', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('srv.intervalNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('srv.intervalNote'))" /></label>
+      <label><span>{{ t('srv.idleTimeout') }}</span><input type="number" :value="serverConfig.idleTimeout" min="0" max="86400" :disabled="serverRunning" @input="setServer('idleTimeout', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('srv.idleTimeoutNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('srv.idleTimeoutNote'))" /></label>
+      <label><span>{{ t('srv.maxDuration') }}</span><input type="number" :value="serverConfig.maxDuration" min="0" max="86400" :disabled="serverRunning" @input="setServer('maxDuration', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('srv.maxDurationNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('srv.maxDurationNote'))" /></label>
+      <label><span>{{ t('srv.bitrateLimit') }}</span><input type="number" :value="serverConfig.bitrateLimit" min="0" max="1000000" :disabled="serverRunning" @input="setServer('bitrateLimit', Number(($event.target as HTMLInputElement).value))" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('srv.bitrateLimitNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('srv.bitrateLimitNote'))" /></label>
       <p class="server-hint">{{ t('srv.hint') }}</p>
       <p class="runtime-state available">{{ t('cfg.engineReady') }}</p>
+    </section>
+    <section class="config-section auth-section">
+      <div class="section-title"><h2>{{ t('srv.auth') }}</h2></div>
+      <label class="log-option"><input type="checkbox" :checked="serverConfig.authEnabled" :disabled="serverRunning" @change="setServer('authEnabled', ($event.target as HTMLInputElement).checked)" /><span>{{ t('srv.authEnable') }}</span></label>
+      <template v-if="serverConfig.authEnabled">
+        <label><span>{{ t('srv.authKey') }}</span><span class="ip-row"><input :value="serverConfig.authPrivateKeyPath" :disabled="serverRunning" :placeholder="t('srv.authKeyPlaceholder')" @input="setServer('authPrivateKeyPath', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="serverRunning" :title="t('cfg.authKeyBrowse')" @click="emit('pick-auth-key')">{{ t('cfg.authKeyBrowse') }}</button></span></label>
+        <label><span>{{ t('srv.authUsers') }}</span><span class="ip-row"><input :value="serverConfig.authUsersPath" :disabled="serverRunning" :placeholder="t('srv.authUsersPlaceholder')" @input="setServer('authUsersPath', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="serverRunning" :title="t('cfg.authKeyBrowse')" @click="emit('pick-auth-users')">{{ t('cfg.authKeyBrowse') }}</button></span></label>
+        <label class="log-option"><input type="checkbox" :checked="serverConfig.authPkcs1Padding" :disabled="serverRunning" @change="setServer('authPkcs1Padding', ($event.target as HTMLInputElement).checked)" /><span>{{ t('cfg.authPkcs1') }}</span></label>
+        <p class="server-hint">{{ t('srv.authHint') }}</p>
+      </template>
     </section>
     <div class="config-actions">
       <button class="primary" :disabled="serverRunning" @click="emit('start-server')"><Icon name="play" />{{ t('srv.start') }}</button>
@@ -249,9 +322,9 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
       <label><span>{{ t('ssh.auth') }}</span><select :value="sshConfig.authMethod" :disabled="sshLocked" @change="setSsh('authMethod', ($event.target as HTMLSelectElement).value as SshConfig['authMethod'])"><option value="password">{{ t('ssh.authPassword') }}</option><option value="key">{{ t('ssh.authKey') }}</option></select></label>
       <template v-if="sshConfig.authMethod === 'key'">
         <label><span>{{ t('ssh.key') }}</span><span class="ip-row"><input :value="sshConfig.privateKeyPath" :disabled="sshLocked" :placeholder="t('ssh.keyPlaceholder')" @input="setSsh('privateKeyPath', ($event.target as HTMLInputElement).value)" /><button class="mini-button" type="button" :disabled="sshLocked" @click="emit('pick-private-key')">{{ t('cfg.authKeyBrowse') }}</button></span></label>
-        <label><span>{{ t('ssh.passphrase') }}</span><span class="field"><input type="password" :value="sshConfig.passphrase" :disabled="sshLocked" autocomplete="off" @input="setSsh('passphrase', ($event.target as HTMLInputElement).value)" /><small>{{ t('ssh.secretNote') }}</small></span></label>
+        <label><span>{{ t('ssh.passphrase') }}</span><input type="password" :value="sshConfig.passphrase" :disabled="sshLocked" autocomplete="off" @input="setSsh('passphrase', ($event.target as HTMLInputElement).value)" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('ssh.secretNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('ssh.secretNote'))" /></label>
       </template>
-      <label v-else><span>{{ t('ssh.password') }}</span><span class="field"><input type="password" :value="sshConfig.password" :disabled="sshLocked" autocomplete="off" @input="setSsh('password', ($event.target as HTMLInputElement).value)" /><small>{{ t('ssh.secretNote') }}</small></span></label>
+      <label v-else><span>{{ t('ssh.password') }}</span><input type="password" :value="sshConfig.password" :disabled="sshLocked" autocomplete="off" @input="setSsh('password', ($event.target as HTMLInputElement).value)" /><Icon name="info" class="info-icon" :size="18" @mouseenter="showTip($event, t('ssh.secretNote'))" @mousemove="moveTip" @mouseleave="hideTip" @click="pinTip($event, t('ssh.secretNote'))" /></label>
       <p class="server-hint">{{ t('ssh.hint') }}</p>
     </section>
     <div class="config-actions">
@@ -277,5 +350,6 @@ function onPacketChange(target: 'tcp' | 'udp', event: Event) {
         </div>
       </div>
     </div>
+    <div v-if="tooltip" class="item-tooltip" :style="{ left: tooltip.x + 'px', top: tooltip.y + 'px' }">{{ tooltip.text }}</div>
   </aside>
 </template>

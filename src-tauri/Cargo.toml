@@ -32,9 +32,17 @@ riperf3 = { path = "../vendor/riperf3" }
 # ring 的 crates.io 包自带 Windows 预编译汇编，无需额外安装 NASM / CMake
 russh = { version = "0.62", default-features = false, features = ["ring", "flate2", "rsa"] }
 
+[target.'cfg(windows)'.dependencies]
+# 直接调用 Windows IP Helper API 读取网卡、地址、MAC 与链路速率；不启动 PowerShell。
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+
 # 发布构建体积优化：剥离调试符号 + 链接时优化 + 单代码单元 + abort 恐慌
 [profile.release]
 strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# 集成测试：tauri::test mock（事件链路验证）
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

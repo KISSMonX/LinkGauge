@@ -9,6 +9,8 @@ export interface TestItem {
   protocol: Protocol | 'ping'
   enabled: boolean
   status: TaskStatus
+  /** 当前平台是否支持（false = 勾选框禁用、默认不勾；如 Windows/macOS 无 MPTCP） */
+  supported?: boolean
 }
 
 export interface TestConfig {
@@ -24,6 +26,28 @@ export interface TestConfig {
    *  超过路径 MTU 会触发 IP 分片，丢包率将被分片放大而无法与原生 iperf3 结果对比 */
   udpPacketLength: number
   interval: number
+  /** 预热秒数（0 = 不预热，对应 iperf3 `-O`）：跳过前 N 秒统计，须小于 duration */
+  omitSecs: number
+  /** TCP 套接字缓冲区（KB，0 = 自动，对应 iperf3 `-w`） */
+  windowKb: number
+  /** 客户端数据流源端口（0 = 自动，对应 iperf3 `--cport`） */
+  cport: number
+  /** IP 协议族（0 = 自动，4 = 仅 IPv4，6 = 仅 IPv6） */
+  ipVersion: number
+  /** 测试结束后拉取服务端视角的输出（--get-server-output） */
+  getServerOutput: boolean
+  /** 测试结束条件：time = 按时长，bytes = 按传输字节数（-n），blocks = 按块数（-k） */
+  transferMode: 'time' | 'bytes' | 'blocks'
+  /** 按量测试的数量：bytes 模式为 MB，blocks 模式为块数 */
+  transferAmount: number
+  /** DSCP 值（0 = 不设置，1–63，对应 --dscp） */
+  dscp: number
+  /** TCP 拥塞控制算法（空 = 默认，对应 -C；仅 Linux/FreeBSD 生效） */
+  congestionAlgo: string
+  /** UDP 数据报禁止分片（--dont-fragment；仅 IPv4） */
+  udpDontFragment: boolean
+  /** 使用 MPTCP 多路径 TCP（-m/--multipath；需两端内核支持） */
+  mptcp: boolean
   /** 启用 iperf3 认证（对端以 --rsa-private-key-path + --authorized-users-path 启动时必需） */
   authEnabled: boolean
   authUsername: string
@@ -41,6 +65,28 @@ export interface ServerConfig {
   /** 绑定 IP：留空表示绑定所有网卡（默认 0.0.0.0 双栈） */
   bindIp: string
   /** 日志 / 统计信息输出间隔（秒） */
+  interval: number
+  /** 启用服务端 iperf3 认证（要求客户端提供用户名/密码凭据） */
+  authEnabled: boolean
+  /** RSA 私钥文件路径（PEM，用于解密客户端凭据，--rsa-private-key-path） */
+  authPrivateKeyPath: string
+  /** 授权用户文件路径（--authorized-users-path；每行 `用户名,sha256hex`，见 riperf3 auth.rs） */
+  authUsersPath: string
+  /** 对 iperf3 < 3.17 的客户端改用 PKCS#1 v1.5 填充（3.17+ 默认 OAEP） */
+  authPkcs1Padding: boolean
+  /** 空闲超时（秒，0 = 不限制）：N 秒无客户端连接则自动停止服务 */
+  idleTimeout: number
+  /** 单次测试最大时长（秒，0 = 不限制），超限测试在参数交换阶段被拒绝 */
+  maxDuration: number
+  /** 服务端带宽上限（Mbps，0 = 不限制），聚合吞吐超限的测试被终止 */
+  bitrateLimit: number
+}
+
+/** 后端当前实际运行的服务端会话，用于窗口重建后恢复界面状态。 */
+export interface ServerRuntimeStatus {
+  sessionId: string
+  bindIp: string
+  port: number
   interval: number
 }
 
@@ -93,6 +139,11 @@ export interface InterfaceInfo {
   speedMbps: number
 }
 
+export interface NetworkSnapshot {
+  info: NetworkInfo
+  interfaces: InterfaceInfo[]
+}
+
 export interface MetricPoint {
   second: number
   bandwidthMbps: number
@@ -112,12 +163,14 @@ export interface LogEntry {
 export interface BackendEvent {
   sessionId: string
   taskId: string
-  type: 'status' | 'log' | 'metric' | 'error' | 'complete'
+  type: 'start' | 'status' | 'log' | 'metric' | 'summary' | 'error' | 'complete' | 'queue-complete'
   status?: TaskStatus
   level?: LogLevel
   message?: string
   metric?: MetricPoint
   logPath?: string
+  /** 环境性失败（服务端不可达等）：队列中剩余引擎项必然同样失败，前端据此中止整个队列 */
+  fatal?: boolean
 }
 
 export interface TestSummary {
@@ -150,14 +203,22 @@ export interface SyncState {
   serverRunning: boolean
   clientSession: string
   serverSession: string
-  /** 执行队列及其游标（由驱动窗口维护） */
+  /** 执行队列及其当前展示游标（由后端 start 事件推进） */
   queue: string[]
   queueIndex: number
-  /** 驱动客户端队列的窗口 label（main / client），其他窗口只展示不启动下一项 */
+  /** 客户端运行状态的同步权威窗口 label（main / client） */
   driver: string
+  /** 驱动权版本：新一轮从 1 开始，每次合法接管递增，拒绝旧窗口回退驱动权 */
+  driverRevision: number
+  /** 发出本同步包的窗口 label：队列推进状态只采纳当前驱动窗口的同步 */
+  source: string
+  /** 窗口实例标识：同 label 的窗口重建后也能区分同步序列 */
+  sourceInstance: string
+  /** 当前窗口实例发出的单调序号，用于丢弃异步乱序到达的旧快照 */
+  syncSequence: number
   savedTcpLength: number
   savedUdpLength: number
-  /** 汇总数据（由驱动窗口维护 startedAt/completed/total，指标类字段各窗口本地推导） */
+  /** 汇总数据（由同步权威窗口维护 startedAt/completed/total，指标类字段各窗口本地推导） */
   summary: TestSummary
   /** 界面语言（默认英文） */
   locale: 'zh' | 'en'
@@ -173,7 +234,7 @@ export interface SyncState {
   itemHistory: Record<string, ItemHistory>
   /** 当前查看的历史项目 id（'' = 未选择，显示最近一次完成项） */
   selectedHistoryId: string
-  /** 客户端任务队列总体进度（0-100，仅驱动窗口修改） */
+  /** 客户端任务队列总体进度（0-100，由后端 start/complete 事件更新） */
   progress: number
   /** 本轮测试开始时间戳（ms），各窗口据此推算已用时，避免逐秒同步 elapsed */
   startedAt: number
