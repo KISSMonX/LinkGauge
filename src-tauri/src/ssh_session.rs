@@ -103,6 +103,94 @@ impl client::Handler for Handler {
 // 会话主循环
 // ---------------------------------------------------------------------------
 
+/// 执行 SSH 认证（密码或私钥）。成功返回 `true`，失败时通过 sink 发送错误事件并返回 `false`。
+async fn authenticate_session(
+    sink: &Sink,
+    session_id: &str,
+    request: &SshRequest,
+    locale: &str,
+    session: &mut russh::client::Handle<Handler>,
+) -> bool {
+    let authenticated = if request.auth_method == "key" {
+        let pp = (!request.passphrase.is_empty()).then_some(request.passphrase.as_str());
+        match load_secret_key(request.private_key_path.trim(), pp) {
+            Ok(key) => {
+                let hash = session
+                    .best_supported_rsa_hash()
+                    .await
+                    .ok()
+                    .flatten()
+                    .flatten();
+                session
+                    .authenticate_publickey(
+                        request.username.trim(),
+                        PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+                    )
+                    .await
+            }
+            Err(error) => {
+                emit_end(
+                    sink,
+                    session_id,
+                    "error",
+                    crate::tr_format!(
+                        locale,
+                        "私钥读取失败：{}",
+                        "Failed to load the private key: {}",
+                        error
+                    ),
+                );
+                return false;
+            }
+        }
+    } else {
+        session
+            .authenticate_password(request.username.trim(), request.password.as_str())
+            .await
+    };
+    match authenticated {
+        Ok(r) if r.success() => true,
+        Ok(_) => {
+            let method = if request.auth_method == "key" {
+                "私钥"
+            } else {
+                "密码"
+            };
+            let en_method = if request.auth_method == "key" {
+                "private key"
+            } else {
+                "password"
+            };
+            emit_end(
+                sink,
+                session_id,
+                "error",
+                crate::tr_format!(
+                    locale,
+                    "SSH 认证失败，请检查用户名与{}",
+                    "SSH authentication failed — check username and {}",
+                    tr(locale, method, en_method)
+                ),
+            );
+            false
+        }
+        Err(error) => {
+            emit_end(
+                sink,
+                session_id,
+                "error",
+                crate::tr_format!(
+                    locale,
+                    "SSH 认证出错：{}",
+                    "SSH authentication error: {}",
+                    error
+                ),
+            );
+            false
+        }
+    }
+}
+
 pub(crate) async fn run_session(
     sink: Sink,
     session_id: String,
@@ -223,83 +311,8 @@ pub(crate) async fn run_session(
     }
 
     // 认证
-    let authenticated = if request.auth_method == "key" {
-        let pp = (!request.passphrase.is_empty()).then_some(request.passphrase.as_str());
-        match load_secret_key(request.private_key_path.trim(), pp) {
-            Ok(key) => {
-                let hash = session
-                    .best_supported_rsa_hash()
-                    .await
-                    .ok()
-                    .flatten()
-                    .flatten();
-                session
-                    .authenticate_publickey(
-                        request.username.trim(),
-                        PrivateKeyWithHashAlg::new(Arc::new(key), hash),
-                    )
-                    .await
-            }
-            Err(error) => {
-                emit_end(
-                    &sink,
-                    &session_id,
-                    "error",
-                    crate::tr_format!(
-                        locale,
-                        "私钥读取失败：{}",
-                        "Failed to load the private key: {}",
-                        error
-                    ),
-                );
-                return;
-            }
-        }
-    } else {
-        session
-            .authenticate_password(request.username.trim(), request.password.as_str())
-            .await
-    };
-    match authenticated {
-        Ok(r) if r.success() => {}
-        Ok(_) => {
-            let method = if request.auth_method == "key" {
-                "私钥"
-            } else {
-                "密码"
-            };
-            let en_method = if request.auth_method == "key" {
-                "private key"
-            } else {
-                "password"
-            };
-            emit_end(
-                &sink,
-                &session_id,
-                "error",
-                crate::tr_format!(
-                    locale,
-                    "SSH 认证失败，请检查用户名与{}",
-                    "SSH authentication failed — check username and {}",
-                    tr(&locale, method, en_method)
-                ),
-            );
-            return;
-        }
-        Err(error) => {
-            emit_end(
-                &sink,
-                &session_id,
-                "error",
-                crate::tr_format!(
-                    locale,
-                    "SSH 认证出错：{}",
-                    "SSH authentication error: {}",
-                    error
-                ),
-            );
-            return;
-        }
+    if !authenticate_session(&sink, &session_id, &request, &locale, &mut session).await {
+        return;
     }
 
     // 打开 shell
