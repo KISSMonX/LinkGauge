@@ -94,6 +94,7 @@ export function useSshConsole(
       }
       if (snapshot.connected) sshStatus.value = 'connected'
     } catch {
+      console.warn('[linkgauge] ssh_scrollback failed for session', sessionId)
       if (sshSession.value === sessionId) { sshSession.value = ''; sshStatus.value = 'idle' }
     } finally { sshPending = null }
   }

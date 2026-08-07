@@ -336,19 +336,21 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
         request.bind_ip.clone()
     };
     let port = request.port;
-    let heartbeat = tauri::async_runtime::spawn(server_heartbeat(HeartbeatCtx {
-        log: log.clone(),
-        app: app.clone(),
-        session_id: session_id.clone(),
-        task_id: request.task_id.clone(),
-        completed: completed.clone(),
-        serving: serving.clone(),
-        latest: latest.clone(),
-        locale_handle: locale_handle.clone(),
-        interval_secs,
-        bind_short,
-        port,
-    }));
+    let heartbeat = AbortOnDrop(tauri::async_runtime::spawn(server_heartbeat(
+        HeartbeatCtx {
+            log: log.clone(),
+            app: app.clone(),
+            session_id: session_id.clone(),
+            task_id: request.task_id.clone(),
+            completed: completed.clone(),
+            serving: serving.clone(),
+            latest: latest.clone(),
+            locale_handle: locale_handle.clone(),
+            interval_secs,
+            bind_short,
+            port,
+        },
+    )));
 
     loop {
         // 每次迭代实时读取界面语言（切换语言后服务端日志立即跟随）
@@ -392,6 +394,15 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
 // 辅助函数：从 run_engine_server 拆分，降低函数圈复杂度
 // ---------------------------------------------------------------------------
 
+/// spawn 的 JoinHandle 默认不 abort，drop 时任务继续运行。此包装器确保
+/// 心跳任务在 run_engine_server 正常返回或 panic 展开时都随函数退出而终止。
+struct AbortOnDrop(tauri::async_runtime::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// 心跳任务的上下文（参数过多，用 struct 满足 clippy::too_many_arguments）。
 struct HeartbeatCtx<R: tauri::Runtime> {
     log: SessionLog,
@@ -416,7 +427,7 @@ struct ServerListenCtx<'a, R: tauri::Runtime> {
     locale: &'a str,
     serving: &'a AtomicBool,
     latest: &'a Mutex<Option<ServerInterval>>,
-    heartbeat: &'a tauri::async_runtime::JoinHandle<()>,
+    heartbeat: &'a AbortOnDrop,
 }
 
 /// 周期性心跳：按 interval_secs 间隔输出服务端运行状态日志与统计事件。
@@ -536,7 +547,7 @@ async fn handle_server_connection<R: tauri::Runtime>(
     // 测试结束（客户端已断开）：清空对端地址与统计，心跳事件不再携带
     *latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
     if outcome.termination == Termination::Interrupted {
-        heartbeat.abort();
+        heartbeat.0.abort();
         append_log(
             log,
             tr(
@@ -614,7 +625,7 @@ async fn handle_server_listen_error<R: tauri::Runtime>(
     // 同样以 Aborted("idle timeout") 返回（one_off 下退出而非重启），
     // 按原因区分日志文案
     if let RiperfError::Aborted(msg) = &error {
-        heartbeat.abort();
+        heartbeat.0.abort();
         let (result_zh, result_en) = if msg == "idle timeout" {
             (
                 "测试结果: 服务端已停止（空闲超时）",

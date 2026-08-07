@@ -36,6 +36,7 @@ export function useServer(
     try {
       status = await invoke<ServerRuntimeStatus | null>('get_server_status')
     } catch {
+      console.warn('[linkgauge] get_server_status failed, assuming server is not running')
       return false
     }
     if (!status) {
@@ -85,7 +86,7 @@ export function useServer(
       })
       serverRunning.value = true
     } catch (error) {
-      try { if (await refreshServerState(true)) return } catch { /* keep original error */ }
+      try { if (await refreshServerState(true)) return } catch { console.warn('[linkgauge] server state recovery also failed') }
       log('ERROR', String(error))
       errorDialog.value = { title: t('err.serverStartFailed'), message: String(error) }
     }

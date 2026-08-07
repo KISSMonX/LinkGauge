@@ -917,8 +917,17 @@ onMounted(async () => {
           await getCurrentWindow().destroy()
         })
         unlistenClose = await listen<DockEvent>('side-close', (e) => { if (e.payload.side === side.value) void dockBack() })
-        // 启动时请求一次完整状态（serverSession/clientRunning 等），随后的事件才能正确匹配会话
-        void emit('side-sync-request', { from: ownLabel })
+        // 启动时请求完整状态（serverSession/clientRunning 等），随后的事件才能正确匹配会话。
+        // 主窗口可能尚未完成初始化（stateReady 虽为 true，但网络快照 / 配置尚未拉取完毕），
+        // 首次 emit 无响应时以指数退避重试最多 3 次，避免子窗口因错过初始 sync 而孤立。
+        void (async () => {
+          for (let attempt = 0; attempt < 3 && !stateReady; attempt++) {
+            if (attempt > 0) await new Promise(r => setTimeout(r, 200 * Math.pow(2, attempt - 1)))
+            emit('side-sync-request', { from: ownLabel })
+            // 留给主窗口处理 + 回传 side-sync 的窗口
+            await new Promise(r => setTimeout(r, 150))
+          }
+        })()
       }
       const [network, customTcpLen, customUdpLen] = await Promise.all([
         invoke<NetworkSnapshot>('get_network_snapshot'),
