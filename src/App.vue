@@ -28,9 +28,18 @@ const sshDefaults: SshConfig = { host: '', port: 22, username: '', authMethod: '
 const config = ref<TestConfig>({ ...defaults })
 const serverConfig = ref<ServerConfig>({ ...serverDefaults })
 const sshConfig = ref<SshConfig>({ ...sshDefaults })
-// Windows/macOS 内核无 IPPROTO_MPTCP：MPTCP 测试项不可用（勾选框禁用、默认不勾），
-// 避免运行后报出「无法连接服务端」的误导性错误；预览模式（浏览器）保持可选
-const mptcpSupported = !('__TAURI_INTERNALS__' in window) || /Linux/i.test(navigator.userAgent)
+// 产品当前只在 Linux 开放 MPTCP：Windows/macOS 原生内核不提供应用所需的
+// IPPROTO_MPTCP，浏览器预览也必须遵循宿主操作系统，不能显示成可勾选。
+const mptcpSupported = /Linux/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent)
+const congestionControlSupported = /Linux|FreeBSD/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent)
+/** 平台能力是本机事实，旧配置或其他窗口不能重新写入本平台不支持的参数。 */
+function enforceConfigCapabilities(value: TestConfig): TestConfig {
+  const mptcp = mptcpSupported ? value.mptcp : false
+  const congestionAlgo = congestionControlSupported ? value.congestionAlgo : ''
+  return mptcp === value.mptcp && congestionAlgo === value.congestionAlgo
+    ? value
+    : { ...value, mptcp, congestionAlgo }
+}
 const items = ref<TestItem[]>([
   { id: 'ping', label: 'Ping 连通性测试', protocol: 'ping', enabled: true, status: 'waiting' },
   { id: 'tcp-single', label: 'TCP 单向带宽', protocol: 'tcp', enabled: true, status: 'waiting' },
@@ -47,6 +56,29 @@ const items = ref<TestItem[]>([
   { id: 'tcp-mptcp', label: 'TCP MPTCP 多路径测试', protocol: 'tcp', enabled: mptcpSupported, status: 'waiting', supported: mptcpSupported },
   { id: 'udp-df', label: 'UDP 无分片（DF）测试', protocol: 'udp', enabled: true, status: 'waiting' }
 ])
+/** 平台能力是本机事实，不能被旧窗口同步包中的 enabled/supported 覆盖。 */
+function enforceItemCapabilities(values: TestItem[]) {
+  let changed = false
+  const enforced = values.map((item) => {
+    if (item.id === 'tcp-mptcp') {
+      const enabled = mptcpSupported && item.enabled
+      if (enabled === item.enabled && item.supported === mptcpSupported) return item
+      changed = true
+      return { ...item, enabled, supported: mptcpSupported }
+    }
+    // 全局 DF 参数会作用于所有 UDP 项，专用测试此时重复且不能保留勾选。
+    if (item.id === 'udp-df' && config.value.udpDontFragment && item.enabled) {
+      changed = true
+      return { ...item, enabled: false }
+    }
+    return item
+  })
+  return changed ? enforced : values
+}
+function updateConfig(value: TestConfig) {
+  config.value = enforceConfigCapabilities(value)
+  items.value = enforceItemCapabilities(items.value)
+}
 const local = ref<NetworkInfo>({ ip: '127.0.0.1', mac: '--', hostname: 'localhost', interfaceName: '默认网卡', speedMbps: 0 })
 const logs = ref<LogEntry[]>([])
 const points = ref<MetricPoint[]>([])
@@ -314,7 +346,7 @@ async function applySync(payload: SyncState) {
   // 非权威窗口不得用漏事件的旧 items（仍为 running）覆盖最终状态。
   const sameRunStop = sameRun && !payload.clientRunning && currentDriver
   const acceptClientState = firstSync || newRun || takeover || currentDriver || sameRunStop
-  config.value = payload.config
+  config.value = enforceConfigCapabilities(payload.config)
   serverConfig.value = payload.serverConfig
   local.value = payload.local
   serverRunning.value = payload.serverRunning
@@ -325,7 +357,7 @@ async function applySync(payload: SyncState) {
   const preserveBackendState = !!activeClientQueueSession && payload.clientSession === activeClientQueueSession
   if (acceptClientState && !preserveBackendState) {
     clientRunning.value = payload.clientRunning
-    items.value = payload.items
+    items.value = enforceItemCapabilities(payload.items)
     progress.value = payload.progress
     points.value = payload.points
     completedPoints.value = payload.completedPoints
@@ -345,7 +377,7 @@ async function applySync(payload: SyncState) {
       activeQueueEventIndex = payload.queueIndex
     }
   } else {
-    items.value.forEach((item, i) => { const remote = payload.items[i]; if (remote) item.enabled = remote.enabled })
+    items.value.forEach((item, i) => { const remote = payload.items[i]; if (remote) item.enabled = item.supported === false || (item.id === 'udp-df' && config.value.udpDontFragment) ? false : remote.enabled })
   }
   serverSession.value = payload.serverSession
   savedTcpLength.value = payload.savedTcpLength
@@ -490,7 +522,7 @@ async function saveCustomLength(protocol: 'tcp' | 'udp', length: number) {
   } catch (error) { errorDialog.value = { title: t('err.saveFailed'), message: String(error) } }
 }
 
-function toggleItem(id: string) { const item = items.value.find((i) => i.id === id); if (item) item.enabled = !item.enabled }
+function toggleItem(id: string) { const item = items.value.find((i) => i.id === id); if (item && item.supported !== false && !(id === 'udp-df' && config.value.udpDontFragment)) item.enabled = !item.enabled }
 function reset() { config.value = { ...defaults, mode: config.value.mode, serverIp: local.value.ip, bandwidth: local.value.speedMbps > 0 ? local.value.speedMbps : 0 }; log('INFO', t('log.reset')) }
 function clearLogs() { logs.value = [] }
 function validate() {
@@ -643,10 +675,13 @@ async function start() {
   // 重复开始守卫：后端另有客户端队列单例兜底，防止多窗口同时发起两轮测试。
   if (clientRunning.value) { log('WARN', t('log.alreadyRunning')); return }
   // 开始即全新一轮测试：以当前勾选的项目为队列，不涉及上次未完成测试的恢复
+  config.value = enforceConfigCapabilities(config.value)
   if (config.value.bandwidth < 0) config.value.bandwidth = local.value.speedMbps > 0 ? local.value.speedMbps : 0
   const invalid = validate(); if (invalid) { errorDialog.value = { title: t('err.paramError'), message: invalid }; return }
   // TCP / UDP 测试项可同时勾选，按列表顺序逐个执行
-  const selected = items.value.filter((i) => i.enabled)
+  // IPC 边界前再次排除本平台不支持的项目，防止旧配置/旧窗口状态绕过禁用控件。
+  items.value = enforceItemCapabilities(items.value)
+  const selected = items.value.filter((i) => i.enabled && i.supported !== false)
   if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg') }; return }
   items.value.forEach((i) => { if (i.enabled) i.status = 'waiting' })
   points.value = []; progress.value = 0; connected.value = false; startedAt.value = Math.max(Date.now(), startedAt.value + 1)
@@ -958,7 +993,7 @@ async function exportConfig() {
     infoDialog.value = { title: t('report.exported'), message: saved }
   } catch (error) { errorDialog.value = { title: t('err.exportFailed'), message: String(error) } }
 }
-function importConfig() { const input = document.createElement('input'); input.type = 'file'; input.accept = '.json'; input.onchange = async () => { const file = input.files?.[0]; if (!file) return; try { const parsed = JSON.parse(await file.text()); if (!parsed.transferAmount) parsed.transferAmount = 100 /* 旧配置迁移，同 localStorage 加载 */; config.value = { ...defaults, ...parsed }; log('INFO', t('log.importOk')) } catch { errorDialog.value = { title: t('err.importFailed'), message: t('err.importInvalid') } } }; input.click() }
+function importConfig() { const input = document.createElement('input'); input.type = 'file'; input.accept = '.json'; input.onchange = async () => { const file = input.files?.[0]; if (!file) return; try { const parsed = JSON.parse(await file.text()); if (!parsed.transferAmount) parsed.transferAmount = 100 /* 旧配置迁移，同 localStorage 加载 */; updateConfig({ ...defaults, ...parsed }); log('INFO', t('log.importOk')) } catch { errorDialog.value = { title: t('err.importFailed'), message: t('err.importInvalid') } } }; input.click() }
 
 /** 设置弹窗：切换界面语言（默认英文）与主题外观（默认亮色），变更随 side-sync 同步到所有窗口 */
 function onLocaleChange(event: Event) {
@@ -972,7 +1007,7 @@ function onThemeChange(event: Event) {
 }
 
 onMounted(async () => {
-  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; if (parsed.udpPacketLength === 8192) parsed.udpPacketLength = 1460 /* 旧默认 8KB 会触发 IP 分片，迁移为 iperf3 默认 1460 */; if (!parsed.transferAmount) parsed.transferAmount = 100 /* 旧默认 0 迁移：按量测试项默认勾选后需非零数量 */; config.value = { ...defaults, ...parsed } } catch { /* ignore */ }
+  const saved = localStorage.getItem('linkgauge-config'); if (saved) try { const parsed = JSON.parse(saved); if (parsed.packetLength === 1024 || parsed.packetLength === 4096) parsed.packetLength = 131072 /* 旧默认值迁移为新默认 128KB */; if (parsed.udpPacketLength === 8192) parsed.udpPacketLength = 1460 /* 旧默认 8KB 会触发 IP 分片，迁移为 iperf3 默认 1460 */; if (!parsed.transferAmount) parsed.transferAmount = 100 /* 旧默认 0 迁移：按量测试项默认勾选后需非零数量 */; updateConfig({ ...defaults, ...parsed }) } catch { /* ignore */ }
   const savedServer = localStorage.getItem('linkgauge-server-config'); if (savedServer) try { serverConfig.value = { ...serverDefaults, ...JSON.parse(savedServer) } } catch { /* ignore */ }
   const savedSsh = localStorage.getItem('linkgauge-ssh-config'); if (savedSsh) try { sshConfig.value = { ...sshDefaults, ...JSON.parse(savedSsh), password: '', passphrase: '' } } catch { /* ignore */ }
   if (isTauri()) {
@@ -1052,18 +1087,18 @@ onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyn
     <div class="workspace">
       <ConfigPanel
         v-if="side === 'hub' && dockedTabs.length"
-        :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:tab="activeTab = $event" @update:config="config = $event" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @pick-auth-key="pickServerAuthKey" @pick-auth-users="pickServerAuthUsers" @save-custom-length="saveCustomLength" @detach="detachTab" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
+        :tabs="dockedTabs" :tab="activeTab" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :mptcp-supported="mptcpSupported" :congestion-control-supported="congestionControlSupported" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        @update:tab="activeTab = $event" @update:config="updateConfig" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @pick-auth-key="pickServerAuthKey" @pick-auth-users="pickServerAuthUsers" @save-custom-length="saveCustomLength" @detach="detachTab" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
       />
       <ConfigPanel
         v-else-if="side === 'client'"
-        detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="config = $event" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength"
+        detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :mptcp-supported="mptcpSupported" :congestion-control-supported="congestionControlSupported" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        @update:config="updateConfig" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength"
       />
       <ConfigPanel
         v-else-if="side === 'server'"
-        detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="config = $event" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @pick-auth-key="pickServerAuthKey" @pick-auth-users="pickServerAuthUsers" @save-custom-length="saveCustomLength" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
+        detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :mptcp-supported="mptcpSupported" :congestion-control-supported="congestionControlSupported" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        @update:config="updateConfig" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @pick-auth-key="pickServerAuthKey" @pick-auth-users="pickServerAuthUsers" @save-custom-length="saveCustomLength" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
       />
       <div v-else class="panel config-panel dock-empty">
         <h2>{{ t('tab.detachedTitle') }}</h2>
