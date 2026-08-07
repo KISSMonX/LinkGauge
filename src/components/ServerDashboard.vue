@@ -13,12 +13,13 @@ const emit = defineEmits<{ 'update:view': [value: 'overview' | 'ssh'] }>()
 const { t } = useI18n()
 const currentBandwidth = computed(() => props.points.at(-1)?.bandwidthMbps || 0)
 const formatTime = (s: number) => `00:${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+const validPoints = computed(() => props.points.filter((p) => p.bandwidthMbps > 0))
 const avgBandwidth = computed(() => {
-  const valid = props.points.filter((p) => p.bandwidthMbps > 0)
+  const valid = validPoints.value
   return valid.length ? valid.reduce((a, b) => a + b.bandwidthMbps, 0) / valid.length : 0
 })
 const maxBandwidth = computed(() => {
-  const valid = props.points.filter((p) => p.bandwidthMbps > 0)
+  const valid = validPoints.value
   return valid.length ? Math.max(...valid.map((p) => p.bandwidthMbps)) : 0
 })
 const totalTransfer = computed(() => props.points.reduce((a, b) => a + b.transferMb, 0))
