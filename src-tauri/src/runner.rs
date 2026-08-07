@@ -83,7 +83,7 @@ pub async fn get_server_status(
 ) -> Result<Option<ServerRuntimeStatus>, String> {
     let mut server_guard = state.server_session.lock().await;
     let mut session_guard = state.sessions.lock().await;
-    let Some(existing) = server_guard.clone() else {
+    let Some(existing) = server_guard.as_ref() else {
         return Ok(None);
     };
     let active = matches!(
@@ -91,7 +91,7 @@ pub async fn get_server_status(
         Some(SessionSignal::Engine(tx)) if !tx.is_closed()
     );
     if active {
-        return Ok(Some(existing));
+        return Ok(Some(existing.clone()));
     }
     session_guard.remove(&existing.session_id);
     *server_guard = None;
