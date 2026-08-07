@@ -8,6 +8,7 @@ mod server;
 mod settings;
 mod ssh;
 mod system;
+mod validation;
 
 use tauri::{Manager, RunEvent};
 

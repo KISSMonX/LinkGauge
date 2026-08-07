@@ -1,5 +1,4 @@
 use crate::client::{self, ClientTaskResult};
-use crate::error::ValidationError;
 use crate::models::{ClientLogAppend, MetricPoint, ServerRuntimeStatus, TestEvent, TestRequest};
 use crate::ping;
 use crate::server;
@@ -121,7 +120,7 @@ pub async fn start_test<R: tauri::Runtime>(
     state: State<'_, AppState>,
     request: TestRequest,
 ) -> Result<String, String> {
-    validate(&request)?;
+    crate::validation::validate(&request)?;
     let session_id = Uuid::new_v4().to_string();
     let sessions = state.sessions.clone();
     let pids = state.child_pids.clone();
@@ -235,7 +234,7 @@ pub async fn start_test_queue<R: tauri::Runtime>(
             )
             .into());
         }
-        validate(request)?;
+        crate::validation::validate(request)?;
     }
 
     let session_id = Uuid::new_v4().to_string();
@@ -405,82 +404,6 @@ pub async fn open_log_dir<R: tauri::Runtime>(app: AppHandle<R>) -> Result<String
     .map_err(|e| format!("无法打开日志目录：{e}"))?;
     drop(result);
     Ok(dir.to_string_lossy().to_string())
-}
-
-fn validate(request: &TestRequest) -> Result<(), ValidationError> {
-    // 服务端模式不需要持续时间（duration 恒为 0）；按量测试（-n/-k）忽略时长。
-    // 按量测试项强制 bytes/blocks，与全局 transfer_mode 同源推导
-    let transfer_mode = client::effective_transfer_mode(request);
-    if request.mode != "server" && transfer_mode == "time" && request.duration == 0 {
-        return Err(ValidationError::DurationRequired);
-    }
-    if request.interval == 0 {
-        return Err(ValidationError::IntervalRequired);
-    }
-    if request.server_ip.trim().is_empty() && request.mode != "server" {
-        return Err(ValidationError::ServerIpRequired);
-    }
-    if request.port == 0 {
-        return Err(ValidationError::InvalidPort);
-    }
-    // 服务端认证依赖私钥与用户文件两个路径，缺一不可（引擎在两者均提供时才校验凭据）
-    if request.mode == "server"
-        && request.server_auth_enabled
-        && (request.server_auth_private_key_path.trim().is_empty()
-            || request.server_auth_users_path.trim().is_empty())
-    {
-        return Err(ValidationError::ServerAuthIncomplete);
-    }
-    // 预热与按量测试互斥（iperf3 CLI 同样拒绝 -O + -n/-k）；
-    // 按时长模式下预热必须落在测试时长内，否则统计区间为空
-    if request.omit_secs > 0 {
-        if transfer_mode != "time" {
-            return Err(ValidationError::OmitOnlyTimeMode);
-        }
-        if u64::from(request.omit_secs) >= request.duration {
-            return Err(ValidationError::OmitTooLong);
-        }
-    }
-    // 套接字缓冲区上限（KB）：与界面输入框上限一致，防溢出（引擎按 i32 字节接收）
-    if request.window_kb > 16384 {
-        return Err(ValidationError::WindowTooLarge {
-            requested_kb: request.window_kb,
-        });
-    }
-    // IP 协议族只接受 0（自动）/ 4 / 6，其余取值直接拒绝
-    if !matches!(request.ip_version, 0 | 4 | 6) {
-        return Err(ValidationError::InvalidIpVersion {
-            value: request.ip_version,
-        });
-    }
-    // 服务端防护参数范围（与界面输入框上限一致，0 = 不限制）
-    if request.server_idle_timeout > 86400 {
-        return Err(ValidationError::ServerIdleTimeoutTooLarge);
-    }
-    if request.server_max_duration > 86400 {
-        return Err(ValidationError::ServerMaxDurationTooLarge);
-    }
-    if request.server_bitrate_limit_mbps > 1_000_000 {
-        return Err(ValidationError::ServerBitrateLimitTooLarge);
-    }
-    // 结束条件与按量数量：time / bytes / blocks 三选一，按量必须大于 0
-    match transfer_mode {
-        "time" => {}
-        "bytes" | "blocks" if request.transfer_amount > 0 => {}
-        "bytes" | "blocks" => return Err(ValidationError::TransferAmountRequired),
-        _ => return Err(ValidationError::InvalidTransferMode),
-    }
-    // DSCP 范围 0-63（引擎 parse_dscp 同样约束，超出会被拒绝）
-    if request.dscp > 63 {
-        return Err(ValidationError::DscpOutOfRange);
-    }
-    // 拥塞控制仅 Linux/FreeBSD 支持；其他平台引擎在 build() 直接报
-    // Unsupported，这里提前给出更友好的提示（macOS 等 unix 平台放行）
-    #[cfg(not(unix))]
-    if !request.congestion_algo.trim().is_empty() {
-        return Err(ValidationError::CongestionAlgoNotSupported);
-    }
-    Ok(())
 }
 
 /// 日志文件句柄：回调（同步）与主任务（异步）共用，加锁串行写入
@@ -1257,7 +1180,7 @@ pub(crate) fn emit_error<R: tauri::Runtime>(
 mod tests {
     use super::{
         append_log, is_server_unreachable,
-        validate, TestLog,
+        TestLog,
     };
     use crate::client::{client_params_for, client_task_timeout};
     use crate::models::TestRequest;
@@ -1472,18 +1395,18 @@ mod tests {
         req.server_auth_enabled = true;
         // 只填一个路径：必须拒绝（引擎在两者均提供时才校验凭据）
         req.server_auth_private_key_path = "key.pem".into();
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         req.server_auth_users_path = "users.csv".into();
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         // 未启用时缺路径不报错（保持旧行为）
         req.server_auth_enabled = false;
         req.server_auth_private_key_path.clear();
         req.server_auth_users_path.clear();
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         // 客户端模式不受服务端认证字段影响
         let mut client = request("tcp-single", "client", "tcp");
         client.server_auth_enabled = true;
-        assert!(validate(&client).is_ok());
+        assert!(crate::validation::validate(&client).is_ok());
     }
 
     #[test]
@@ -1506,25 +1429,25 @@ mod tests {
         req.duration = 10;
         // 预热 == 时长：拒绝（统计区间为空）
         req.omit_secs = 10;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         // 预热 > 时长：拒绝
         req.omit_secs = 11;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         // 预热 < 时长：通过
         req.omit_secs = 9;
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         // 0 = 不预热：通过
         req.omit_secs = 0;
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
     }
 
     #[test]
     fn window_kb_capped_at_16mb() {
         let mut req = request("tcp-single", "client", "tcp");
         req.window_kb = 16384;
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         req.window_kb = 16385;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
     }
 
     #[test]
@@ -1546,11 +1469,11 @@ mod tests {
         let mut req = request("tcp-single", "client", "tcp");
         for valid in [0, 4, 6] {
             req.ip_version = valid;
-            assert!(validate(&req).is_ok(), "ip_version={valid} 应通过");
+            assert!(crate::validation::validate(&req).is_ok(), "ip_version={valid} 应通过");
         }
         for invalid in [1, 3, 5, 7, 255] {
             req.ip_version = invalid;
-            assert!(validate(&req).is_err(), "ip_version={invalid} 应被拒绝");
+            assert!(crate::validation::validate(&req).is_err(), "ip_version={invalid} 应被拒绝");
         }
     }
 
@@ -1559,22 +1482,22 @@ mod tests {
         let mut req = request("server", "server", "tcp");
         req.duration = 0;
         // 默认 0 = 不限制：全部通过
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         // 上限边界：86400 通过，超限拒绝
         req.server_idle_timeout = 86400;
         req.server_max_duration = 86400;
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         req.server_idle_timeout = 86401;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         req.server_idle_timeout = 0;
         req.server_max_duration = 86401;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         req.server_max_duration = 0;
         // 带宽上限：1_000_000 Mbps 通过，超限拒绝
         req.server_bitrate_limit_mbps = 1_000_000;
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         req.server_bitrate_limit_mbps = 1_000_001;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
     }
 
     #[test]
@@ -1604,25 +1527,25 @@ mod tests {
         // 按量模式数量必须大于 0
         req.transfer_mode = "bytes".into();
         req.transfer_amount = 0;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         req.transfer_amount = 1;
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         // 非法结束条件直接拒绝
         req.transfer_mode = "packets".into();
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         // 按量模式忽略时长校验：duration 为 0 也应通过（time 模式则拒绝）
         req.transfer_mode = "time".into();
         req.duration = 0;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         req.transfer_mode = "bytes".into();
         req.transfer_amount = 1;
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         req.duration = 10;
         // 预热与按量互斥
         req.omit_secs = 1;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         req.transfer_mode = "time".into();
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         req.omit_secs = 0;
     }
 
@@ -1630,9 +1553,9 @@ mod tests {
     fn dscp_range_validated() {
         let mut req = request("tcp-single", "client", "tcp");
         req.dscp = 63;
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         req.dscp = 64;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
     }
 
     #[test]
@@ -1697,16 +1620,16 @@ mod tests {
         let mut req = request("tcp-bytes", "client", "tcp");
         req.transfer_mode = "time".into();
         req.transfer_amount = 0;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         req.transfer_amount = 1;
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         // 按量项与预热互斥
         req.omit_secs = 1;
-        assert!(validate(&req).is_err());
+        assert!(crate::validation::validate(&req).is_err());
         // 普通项 + 全局按量模式下：按量项校验仍生效
         let mut mixed = request("tcp-single", "client", "tcp");
         mixed.transfer_amount = 2;
-        assert!(validate(&mixed).is_ok());
+        assert!(crate::validation::validate(&mixed).is_ok());
     }
 
     #[test]
@@ -1716,11 +1639,11 @@ mod tests {
         let mut req = request("server", "server", "tcp");
         req.duration = 0;
         req.transfer_mode = String::new();
-        assert!(validate(&req).is_ok());
+        assert!(crate::validation::validate(&req).is_ok());
         // 空串归一化不放松非空非法值校验
         let mut bad = request("tcp-single", "client", "tcp");
         bad.transfer_mode = "packets".into();
-        assert!(validate(&bad).is_err());
+        assert!(crate::validation::validate(&bad).is_err());
     }
 
     /// 服务端不可达分类：连接被拒 / DNS 失败 / 超时 → fatal；平台不支持（如
