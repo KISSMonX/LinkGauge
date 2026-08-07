@@ -137,9 +137,10 @@ pub async fn start_test<R: tauri::Runtime>(
                 locale_handle,
             )
             .await;
-            if let Some(d) = session_done.lock().await.remove(&spawned_id) {
-                d.notify_one();
-            }
+            // 始终通知 stop_test：持有自己的 Arc 克隆，不依赖 map.remove 的返回值
+            // （stop_test 可能已经先一步从 map 中取走了 Notify，此时 remove 返回 None）
+            done.notify_one();
+            session_done.lock().await.remove(&spawned_id);
             sessions.lock().await.remove(&spawned_id);
         });
     } else if request.mode == "server" || request.task_id == "server" {
@@ -195,9 +196,9 @@ pub async fn start_test<R: tauri::Runtime>(
                     *server_guard = None;
                 }
             }
-            if let Some(d) = session_done.lock().await.remove(&spawned_id) {
-                d.notify_one();
-            }
+            // 始终通知 stop_test（持有自己的 Arc 克隆，不依赖 remove 返回值）
+            done.notify_one();
+            session_done.lock().await.remove(&spawned_id);
             sessions.lock().await.remove(&spawned_id);
         });
     } else {
@@ -216,9 +217,9 @@ pub async fn start_test<R: tauri::Runtime>(
         let session_done = state.session_done.clone();
         tauri::async_runtime::spawn(async move {
             client::run_engine_client(app, spawned_id.clone(), request, rx, locale_handle).await;
-            if let Some(d) = session_done.lock().await.remove(&spawned_id) {
-                d.notify_one();
-            }
+            // 始终通知 stop_test（持有自己的 Arc 克隆，不依赖 remove 返回值）
+            done.notify_one();
+            session_done.lock().await.remove(&spawned_id);
             sessions.lock().await.remove(&spawned_id);
         });
     }
@@ -348,9 +349,9 @@ pub async fn start_test_queue<R: tauri::Runtime>(
                 *queue_guard = None;
             }
         }
-        if let Some(d) = session_done.lock().await.remove(&spawned_id) {
-            d.notify_one();
-        }
+        // 始终通知 stop_test（持有自己的 Arc 克隆，不依赖 remove 返回值）
+        done.notify_one();
+        session_done.lock().await.remove(&spawned_id);
         sessions.lock().await.remove(&spawned_id);
     });
     Ok(session_id)
