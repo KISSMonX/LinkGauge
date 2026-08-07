@@ -418,44 +418,22 @@ async function applySync(payload: SyncState) {
   // 多个异步 applySync 可能交叠；只有最后开始应用的包可以解除广播抑制。
   if (applyToken === syncApplyToken) syncing = false
 }
-/** 运行状态/会话等变化即时同步；计时器只在运行期间走动（已用时由 startedAt 推算，ticker 只负责触发重算） */
+/** 批量监听：状态/会话等变化即时同步至所有子窗口。
+ *  计时器只在客户端运行期间走动（已用时由 startedAt 推算，ticker 只负责触发重算）。 */
 watch(clientRunning, (running) => {
   if (running) { if (ticker === undefined) ticker = window.setInterval(() => { nowTick.value += 1 }, 1000) }
   else if (ticker !== undefined) { clearInterval(ticker); ticker = undefined }
   if (!syncing) emitSync()
 })
-watch(serverRunning, () => emitSync())
-watch(clientSession, () => emitSync())
-watch(serverSession, () => emitSync())
-watch(queue, () => emitSync())
-watch(queueIndex, () => emitSync())
-watch(driver, () => emitSync())
-watch(driverRevision, () => emitSync())
-watch(items, () => emitSync(), { deep: true })
-watch(local, () => emitSync())
-watch(savedTcpLength, () => emitSync())
-watch(savedUdpLength, () => emitSync())
-watch(summary, () => emitSync(), { deep: true })
-watch(locale, () => emitSync())
-watch(theme, () => emitSync())
-// —— 运行中的瞬时数据：任何变化即时广播，所有窗口保持同一份数据 ——
-watch(completedPoints, () => emitSync())
-watch(completedLabel, () => emitSync())
-watch(itemHistory, () => emitSync(), { deep: true })
-watch(selectedHistoryId, () => emitSync())
-watch(progress, () => emitSync())
-watch(startedAt, () => emitSync())
-watch(connected, () => emitSync())
-watch(clientLocalPort, () => emitSync())
-// 日志由 test-event 直接广播；不随每行变化再发送完整状态包。新窗口初始化时
-// syncBundle(true) 会一次性携带已有日志。
-watch(serverUptime, () => emitSync())
-watch(serverCompleted, () => emitSync())
-watch(serverServing, () => emitSync())
-watch(serverPoints, () => emitSync(), { deep: true })
-watch(serverPeerIp, () => emitSync())
-watch(serverPeerPort, () => emitSync())
-watch(sshStatus, () => emitSync())
+// 浅监听——简单值或对象引用变化时同步
+for (const s of [serverRunning, clientSession, serverSession, queue, queueIndex, driver, driverRevision, local, savedTcpLength, savedUdpLength, locale, theme, completedPoints, completedLabel, progress, startedAt, connected, clientLocalPort, serverUptime, serverCompleted, serverServing, serverPeerIp, serverPeerPort, sshStatus, selectedHistoryId]) {
+  watch(s, () => emitSync())
+}
+// 深监听——数组/字典内部变化时同步；日志由 test-event 直接广播，
+// 不随每行变化再发送完整状态包（新窗口初始化时 syncBundle(true) 一次性携带已有日志）
+for (const s of [items, summary, itemHistory, serverPoints]) {
+  watch(s, () => emitSync(), { deep: true })
+}
 /** 会话建立后（无论由哪个窗口发起）拉取回放缓冲：
  *  既补齐 invoke 返回前就已到达的输出，也让后开的窗口拿到完整的控制台历史 */
 watch(sshSession, (id) => { emitSync(); if (id) void primeConsole(id) })
