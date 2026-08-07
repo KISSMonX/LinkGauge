@@ -120,6 +120,7 @@ pub fn run() {
             runner::start_test,
             runner::start_test_queue,
             runner::stop_test,
+            runner::get_server_status,
             runner::append_client_log,
             runner::set_locale,
             runner::open_log_dir,
