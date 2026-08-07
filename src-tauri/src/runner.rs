@@ -58,6 +58,8 @@ pub struct AppState {
     /// 当前服务端会话（单例）：重复启动服务端时拒绝。Windows 的 SO_REUSEADDR
     /// 允许同一端口双绑，双会话会造成心跳日志冲突、客户端连接随机分发
     pub(crate) server_session: Arc<AsyncMutex<Option<String>>>,
+    /// 当前客户端队列会话（单例）：队列由后端串行驱动，避免多个窗口各自推进。
+    pub(crate) client_queue_session: Arc<AsyncMutex<Option<String>>>,
 }
 
 /// 读取当前界面语言（日志输出时调用，避免使用会话启动时的快照）
@@ -121,28 +123,44 @@ pub async fn start_test<R: tauri::Runtime>(
             sessions.lock().await.remove(&spawned_id);
         });
     } else if request.mode == "server" || request.task_id == "server" {
-        // 服务端单例：已有会话时拒绝重复启动。Windows 的 SO_REUSEADDR 允许
-        // 同端口双绑——重复启动会得到两个监听同一端口的心跳会话（日志冲突、
-        // 连接随机分发），前端 serverRunning 状态一旦与真实状态脱节就会触发
-        {
-            let mut guard = state.server_session.lock().await;
-            if guard.is_some() {
-                return Err("服务端已在运行，请先停止当前服务端".into());
-            }
-            *guard = Some(session_id.clone());
-        }
         let (tx, rx) = watch::channel(None);
-        state
-            .sessions
-            .lock()
-            .await
-            .insert(session_id.clone(), SessionSignal::Engine(tx));
+        // 服务端单例与 sessions 在同一临界区内核对：标记存在但会话表已无该 ID
+        // 说明上次异常清理留下了陈旧状态，可安全自愈；真实活动会话仍拒绝重复启动。
+        // 锁顺序固定为 server_session → sessions，清理路径保持一致，避免交叉死锁。
+        {
+            let mut server_guard = state.server_session.lock().await;
+            let mut session_guard = state.sessions.lock().await;
+            if let Some(existing) = server_guard.as_ref() {
+                let active = matches!(
+                    session_guard.get(existing),
+                    Some(SessionSignal::Engine(tx)) if !tx.is_closed()
+                );
+                if active {
+                    return Err(tr(
+                        &request.locale,
+                        "服务端已在运行，请先停止当前服务端",
+                        "The server is already running. Stop it before starting again.",
+                    )
+                    .to_string());
+                }
+                session_guard.remove(existing);
+                *server_guard = None;
+            }
+            session_guard.insert(session_id.clone(), SessionSignal::Engine(tx));
+            *server_guard = Some(session_id.clone());
+        }
         let server_session = state.server_session.clone();
         tauri::async_runtime::spawn(async move {
             run_engine_server(app, spawned_id.clone(), request, rx, locale_handle).await;
+            // 先按 ID 清除单例标记再移除会话；若期间已有新服务端启动，旧任务
+            // 绝不能把新会话的标记清空。
+            {
+                let mut server_guard = server_session.lock().await;
+                if server_guard.as_deref() == Some(spawned_id.as_str()) {
+                    *server_guard = None;
+                }
+            }
             sessions.lock().await.remove(&spawned_id);
-            // 会话结束（手动停止 / 异常退出）清除单例标记，允许再次启动
-            *server_session.lock().await = None;
         });
     } else {
         let (tx, rx) = watch::channel(None);
@@ -159,19 +177,174 @@ pub async fn start_test<R: tauri::Runtime>(
     Ok(session_id)
 }
 
+/// 后端串行执行完整客户端队列。队列推进不再依赖某个 WebView 的 JS 定时器，
+/// 因而窗口分离、销毁或后台节流都不会让下一项永远无法启动。
+#[tauri::command]
+pub async fn start_test_queue<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    requests: Vec<TestRequest>,
+) -> Result<String, String> {
+    let locale = current_locale(&state.locale);
+    if requests.is_empty() {
+        return Err(tr(
+            &locale,
+            "测试队列不能为空",
+            "The test queue cannot be empty",
+        )
+        .into());
+    }
+    for request in &requests {
+        if request.mode == "server" || request.task_id == "server" {
+            return Err(tr(
+                &locale,
+                "客户端队列不能包含服务端任务",
+                "A client queue cannot contain a server task",
+            )
+            .into());
+        }
+        validate(request)?;
+    }
+
+    let session_id = Uuid::new_v4().to_string();
+    let (tx, rx) = watch::channel(None);
+    {
+        let mut queue_guard = state.client_queue_session.lock().await;
+        let mut sessions_guard = state.sessions.lock().await;
+        if let Some(existing) = queue_guard.as_ref() {
+            let active = matches!(
+                sessions_guard.get(existing),
+                Some(SessionSignal::Engine(signal)) if !signal.is_closed()
+            );
+            if active {
+                return Err(tr(
+                    &locale,
+                    "客户端测试队列已在运行，请先停止当前测试",
+                    "A client test queue is already running. Stop it before starting again.",
+                )
+                .to_string());
+            }
+            sessions_guard.remove(existing);
+            *queue_guard = None;
+        }
+        sessions_guard.insert(session_id.clone(), SessionSignal::Engine(tx));
+        *queue_guard = Some(session_id.clone());
+    }
+
+    let spawned_id = session_id.clone();
+    let sessions = state.sessions.clone();
+    let queue_session = state.client_queue_session.clone();
+    let child_pids = state.child_pids.clone();
+    let locale_handle = state.locale.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut queue_status = "success";
+        let mut item_results = Vec::new();
+        for request in requests {
+            if rx.borrow().is_some() {
+                queue_status = "stopped";
+                break;
+            }
+            let task_id = request.task_id.clone();
+            emit_task_start(&app, &spawned_id, &task_id);
+            let result = if request.task_id == "ping" {
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let forward_cancelled = cancelled.clone();
+                let mut forward_rx = rx.clone();
+                let forward = tokio::spawn(async move {
+                    if forward_rx.changed().await.is_ok() && forward_rx.borrow().is_some() {
+                        forward_cancelled.store(true, Ordering::SeqCst);
+                    }
+                });
+                let result = run_ping(
+                    app.clone(),
+                    spawned_id.clone(),
+                    request,
+                    cancelled,
+                    child_pids.clone(),
+                    locale_handle.clone(),
+                )
+                .await;
+                forward.abort();
+                result
+            } else {
+                run_engine_client(
+                    app.clone(),
+                    spawned_id.clone(),
+                    request,
+                    rx.clone(),
+                    locale_handle.clone(),
+                )
+                .await
+            };
+            item_results.push((task_id, result));
+            if result == ClientTaskResult::Fatal {
+                queue_status = "failed";
+                break;
+            }
+            if result == ClientTaskResult::Stopped {
+                queue_status = "stopped";
+                break;
+            }
+        }
+        emit_queue_complete(&app, &spawned_id, queue_status, &item_results);
+        {
+            let mut queue_guard = queue_session.lock().await;
+            if queue_guard.as_deref() == Some(spawned_id.as_str()) {
+                *queue_guard = None;
+            }
+        }
+        sessions.lock().await.remove(&spawned_id);
+    });
+    Ok(session_id)
+}
+
 #[tauri::command]
 pub async fn stop_test(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let map = state.sessions.lock().await;
-    let signal = map
-        .get(&session_id)
-        .ok_or_else(|| "当前测试任务不存在或已经结束".to_string())?;
-    match signal {
-        SessionSignal::Ping(flag) => flag.store(true, Ordering::SeqCst),
-        SessionSignal::Engine(tx) => {
-            let _ = tx.send(Some("用户手动停止".into()));
+    let sessions = state.sessions.clone();
+    let mut already_ended = false;
+    {
+        let mut map = sessions.lock().await;
+        match map.get(&session_id) {
+            Some(SessionSignal::Ping(flag)) => flag.store(true, Ordering::SeqCst),
+            Some(SessionSignal::Engine(tx)) if tx.is_closed() => {
+                // 任务异常退出时 spawn 清理代码可能未执行；关闭的通道已不代表活动会话。
+                already_ended = true;
+            }
+            Some(SessionSignal::Engine(tx)) => {
+                let _ = tx.send(Some("用户手动停止".into()));
+            }
+            None => already_ended = true,
+        }
+        if already_ended {
+            map.remove(&session_id);
         }
     }
-    Ok(())
+    if already_ended {
+        let mut server_guard = state.server_session.lock().await;
+        if server_guard.as_deref() == Some(session_id.as_str()) {
+            *server_guard = None;
+        }
+        drop(server_guard);
+        let mut queue_guard = state.client_queue_session.lock().await;
+        if queue_guard.as_deref() == Some(session_id.as_str()) {
+            *queue_guard = None;
+        }
+        return Ok(());
+    }
+    // stop_test 的完成语义必须是「任务已退出」，不能只是「信号已发送」；否则前端
+    // 会先显示已停止并允许重启，而后端单例仍在清理，随即误报“服务端已在运行”。
+    for _ in 0..100 {
+        if !sessions.lock().await.contains_key(&session_id) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    Err(tr(
+        &current_locale(&state.locale),
+        "停止请求已发送，但任务未在 5 秒内退出",
+        "The stop request was sent, but the task did not exit within 5 seconds.",
+    )
+    .to_string())
 }
 
 /// 用系统文件管理器打开测试日志目录，返回目录路径
@@ -314,6 +487,47 @@ struct ClientParams {
     mptcp: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientTaskResult {
+    Success,
+    Failed,
+    Fatal,
+    Stopped,
+}
+
+/// 每项任务的后端硬时限。前端定时器可能随 WebView 被节流或销毁，因此这里只用
+/// Tokio 时钟裁决；按量任务根据限速估算传输时间，其余为配置时长加 30 秒余量。
+fn client_task_timeout(request: &TestRequest) -> Duration {
+    let seconds = match effective_transfer_mode(request) {
+        mode @ ("bytes" | "blocks") if request.bandwidth > 0 => {
+            let bytes = if mode == "bytes" {
+                u128::from(request.transfer_amount).saturating_mul(1_000_000)
+            } else {
+                u128::from(request.transfer_amount).saturating_mul(u128::from(
+                    if request.packet_length == 0 {
+                        131_072
+                    } else {
+                        request.packet_length
+                    },
+                ))
+            };
+            let bits_per_second = u128::from(request.bandwidth).saturating_mul(1_000_000);
+            let estimated = bytes
+                .saturating_mul(8)
+                .saturating_add(bits_per_second.saturating_sub(1))
+                / bits_per_second.max(1);
+            u64::try_from(estimated)
+                .unwrap_or(u64::MAX)
+                .saturating_add(15)
+                .max(30)
+        }
+        "bytes" | "blocks" => 300,
+        _ if request.task_id == "ping" => 30,
+        _ => request.duration.saturating_add(30).max(30),
+    };
+    Duration::from_secs(seconds)
+}
+
 /// 按量模式推导：按量测试项（tcp-bytes / udp-bytes / tcp-blocks）强制
 /// bytes / blocks，其余取全局 transfer_mode。validate 与 client_params_for
 /// 共用同一推导，保证「队列里混排按量项 + 常规项」时各项口径一致。
@@ -406,7 +620,7 @@ async fn run_engine_client<R: tauri::Runtime>(
     request: TestRequest,
     rx: watch::Receiver<Option<String>>,
     locale_handle: Arc<RwLock<String>>,
-) {
+) -> ClientTaskResult {
     let task_name = task_label(&request.locale, &request.task_id);
     let local_ip = if request.local_ip.trim().is_empty() {
         local_ip_address::local_ip()
@@ -416,7 +630,7 @@ async fn run_engine_client<R: tauri::Runtime>(
         request.local_ip.clone()
     };
     let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
-        return;
+        return ClientTaskResult::Failed;
     };
     // 界面语言运行时可变：日志输出点实时读取，切换语言后立即生效
     let locale = current_locale(&locale_handle);
@@ -480,10 +694,30 @@ async fn run_engine_client<R: tauri::Runtime>(
                 false,
             )
             .await;
-            return;
+            return ClientTaskResult::Failed;
         }
     };
-    let outcome = client.run().await;
+    let outcome = match tokio::time::timeout(client_task_timeout(&request), client.run()).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            let message = tr_format!(
+                &locale,
+                "任务超过后端硬时限，已终止并继续下一项",
+                "The task exceeded the backend hard timeout and was stopped; continuing with the next item"
+            );
+            fail_engine(
+                &app,
+                &session_id,
+                &request.task_id,
+                &log,
+                &locale,
+                &message,
+                false,
+            )
+            .await;
+            return ClientTaskResult::Failed;
+        }
+    };
     finish_engine(
         &app,
         &session_id,
@@ -493,7 +727,7 @@ async fn run_engine_client<R: tauri::Runtime>(
         &locale,
         outcome,
     )
-    .await;
+    .await
 }
 
 /// 构造一次 riperf3 客户端 builder。
@@ -528,11 +762,12 @@ fn engine_client_builder<R: tauri::Runtime>(
             retransmits: sum.retransmits.unwrap_or(0).max(0) as u64,
         };
         emit_metric(&hook_app, &hook_session, &hook_task, metric);
-        let line = format!(
-            "[INFO] {}",
-            format_interval_line(&current_locale(&hook_locale), second, sum)
-        );
+        let message = format_interval_line(&current_locale(&hook_locale), second, sum);
+        let line = format!("[INFO] {message}");
         append_log(&hook_log, &line);
+        // 指标不仅驱动图表，也同步到界面日志；长时测试若只显示“开始测试”，
+        // 即使引擎正常运行也会被误判为卡死。
+        emit_log(&hook_app, &hook_session, &hook_task, "INFO", message);
     };
 
     let mut builder = ClientBuilder::new(&request.server_ip)
@@ -1171,7 +1406,7 @@ async fn run_ping<R: tauri::Runtime>(
     cancelled: Arc<AtomicBool>,
     child_pids: Arc<AsyncMutex<HashSet<u32>>>,
     locale_handle: Arc<RwLock<String>>,
-) {
+) -> ClientTaskResult {
     let task_name = task_label(&request.locale, &request.task_id);
     // 界面语言运行时可变：ping 日志实时读取当前语言
     let locale = current_locale(&locale_handle);
@@ -1183,7 +1418,7 @@ async fn run_ping<R: tauri::Runtime>(
         request.local_ip.clone()
     };
     let Some(log) = setup_log(&app, &session_id, &request, &local_ip, task_name).await else {
-        return;
+        return ClientTaskResult::Failed;
     };
     let args = if cfg!(windows) {
         vec!["-n".into(), "4".into(), request.server_ip.clone()]
@@ -1222,7 +1457,7 @@ async fn run_ping<R: tauri::Runtime>(
                 false,
             )
             .await;
-            return;
+            return ClientTaskResult::Failed;
         }
     };
     let pid = child.id();
@@ -1241,6 +1476,9 @@ async fn run_ping<R: tauri::Runtime>(
     drop(tx);
     let mut final_success = false;
     let mut final_stopped = false;
+    let mut final_timed_out = false;
+    let hard_timeout = sleep(client_task_timeout(&request));
+    tokio::pin!(hard_timeout);
     loop {
         tokio::select! {
             status = child.wait() => {
@@ -1266,6 +1504,12 @@ async fn run_ping<R: tauri::Runtime>(
                     break;
                 }
             }
+            _ = &mut hard_timeout => {
+                final_timed_out = true;
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                break;
+            }
         }
     }
     if let Some(pid) = pid {
@@ -1283,10 +1527,29 @@ async fn run_ping<R: tauri::Runtime>(
             }
         ),
     );
-    if final_stopped {
+    if final_timed_out {
+        let message = tr(
+            &locale,
+            "Ping 超过后端硬时限，已终止并继续下一项",
+            "Ping exceeded the backend hard timeout and was stopped; continuing with the next item",
+        );
+        fail_engine(
+            &app,
+            &session_id,
+            &request.task_id,
+            &log,
+            &locale,
+            message,
+            false,
+        )
+        .await;
+        ClientTaskResult::Failed
+    } else if final_stopped {
         finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
+        ClientTaskResult::Stopped
     } else if final_success {
         finish_ok(&app, &session_id, &request.task_id, &log, "success").await;
+        ClientTaskResult::Success
     } else {
         let message = tr(
             &locale,
@@ -1304,6 +1567,7 @@ async fn run_ping<R: tauri::Runtime>(
             false,
         )
         .await;
+        ClientTaskResult::Failed
     }
 }
 
@@ -1559,7 +1823,7 @@ async fn finish_engine<R: tauri::Runtime>(
     request: &TestRequest,
     locale: &str,
     outcome: Result<riperf3::RunOutcome, riperf3::RiperfError>,
-) {
+) -> ClientTaskResult {
     match outcome {
         Err(error) => {
             // 服务端不可达（未启动 / 端口错 / DNS 失败 / 超时）单独归类：给出可操作
@@ -1610,6 +1874,11 @@ async fn finish_engine<R: tauri::Runtime>(
                 (message, false)
             };
             fail_engine(app, session_id, task_id, log, locale, &message, fatal).await;
+            if fatal {
+                ClientTaskResult::Fatal
+            } else {
+                ClientTaskResult::Failed
+            }
         }
         Ok(outcome) => {
             let report = &outcome.report;
@@ -1655,10 +1924,12 @@ async fn finish_engine<R: tauri::Runtime>(
                 Termination::Completed => {
                     append_log(log, tr(locale, "测试结果: 完成", "Result: completed"));
                     finish_ok(app, session_id, task_id, log, "success").await;
+                    ClientTaskResult::Success
                 }
                 Termination::Interrupted => {
                     append_log(log, tr(locale, "测试结果: 手动停止", "Result: manual stop"));
                     finish_ok(app, session_id, task_id, log, "stopped").await;
+                    ClientTaskResult::Stopped
                 }
                 Termination::ServerTerminated => {
                     let message = tr(
@@ -1668,6 +1939,7 @@ async fn finish_engine<R: tauri::Runtime>(
                     )
                     .to_string();
                     fail_engine(app, session_id, task_id, log, locale, &message, false).await;
+                    ClientTaskResult::Failed
                 }
                 Termination::ServerError(msg) => {
                     let message = tr_format!(
@@ -1677,6 +1949,7 @@ async fn finish_engine<R: tauri::Runtime>(
                         msg
                     );
                     fail_engine(app, session_id, task_id, log, locale, &message, false).await;
+                    ClientTaskResult::Failed
                 }
                 other => {
                     let message = tr_format!(
@@ -1686,6 +1959,7 @@ async fn finish_engine<R: tauri::Runtime>(
                         other
                     );
                     fail_engine(app, session_id, task_id, log, locale, &message, false).await;
+                    ClientTaskResult::Failed
                 }
             }
         }
@@ -1946,6 +2220,58 @@ fn emit_log<R: tauri::Runtime>(
         },
     );
 }
+fn emit_task_start<R: tauri::Runtime>(app: &AppHandle<R>, session: &str, task: &str) {
+    let _ = app.emit(
+        "test-event",
+        TestEvent {
+            session_id: session.into(),
+            task_id: task.into(),
+            event_type: "start".into(),
+            status: Some("running".into()),
+            level: None,
+            message: None,
+            metric: None,
+            log_path: None,
+            fatal: None,
+        },
+    );
+}
+fn emit_queue_complete<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session: &str,
+    status: &str,
+    item_results: &[(String, ClientTaskResult)],
+) {
+    let items: Vec<serde_json::Value> = item_results
+        .iter()
+        .map(|(task_id, result)| {
+            serde_json::json!({
+                "taskId": task_id,
+                "status": match result {
+                    ClientTaskResult::Success => "success",
+                    ClientTaskResult::Failed | ClientTaskResult::Fatal => "failed",
+                    ClientTaskResult::Stopped => "stopped",
+                }
+            })
+        })
+        .collect();
+    let _ = app.emit(
+        "test-event",
+        TestEvent {
+            session_id: session.into(),
+            task_id: String::new(),
+            event_type: "queue-complete".into(),
+            status: Some(status.into()),
+            level: None,
+            // 队列结束时携带最终逐项状态，供所有窗口一次性校准；否则漏掉某个
+            // complete 的旧窗口会把 running 状态通过停止同步覆盖回其他窗口。
+            message: Some(serde_json::json!({ "items": items }).to_string()),
+            metric: None,
+            log_path: None,
+            fatal: None,
+        },
+    );
+}
 fn emit_metric<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session: &str,
@@ -2015,10 +2341,14 @@ fn emit_error<R: tauri::Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_log, client_params_for, is_server_unreachable, validate, TestLog};
+    use super::{
+        append_log, client_params_for, client_task_timeout, is_server_unreachable, validate,
+        TestLog,
+    };
     use crate::models::TestRequest;
     use riperf3::TransportProtocol;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     /// 日志文件逐行换行：append_log 统一补 \n，多行内容与界面日志一样分行呈现
     #[test]
@@ -2043,6 +2373,23 @@ mod tests {
             content,
             "[INFO] 第一行\n[INFO] 第二行\n多行内容\n内含换行\n"
         );
+    }
+
+    #[test]
+    fn backend_timeout_covers_time_bytes_and_blocks_modes() {
+        let mut request = request("tcp-single", "client", "tcp");
+        request.duration = 30;
+        assert_eq!(client_task_timeout(&request), Duration::from_secs(60));
+
+        request.task_id = "tcp-bytes".into();
+        request.transfer_amount = 1_000;
+        request.bandwidth = 100;
+        assert_eq!(client_task_timeout(&request), Duration::from_secs(95));
+
+        request.task_id = "tcp-blocks".into();
+        request.transfer_amount = 100_000;
+        request.packet_length = 1_000;
+        assert_eq!(client_task_timeout(&request), Duration::from_secs(30));
     }
 
     fn request(task_id: &str, mode: &str, protocol: &str) -> TestRequest {
@@ -2518,6 +2865,66 @@ mod queue_tests {
         }
     }
 
+    /// 服务端异常退出可能留下单例标记和已关闭的会话信号；下一次启动应自愈，
+    /// 正常停止则必须等清理完成，随后可立即在同一端口重新启动。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_session_recovers_stale_state_and_restarts_after_stop() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let app = tauri::test::mock_builder()
+            .manage(AppState::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let handle = app.handle().clone();
+        let stale_id = "stale-server-session".to_string();
+        let (stale_tx, stale_rx) = tokio::sync::watch::channel(None);
+        drop(stale_rx);
+        {
+            let state = app.state::<AppState>();
+            state
+                .sessions
+                .lock()
+                .await
+                .insert(stale_id.clone(), SessionSignal::Engine(stale_tx));
+            *state.server_session.lock().await = Some(stale_id.clone());
+        }
+
+        let mut request = base_request("server", port, Local::now().timestamp_millis());
+        request.mode = "server".into();
+        request.bind_ip = "127.0.0.1".into();
+        request.duration = 0;
+
+        let first = start_test(handle.clone(), app.state::<AppState>(), request.clone())
+            .await
+            .expect("已关闭的服务端会话不应阻止重新启动");
+        assert_ne!(first, stale_id);
+        assert!(app
+            .state::<AppState>()
+            .sessions
+            .lock()
+            .await
+            .get(&stale_id)
+            .is_none());
+
+        let duplicate = start_test(handle.clone(), app.state::<AppState>(), request.clone()).await;
+        assert!(duplicate.is_err(), "活动服务端仍必须拒绝重复启动");
+
+        stop_test(app.state::<AppState>(), first).await.unwrap();
+        assert!(app
+            .state::<AppState>()
+            .server_session
+            .lock()
+            .await
+            .is_none());
+
+        let second = start_test(handle, app.state::<AppState>(), request)
+            .await
+            .expect("停止返回后应能立即重新启动服务端");
+        stop_test(app.state::<AppState>(), second).await.unwrap();
+    }
+
     /// 快任务链端到端：tcp-bytes → udp-bytes → tcp-blocks 连续毫秒级任务，
     /// 每个都必须收到 complete（复现「卡在第 N 项」——若后端事件缺失此处直接失败）
     #[tokio::test(flavor = "multi_thread")]
@@ -2552,13 +2959,14 @@ mod queue_tests {
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
         let handle = app.handle().clone();
-        let events: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let events: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let hook = events.clone();
         handle.listen("test-event", move |e| {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(e.payload()) {
                 let task = value["taskId"].as_str().unwrap_or("").to_string();
                 let kind = value["type"].as_str().unwrap_or("").to_string();
-                hook.lock().unwrap().push((task, kind));
+                let message = value["message"].as_str().unwrap_or("").to_string();
+                hook.lock().unwrap().push((task, kind, message));
             }
         });
 
@@ -2567,7 +2975,7 @@ mod queue_tests {
         // 后续项的 complete 会缺失）
         // 每次运行唯一 runId：汇总文件按 runId 命名，避免与历史运行的文件混淆
         let run_id = Local::now().timestamp_millis();
-        for task_id in [
+        let task_ids = [
             "tcp-single",
             "tcp-bidir",
             "tcp-parallel",
@@ -2576,11 +2984,15 @@ mod queue_tests {
             "tcp-bytes",
             "udp-bytes",
             "tcp-blocks",
-        ] {
-            let state = app.state::<AppState>();
-            let session = start_test(handle.clone(), state, base_request(task_id, port, run_id))
-                .await
-                .expect("start_test 应成功");
+        ];
+        let requests = task_ids
+            .iter()
+            .map(|task_id| base_request(task_id, port, run_id))
+            .collect();
+        let session = start_test_queue(handle.clone(), app.state::<AppState>(), requests)
+            .await
+            .expect("start_test_queue 应成功");
+        for task_id in task_ids {
             // 等待该任务的 complete（30 秒超时）
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
             loop {
@@ -2588,7 +3000,7 @@ mod queue_tests {
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|(t, ty)| t == task_id && ty == "complete");
+                    .any(|(t, ty, _)| t == task_id && ty == "complete");
                 if done {
                     break;
                 }
@@ -2599,6 +3011,48 @@ mod queue_tests {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
+        let queue_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, kind, _)| kind == "queue-complete")
+        {
+            assert!(
+                tokio::time::Instant::now() < queue_deadline,
+                "后端完成全部任务后必须发出 queue-complete"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let starts: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, kind, _)| kind == "start")
+            .map(|(task, _, _)| task.clone())
+            .collect();
+        assert_eq!(starts, task_ids, "后端必须严格按队列顺序启动每个测试项");
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, kind, message)| kind == "log" && message.starts_with("第 ")),
+            "输出周期指标必须同步到界面日志，不能长期停在开始测试"
+        );
+        let final_message = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, kind, _)| kind == "queue-complete")
+            .map(|(_, _, message)| message.clone())
+            .unwrap();
+        let final_state: serde_json::Value = serde_json::from_str(&final_message).unwrap();
+        let final_items = final_state["items"].as_array().unwrap();
+        assert_eq!(final_items.len(), task_ids.len());
+        assert!(final_items
+            .iter()
+            .all(|item| item["status"].as_str() == Some("success")));
 
         // 客户端运行汇总文件：同一 runId 的 8 个测试项写入同一个文件，逐项有结果
         let summary_dir = app.path().app_log_dir().unwrap().join("tests");

@@ -150,7 +150,7 @@ export interface LogEntry {
 export interface BackendEvent {
   sessionId: string
   taskId: string
-  type: 'status' | 'log' | 'metric' | 'error' | 'complete'
+  type: 'start' | 'status' | 'log' | 'metric' | 'error' | 'complete' | 'queue-complete'
   status?: TaskStatus
   level?: LogLevel
   message?: string
@@ -190,16 +190,22 @@ export interface SyncState {
   serverRunning: boolean
   clientSession: string
   serverSession: string
-  /** 执行队列及其游标（由驱动窗口维护） */
+  /** 执行队列及其当前展示游标（由后端 start 事件推进） */
   queue: string[]
   queueIndex: number
-  /** 驱动客户端队列的窗口 label（main / client），其他窗口只展示不启动下一项 */
+  /** 客户端运行状态的同步权威窗口 label（main / client） */
   driver: string
-  /** 发出本同步包的窗口 label：队列推进状态只采纳驱动窗口（source === driver）的同步 */
+  /** 驱动权版本：新一轮从 1 开始，每次合法接管递增，拒绝旧窗口回退驱动权 */
+  driverRevision: number
+  /** 发出本同步包的窗口 label：队列推进状态只采纳当前驱动窗口的同步 */
   source: string
+  /** 窗口实例标识：同 label 的窗口重建后也能区分同步序列 */
+  sourceInstance: string
+  /** 当前窗口实例发出的单调序号，用于丢弃异步乱序到达的旧快照 */
+  syncSequence: number
   savedTcpLength: number
   savedUdpLength: number
-  /** 汇总数据（由驱动窗口维护 startedAt/completed/total，指标类字段各窗口本地推导） */
+  /** 汇总数据（由同步权威窗口维护 startedAt/completed/total，指标类字段各窗口本地推导） */
   summary: TestSummary
   /** 界面语言（默认英文） */
   locale: 'zh' | 'en'
@@ -215,7 +221,7 @@ export interface SyncState {
   itemHistory: Record<string, ItemHistory>
   /** 当前查看的历史项目 id（'' = 未选择，显示最近一次完成项） */
   selectedHistoryId: string
-  /** 客户端任务队列总体进度（0-100，仅驱动窗口修改） */
+  /** 客户端任务队列总体进度（0-100，由后端 start/complete 事件更新） */
   progress: number
   /** 本轮测试开始时间戳（ms），各窗口据此推算已用时，避免逐秒同步 elapsed */
   startedAt: number
