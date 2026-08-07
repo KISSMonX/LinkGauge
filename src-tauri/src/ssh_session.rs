@@ -128,6 +128,7 @@ pub(crate) async fn run_session(
         ),
     );
 
+    let host = request.host.trim().to_string();
     let config = Arc::new(client::Config {
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 3,
@@ -135,15 +136,11 @@ pub(crate) async fn run_session(
     });
     let host_key = Arc::new(Mutex::new(None));
     let handler = Handler {
-        host: request.host.trim().to_string(),
+        host: host.clone(),
         port: request.port,
         result: host_key.clone(),
     };
-    let connecting = client::connect(
-        config,
-        (request.host.trim().to_string(), request.port),
-        handler,
-    );
+    let connecting = client::connect(config, (host, request.port), handler);
     let mut session = match timeout(CONNECT_TIMEOUT, connecting).await {
         Err(_) => {
             emit_end(
