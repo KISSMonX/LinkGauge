@@ -15,8 +15,10 @@ const visibleLogs = computed(() => filter.value === 'ALL' ? props.logs : props.l
 const selected = computed(() => props.items.filter((i) => i.enabled))
 const completedCount = computed(() => selected.value.filter(i => i.status === 'success').length)
 const iconName = (status: TestItem['status']) => status === 'success' ? 'check' : status === 'running' ? 'play' : status === 'failed' ? 'info' : 'clock'
-const statusText = (status: TestItem['status']) => ({ waiting: t('st.waiting'), running: t('st.running'), success: t('st.success'), failed: t('st.failed'), stopped: t('st.stopped') })[status]
-const filterLabel = (item: 'ALL' | 'INFO' | 'WARN' | 'ERROR') => ({ ALL: t('st.filterAll'), INFO: t('st.filterInfo'), WARN: t('st.filterWarn'), ERROR: t('st.filterError') })[item]
+const statusLabels = computed(() => ({ waiting: t('st.waiting'), running: t('st.running'), success: t('st.success'), failed: t('st.failed'), stopped: t('st.stopped') } satisfies Record<TestItem['status'], string>))
+const filterLabels = computed(() => ({ ALL: t('st.filterAll'), INFO: t('st.filterInfo'), WARN: t('st.filterWarn'), ERROR: t('st.filterError') } satisfies Record<string, string>))
+const statusText = (status: TestItem['status']) => statusLabels.value[status]
+const filterLabel = (item: 'ALL' | 'INFO' | 'WARN' | 'ERROR') => filterLabels.value[item]
 /** 测试结束后，有历史数据的项目可点击查看其历史曲线 */
 const canView = (item: TestItem) => !props.running && (props.history?.[item.id]?.points.length ?? 0) > 0
 // 日志新增或整体替换（初始化应答合并）后都滚动到底部：仅盯 length 在「同长度
