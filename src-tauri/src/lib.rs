@@ -1,3 +1,4 @@
+mod error;
 mod models;
 mod report;
 mod runner;

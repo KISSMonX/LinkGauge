@@ -1,3 +1,4 @@
+use crate::error::ValidationError;
 use crate::models::{ClientLogAppend, MetricPoint, ServerRuntimeStatus, TestEvent, TestRequest};
 use chrono::{Local, TimeZone};
 use regex::Regex;
@@ -406,21 +407,21 @@ pub async fn open_log_dir<R: tauri::Runtime>(app: AppHandle<R>) -> Result<String
     Ok(dir.to_string_lossy().to_string())
 }
 
-fn validate(request: &TestRequest) -> Result<(), String> {
+fn validate(request: &TestRequest) -> Result<(), ValidationError> {
     // 服务端模式不需要持续时间（duration 恒为 0）；按量测试（-n/-k）忽略时长。
     // 按量测试项强制 bytes/blocks，与全局 transfer_mode 同源推导
     let transfer_mode = effective_transfer_mode(request);
     if request.mode != "server" && transfer_mode == "time" && request.duration == 0 {
-        return Err("持续时间必须大于 0".into());
+        return Err(ValidationError::DurationRequired);
     }
     if request.interval == 0 {
-        return Err("输出周期必须大于 0".into());
+        return Err(ValidationError::IntervalRequired);
     }
     if request.server_ip.trim().is_empty() && request.mode != "server" {
-        return Err("服务端地址不能为空".into());
+        return Err(ValidationError::ServerIpRequired);
     }
     if request.port == 0 {
-        return Err("端口无效".into());
+        return Err(ValidationError::InvalidPort);
     }
     // 服务端认证依赖私钥与用户文件两个路径，缺一不可（引擎在两者均提供时才校验凭据）
     if request.mode == "server"
@@ -428,52 +429,56 @@ fn validate(request: &TestRequest) -> Result<(), String> {
         && (request.server_auth_private_key_path.trim().is_empty()
             || request.server_auth_users_path.trim().is_empty())
     {
-        return Err("启用认证后，RSA 私钥与授权用户文件路径均不能为空".into());
+        return Err(ValidationError::ServerAuthIncomplete);
     }
     // 预热与按量测试互斥（iperf3 CLI 同样拒绝 -O + -n/-k）；
     // 按时长模式下预热必须落在测试时长内，否则统计区间为空
     if request.omit_secs > 0 {
         if transfer_mode != "time" {
-            return Err("预热（-O）仅支持按时长模式".into());
+            return Err(ValidationError::OmitOnlyTimeMode);
         }
         if u64::from(request.omit_secs) >= request.duration {
-            return Err("预热时间必须小于测试时长".into());
+            return Err(ValidationError::OmitTooLong);
         }
     }
     // 套接字缓冲区上限（KB）：与界面输入框上限一致，防溢出（引擎按 i32 字节接收）
     if request.window_kb > 16384 {
-        return Err("套接字缓冲区不能超过 16MB".into());
+        return Err(ValidationError::WindowTooLarge {
+            requested_kb: request.window_kb,
+        });
     }
     // IP 协议族只接受 0（自动）/ 4 / 6，其余取值直接拒绝
     if !matches!(request.ip_version, 0 | 4 | 6) {
-        return Err("IP 协议族只能是 0（自动）、4 或 6".into());
+        return Err(ValidationError::InvalidIpVersion {
+            value: request.ip_version,
+        });
     }
     // 服务端防护参数范围（与界面输入框上限一致，0 = 不限制）
     if request.server_idle_timeout > 86400 {
-        return Err("服务端空闲超时不能超过 86400 秒".into());
+        return Err(ValidationError::ServerIdleTimeoutTooLarge);
     }
     if request.server_max_duration > 86400 {
-        return Err("单次测试最大时长不能超过 86400 秒".into());
+        return Err(ValidationError::ServerMaxDurationTooLarge);
     }
     if request.server_bitrate_limit_mbps > 1_000_000 {
-        return Err("服务端带宽上限不能超过 1000000 Mbps".into());
+        return Err(ValidationError::ServerBitrateLimitTooLarge);
     }
     // 结束条件与按量数量：time / bytes / blocks 三选一，按量必须大于 0
     match transfer_mode {
         "time" => {}
         "bytes" | "blocks" if request.transfer_amount > 0 => {}
-        "bytes" | "blocks" => return Err("按量测试的传输量必须大于 0".into()),
-        _ => return Err("测试结束条件只能是 time / bytes / blocks".into()),
+        "bytes" | "blocks" => return Err(ValidationError::TransferAmountRequired),
+        _ => return Err(ValidationError::InvalidTransferMode),
     }
     // DSCP 范围 0-63（引擎 parse_dscp 同样约束，超出会被拒绝）
     if request.dscp > 63 {
-        return Err("DSCP 值应在 0-63 之间".into());
+        return Err(ValidationError::DscpOutOfRange);
     }
     // 拥塞控制仅 Linux/FreeBSD 支持；其他平台引擎在 build() 直接报
     // Unsupported，这里提前给出更友好的提示（macOS 等 unix 平台放行）
     #[cfg(not(unix))]
     if !request.congestion_algo.trim().is_empty() {
-        return Err("拥塞控制算法（-C）仅支持 Linux/FreeBSD".into());
+        return Err(ValidationError::CongestionAlgoNotSupported);
     }
     Ok(())
 }
