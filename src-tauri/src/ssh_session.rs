@@ -6,7 +6,10 @@
 use crate::runner::current_locale;
 use crate::ssh::{tr, Sink, SshEvent, SshInput, SshRequest, SshScrollback, CONNECT_TIMEOUT};
 use crate::ssh_decoder::Decoder;
-use russh::keys::{check_known_hosts, load_secret_key, Error as KeysError, HashAlg, PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{
+    check_known_hosts, load_secret_key, Error as KeysError, HashAlg, PrivateKeyWithHashAlg,
+    PublicKey,
+};
 use russh::{client, ChannelMsg, Disconnect};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -52,8 +55,19 @@ pub(crate) fn emit_log(sink: &Sink, session_id: &str, level: &str, message: Stri
 }
 
 pub(crate) fn emit_end(sink: &Sink, session_id: &str, event_type: &str, message: String) {
-    let level = if event_type == "error" { "ERROR" } else { "INFO" };
-    emit(sink, session_id, event_type, Some(level), Some(message), None);
+    let level = if event_type == "error" {
+        "ERROR"
+    } else {
+        "INFO"
+    };
+    emit(
+        sink,
+        session_id,
+        event_type,
+        Some(level),
+        Some(message),
+        None,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -100,12 +114,19 @@ pub(crate) async fn run_session(
 ) {
     let locale = current_locale(&locale_handle);
     emit_status(&sink, &session_id, "connecting");
-    emit_log(&sink, &session_id, "INFO", crate::tr_format!(
-        locale,
-        "正在连接 SSH {}@{}:{}…",
-        "Connecting to SSH {}@{}:{}…",
-        request.username, request.host, request.port
-    ));
+    emit_log(
+        &sink,
+        &session_id,
+        "INFO",
+        crate::tr_format!(
+            locale,
+            "正在连接 SSH {}@{}:{}…",
+            "Connecting to SSH {}@{}:{}…",
+            request.username,
+            request.host,
+            request.port
+        ),
+    );
 
     let config = Arc::new(client::Config {
         keepalive_interval: Some(Duration::from_secs(30)),
@@ -125,16 +146,26 @@ pub(crate) async fn run_session(
     );
     let mut session = match timeout(CONNECT_TIMEOUT, connecting).await {
         Err(_) => {
-            emit_end(&sink, &session_id, "error", crate::tr_format!(
-                locale,
-                "连接 {}:{} 超时（{} 秒）",
-                "Connection to {}:{} timed out after {}s",
-                request.host, request.port, CONNECT_TIMEOUT.as_secs()
-            ));
+            emit_end(
+                &sink,
+                &session_id,
+                "error",
+                crate::tr_format!(
+                    locale,
+                    "连接 {}:{} 超时（{} 秒）",
+                    "Connection to {}:{} timed out after {}s",
+                    request.host,
+                    request.port,
+                    CONNECT_TIMEOUT.as_secs()
+                ),
+            );
             return;
         }
         Ok(Err(error)) => {
-            let changed = matches!(host_key.lock().as_deref(), Ok(Some(crate::ssh::HostKey::Changed)));
+            let changed = matches!(
+                host_key.lock().as_deref(),
+                Ok(Some(crate::ssh::HostKey::Changed))
+            );
             let message = if changed {
                 crate::tr_format!(
                     locale,
@@ -142,7 +173,12 @@ pub(crate) async fn run_session(
                     "The host key does not match the record in known_hosts; the connection was refused"
                 )
             } else {
-                crate::tr_format!(locale, "SSH 连接失败：{}", "SSH connection failed: {}", error)
+                crate::tr_format!(
+                    locale,
+                    "SSH 连接失败：{}",
+                    "SSH connection failed: {}",
+                    error
+                )
             };
             emit_end(&sink, &session_id, "error", message);
             return;
@@ -153,12 +189,38 @@ pub(crate) async fn run_session(
     // 主机密钥校验提示
     if let Ok(slot) = host_key.lock() {
         match slot.as_ref() {
-            Some(crate::ssh::HostKey::Known) => emit_log(&sink, &session_id, "INFO",
-                crate::tr_format!(locale, "主机密钥已在 known_hosts 中登记", "Host key matches the known_hosts record")),
-            Some(crate::ssh::HostKey::Unknown(fp)) => emit_log(&sink, &session_id, "WARN",
-                crate::tr_format!(locale, "首次连接该主机，known_hosts 中没有记录，请核对指纹：{}", "First connection — no known_hosts record. Verify fingerprint: {}", fp)),
-            Some(crate::ssh::HostKey::Unreadable(error)) => emit_log(&sink, &session_id, "WARN",
-                crate::tr_format!(locale, "无法读取 known_hosts（{}），已跳过主机密钥校验", "known_hosts is unreadable ({}); host key verification skipped", error)),
+            Some(crate::ssh::HostKey::Known) => emit_log(
+                &sink,
+                &session_id,
+                "INFO",
+                crate::tr_format!(
+                    locale,
+                    "主机密钥已在 known_hosts 中登记",
+                    "Host key matches the known_hosts record"
+                ),
+            ),
+            Some(crate::ssh::HostKey::Unknown(fp)) => emit_log(
+                &sink,
+                &session_id,
+                "WARN",
+                crate::tr_format!(
+                    locale,
+                    "首次连接该主机，known_hosts 中没有记录，请核对指纹：{}",
+                    "First connection — no known_hosts record. Verify fingerprint: {}",
+                    fp
+                ),
+            ),
+            Some(crate::ssh::HostKey::Unreadable(error)) => emit_log(
+                &sink,
+                &session_id,
+                "WARN",
+                crate::tr_format!(
+                    locale,
+                    "无法读取 known_hosts（{}），已跳过主机密钥校验",
+                    "known_hosts is unreadable ({}); host key verification skipped",
+                    error
+                ),
+            ),
             _ => {}
         }
     }
@@ -168,32 +230,77 @@ pub(crate) async fn run_session(
         let pp = (!request.passphrase.is_empty()).then_some(request.passphrase.as_str());
         match load_secret_key(request.private_key_path.trim(), pp) {
             Ok(key) => {
-                let hash = session.best_supported_rsa_hash().await.ok().flatten().flatten();
-                session.authenticate_publickey(
-                    request.username.trim(),
-                    PrivateKeyWithHashAlg::new(Arc::new(key), hash),
-                ).await
+                let hash = session
+                    .best_supported_rsa_hash()
+                    .await
+                    .ok()
+                    .flatten()
+                    .flatten();
+                session
+                    .authenticate_publickey(
+                        request.username.trim(),
+                        PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+                    )
+                    .await
             }
             Err(error) => {
-                emit_end(&sink, &session_id, "error", crate::tr_format!(
-                    locale, "私钥读取失败：{}", "Failed to load the private key: {}", error));
+                emit_end(
+                    &sink,
+                    &session_id,
+                    "error",
+                    crate::tr_format!(
+                        locale,
+                        "私钥读取失败：{}",
+                        "Failed to load the private key: {}",
+                        error
+                    ),
+                );
                 return;
             }
         }
     } else {
-        session.authenticate_password(request.username.trim(), request.password.as_str()).await
+        session
+            .authenticate_password(request.username.trim(), request.password.as_str())
+            .await
     };
     match authenticated {
         Ok(r) if r.success() => {}
         Ok(_) => {
-            let method = if request.auth_method == "key" { "私钥" } else { "密码" };
-            let en_method = if request.auth_method == "key" { "private key" } else { "password" };
-            emit_end(&sink, &session_id, "error", crate::tr_format!(
-                locale, "SSH 认证失败，请检查用户名与{}", "SSH authentication failed — check username and {}", tr(&locale, method, en_method)));
+            let method = if request.auth_method == "key" {
+                "私钥"
+            } else {
+                "密码"
+            };
+            let en_method = if request.auth_method == "key" {
+                "private key"
+            } else {
+                "password"
+            };
+            emit_end(
+                &sink,
+                &session_id,
+                "error",
+                crate::tr_format!(
+                    locale,
+                    "SSH 认证失败，请检查用户名与{}",
+                    "SSH authentication failed — check username and {}",
+                    tr(&locale, method, en_method)
+                ),
+            );
             return;
         }
         Err(error) => {
-            emit_end(&sink, &session_id, "error", crate::tr_format!(locale, "SSH 认证出错：{}", "SSH authentication error: {}", error));
+            emit_end(
+                &sink,
+                &session_id,
+                "error",
+                crate::tr_format!(
+                    locale,
+                    "SSH 认证出错：{}",
+                    "SSH authentication error: {}",
+                    error
+                ),
+            );
             return;
         }
     }
@@ -202,25 +309,69 @@ pub(crate) async fn run_session(
     let mut channel = match session.channel_open_session().await {
         Ok(ch) => ch,
         Err(error) => {
-            emit_end(&sink, &session_id, "error", crate::tr_format!(locale, "打开 SSH 通道失败：{}", "Failed to open SSH channel: {}", error));
+            emit_end(
+                &sink,
+                &session_id,
+                "error",
+                crate::tr_format!(
+                    locale,
+                    "打开 SSH 通道失败：{}",
+                    "Failed to open SSH channel: {}",
+                    error
+                ),
+            );
             return;
         }
     };
     let cols = request.cols.clamp(40, 500);
     let rows = request.rows.clamp(10, 200);
-    if let Err(error) = channel.request_pty(false, "xterm", cols, rows, 0, 0, &[]).await {
-        emit_end(&sink, &session_id, "error", crate::tr_format!(locale, "申请远端终端失败：{}", "Failed to request remote terminal: {}", error));
+    if let Err(error) = channel
+        .request_pty(false, "xterm", cols, rows, 0, 0, &[])
+        .await
+    {
+        emit_end(
+            &sink,
+            &session_id,
+            "error",
+            crate::tr_format!(
+                locale,
+                "申请远端终端失败：{}",
+                "Failed to request remote terminal: {}",
+                error
+            ),
+        );
         return;
     }
     if let Err(error) = channel.request_shell(true).await {
-        emit_end(&sink, &session_id, "error", crate::tr_format!(locale, "启动远端 shell 失败：{}", "Failed to start remote shell: {}", error));
+        emit_end(
+            &sink,
+            &session_id,
+            "error",
+            crate::tr_format!(
+                locale,
+                "启动远端 shell 失败：{}",
+                "Failed to start remote shell: {}",
+                error
+            ),
+        );
         return;
     }
 
     connected.store(true, Ordering::SeqCst);
     emit_status(&sink, &session_id, "connected");
-    emit_log(&sink, &session_id, "INFO", crate::tr_format!(
-        locale, "SSH 已连接：{}@{}:{}", "SSH connected: {}@{}:{}", request.username, request.host, request.port));
+    emit_log(
+        &sink,
+        &session_id,
+        "INFO",
+        crate::tr_format!(
+            locale,
+            "SSH 已连接：{}@{}:{}",
+            "SSH connected: {}@{}:{}",
+            request.username,
+            request.host,
+            request.port
+        ),
+    );
 
     // 转发循环
     let mut decoder = Decoder::default();
@@ -258,7 +409,9 @@ pub(crate) async fn run_session(
 
     connected.store(false, Ordering::SeqCst);
     let _ = channel.close().await;
-    let _ = session.disconnect(Disconnect::ByApplication, "", "en-US").await;
+    let _ = session
+        .disconnect(Disconnect::ByApplication, "", "en-US")
+        .await;
     emit_end(&sink, &session_id, "closed", reason);
 }
 
@@ -283,9 +436,13 @@ mod tests {
     struct TestRng(u64);
     impl TryRng for TestRng {
         type Error = Infallible;
-        fn try_next_u32(&mut self) -> Result<u32, Infallible> { Ok(self.try_next_u64()? as u32) }
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+            Ok(self.try_next_u64()? as u32)
+        }
         fn try_next_u64(&mut self) -> Result<u64, Infallible> {
-            self.0 ^= self.0 << 13; self.0 ^= self.0 >> 7; self.0 ^= self.0 << 17;
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
             Ok(self.0.wrapping_mul(0x2545_f491_4f6c_dd1d))
         }
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
@@ -302,43 +459,102 @@ mod tests {
     struct TestServer;
     impl server::Server for TestServer {
         type Handler = Self;
-        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self { self.clone() }
+        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self {
+            self.clone()
+        }
     }
     impl server::Handler for TestServer {
         type Error = russh::Error;
         async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-            if user == TEST_USER && password == TEST_PASSWORD { Ok(Auth::Accept) } else { Ok(Auth::reject()) }
+            if user == TEST_USER && password == TEST_PASSWORD {
+                Ok(Auth::Accept)
+            } else {
+                Ok(Auth::reject())
+            }
         }
-        async fn channel_open_session(&mut self, _: Channel<Msg>, reply: server::ChannelOpenHandle, _: &mut Session) -> Result<(), Self::Error> {
-            reply.accept().await; Ok(())
+        async fn channel_open_session(
+            &mut self,
+            _: Channel<Msg>,
+            reply: server::ChannelOpenHandle,
+            _: &mut Session,
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
         }
-        async fn pty_request(&mut self, channel: ChannelId, _: &str, _: u32, _: u32, _: u32, _: u32, _: &[(russh::Pty, u32)], session: &mut Session) -> Result<(), Self::Error> {
-            session.channel_success(channel)?; Ok(())
+        async fn pty_request(
+            &mut self,
+            channel: ChannelId,
+            _: &str,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: &[(russh::Pty, u32)],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            session.channel_success(channel)?;
+            Ok(())
         }
-        async fn shell_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
+        async fn shell_request(
+            &mut self,
+            channel: ChannelId,
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
             session.channel_success(channel)?;
             session.data(channel, b"\x1b[32mtester@host\x1b[0m:~$ ".to_vec())?;
             Ok(())
         }
-        async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
-            let reply = if data == [3] { "^C\r\n".into() }
-            else { format!("{}iperf3 3.16\r\n", String::from_utf8_lossy(data).trim_end_matches('\n')) };
+        async fn data(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            let reply = if data == [3] {
+                "^C\r\n".into()
+            } else {
+                format!(
+                    "{}iperf3 3.16\r\n",
+                    String::from_utf8_lossy(data).trim_end_matches('\n')
+                )
+            };
             session.data(channel, reply.into_bytes())?;
             Ok(())
         }
     }
 
     async fn start_test_server() -> u16 {
-        let key = russh::keys::PrivateKey::random(&mut TestRng(0x5eed), russh::keys::Algorithm::Ed25519).unwrap();
-        let config = Arc::new(server::Config { auth_rejection_time: Duration::from_millis(50), keys: vec![key], ..Default::default() });
-        let socket = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let key =
+            russh::keys::PrivateKey::random(&mut TestRng(0x5eed), russh::keys::Algorithm::Ed25519)
+                .unwrap();
+        let config = Arc::new(server::Config {
+            auth_rejection_time: Duration::from_millis(50),
+            keys: vec![key],
+            ..Default::default()
+        });
+        let socket = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = socket.local_addr().unwrap().port();
-        tokio::spawn(async move { let mut srv = TestServer; let _ = srv.run_on_socket(config, &socket).await; });
+        tokio::spawn(async move {
+            let mut srv = TestServer;
+            let _ = srv.run_on_socket(config, &socket).await;
+        });
         port
     }
 
     fn request(port: u16, password: &str) -> SshRequest {
-        SshRequest { host: "127.0.0.1".into(), port, username: TEST_USER.into(), auth_method: "password".into(), password: password.into(), private_key_path: String::new(), passphrase: String::new(), cols: 100, rows: 30 }
+        SshRequest {
+            host: "127.0.0.1".into(),
+            port,
+            username: TEST_USER.into(),
+            auth_method: "password".into(),
+            password: password.into(),
+            private_key_path: String::new(),
+            passphrase: String::new(),
+            cols: 100,
+            rows: 30,
+        }
     }
 
     struct Harness {
@@ -354,17 +570,45 @@ mod tests {
         let scrollback = Arc::new(Mutex::new(SshScrollback::default()));
         let (input, rx) = mpsc::unbounded_channel();
         let locale = Arc::new(RwLock::new("en".to_string()));
-        let task = tokio::spawn(run_session(sink, "test".into(), request, rx, scrollback.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)), locale));
-        Harness { events, scrollback, input, task }
+        let task = tokio::spawn(run_session(
+            sink,
+            "test".into(),
+            request,
+            rx,
+            scrollback.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            locale,
+        ));
+        Harness {
+            events,
+            scrollback,
+            input,
+            task,
+        }
     }
     impl Harness {
-        fn types(&self) -> Vec<String> { self.events.lock().unwrap().iter().map(|e| e.event_type.clone()).collect() }
-        fn console(&self) -> String { self.scrollback.lock().unwrap().text.clone() }
+        fn types(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|e| e.event_type.clone())
+                .collect()
+        }
+        fn console(&self) -> String {
+            self.scrollback.lock().unwrap().text.clone()
+        }
         async fn wait_for(&self, needle: &str) {
             let deadline = timeout(Duration::from_secs(15), async {
-                while !self.console().contains(needle) { sleep(Duration::from_millis(20)).await; }
+                while !self.console().contains(needle) {
+                    sleep(Duration::from_millis(20)).await;
+                }
             });
-            assert!(deadline.await.is_ok(), "未等到控制台输出 {needle:?}，当前内容：{:?}", self.console());
+            assert!(
+                deadline.await.is_ok(),
+                "未等到控制台输出 {needle:?}，当前内容：{:?}",
+                self.console()
+            );
         }
     }
 
@@ -375,17 +619,37 @@ mod tests {
         harness.wait_for("tester@host:~$ ").await;
         assert!(!harness.console().contains('\u{1b}'));
         assert!(harness.types().iter().any(|t| t == "status"));
-        harness.input.send(SshInput::Data(b"iperf3 --version\n".to_vec())).unwrap();
+        harness
+            .input
+            .send(SshInput::Data(b"iperf3 --version\n".to_vec()))
+            .unwrap();
         harness.wait_for("iperf3 3.16").await;
         assert!(harness.console().contains("iperf3 --version"));
         harness.input.send(SshInput::Data(vec![3])).unwrap();
         harness.wait_for("^C").await;
-        let offsets: Vec<u64> = harness.events.lock().unwrap().iter().filter_map(|e| e.offset).collect();
-        assert!(offsets.windows(2).all(|w| w[0] < w[1]), "offsets: {offsets:?}");
+        let offsets: Vec<u64> = harness
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.offset)
+            .collect();
+        assert!(
+            offsets.windows(2).all(|w| w[0] < w[1]),
+            "offsets: {offsets:?}"
+        );
         harness.input.send(SshInput::Close).unwrap();
         let Harness { task, events, .. } = harness;
-        timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
-        let types: Vec<String> = events.lock().unwrap().iter().map(|e| e.event_type.clone()).collect();
+        timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let types: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.event_type.clone())
+            .collect();
         assert_eq!(types.last().map(String::as_str), Some("closed"));
     }
 
@@ -393,10 +657,20 @@ mod tests {
     async fn reports_authentication_failure() {
         let port = start_test_server().await;
         let Harness { task, events, .. } = spawn_session(request(port, "wrong-password"));
-        timeout(Duration::from_secs(15), task).await.unwrap().unwrap();
+        timeout(Duration::from_secs(15), task)
+            .await
+            .unwrap()
+            .unwrap();
         let events = events.lock().unwrap();
         let last = events.last().expect("应至少产生一个事件");
         assert_eq!(last.event_type, "error");
-        assert!(last.message.as_deref().unwrap_or_default().contains("authentication failed"), "unexpected: {:?}", last.message);
+        assert!(
+            last.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("authentication failed"),
+            "unexpected: {:?}",
+            last.message
+        );
     }
 }

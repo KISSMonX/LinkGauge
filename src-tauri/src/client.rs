@@ -8,9 +8,7 @@ use crate::runner::{
     SessionLog,
 };
 use riperf3::{ClientBuilder, TransportProtocol};
-use std::{
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;
 use tokio::time::Duration;

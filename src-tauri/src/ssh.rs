@@ -153,8 +153,6 @@ pub(crate) enum HostKey {
     Unreadable(String),
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::{SshScrollback, SCROLLBACK_LIMIT};

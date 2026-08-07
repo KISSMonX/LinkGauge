@@ -2,17 +2,15 @@
 //!
 //! 从 runner.rs 拆分，使服务端逻辑可独立阅读。
 
-use crate::runner::{
-    append_engine_summary, append_log, current_locale, emit_log, fail_engine, finish_ok, task_label,
-    tr,
-};
 use crate::models::TestRequest;
+use crate::runner::{
+    append_engine_summary, append_log, current_locale, emit_log, fail_engine, finish_ok,
+    task_label, tr,
+};
 use riperf3::{ServerBuilder, Termination};
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex, RwLock,
-    },
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex, RwLock,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::sync::watch;

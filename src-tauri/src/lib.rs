@@ -46,15 +46,12 @@ async fn create_side_window(app: tauri::AppHandle, side: String) -> Result<(), S
         }
     );
     // 客户端/服务端窗口同尺寸（含测试概览与实时曲线的三栏布局）
-    let mut builder = tauri::WebviewWindowBuilder::new(
-        &app,
-        side,
-        tauri::WebviewUrl::App("index.html".into()),
-    )
-    .title(title)
-    .inner_size(1280.0, 820.0)
-    .min_inner_size(1000.0, 700.0)
-    .resizable(true);
+    let mut builder =
+        tauri::WebviewWindowBuilder::new(&app, side, tauri::WebviewUrl::App("index.html".into()))
+            .title(title)
+            .inner_size(1280.0, 820.0)
+            .min_inner_size(1000.0, 700.0)
+            .resizable(true);
     // 放在主窗口右下偏移处，避免与新窗口完全重叠；主窗口不存在时居中。
     // outer_position 返回物理像素坐标，按 DPI 缩放换算成逻辑坐标后再传给 position
     if let Some(main) = app.get_webview_window("main") {

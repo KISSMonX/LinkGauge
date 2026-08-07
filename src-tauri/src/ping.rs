@@ -8,11 +8,12 @@ use crate::runner::{
     append_log, current_locale, emit_log, emit_metric, fail_engine, finish_ok, task_label, tr,
 };
 use regex::Regex;
+use std::collections::HashSet;
+use std::process::Stdio;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, RwLock,
 };
-use std::process::Stdio;
 use tauri::AppHandle;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -20,7 +21,6 @@ use tokio::{
     sync::{mpsc, Mutex as AsyncMutex},
     time::{sleep, Duration},
 };
-use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // ping 任务（保留系统进程调用，riperf3 不支持 ICMP）
@@ -218,7 +218,8 @@ async fn read_lines<R: tokio::io::AsyncRead + Unpin>(
 /// 每次调用不再重新编译正则：ping 输出解析在热点路径上（ping 的 stdout 每行都调），
 /// 用 LazyLock 确保只编译一次。
 static PING_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"(?i)(?:time|时间)[=<＝]\s*(\d+(?:\.\d+)?)\s*ms").expect("ping time regex is statically valid")
+    Regex::new(r"(?i)(?:time|时间)[=<＝]\s*(\d+(?:\.\d+)?)\s*ms")
+        .expect("ping time regex is statically valid")
 });
 
 pub(crate) fn parse_ping_metric(line: &str, second: i64) -> Option<MetricPoint> {

@@ -48,9 +48,7 @@ impl fmt::Display for ValidationError {
             Self::IntervalRequired => "输出周期必须大于 0",
             Self::ServerIpRequired => "服务端地址不能为空",
             Self::InvalidPort => "端口无效",
-            Self::ServerAuthIncomplete => {
-                "启用认证后，RSA 私钥与授权用户文件路径均不能为空"
-            }
+            Self::ServerAuthIncomplete => "启用认证后，RSA 私钥与授权用户文件路径均不能为空",
             Self::OmitOnlyTimeMode => "预热（-O）仅支持按时长模式",
             Self::OmitTooLong => "预热时间必须小于测试时长",
             Self::WindowTooLarge { .. } => "套接字缓冲区不能超过 16MB",
