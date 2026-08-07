@@ -228,10 +228,12 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
             );
             append_log(&log, &format!("[INFO] {connected}"));
             emit_log(&app, &session_id, &task_id, "INFO", connected);
-            let payload = format!(
-                r#"{{"serving":true,"peerIp":"{}","peerPort":{}}}"#,
-                host, port
-            );
+            let payload = serde_json::json!({
+                "serving": true,
+                "peerIp": host,
+                "peerPort": port
+            })
+            .to_string();
             let _ = app.emit(
                 "test-event",
                 crate::models::TestEvent {
@@ -374,27 +376,33 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
                 append_log(&log, &format!("[INFO] {message}"));
                 emit_log(&app, &session_id, &task_id, "INFO", message);
                 // 结构化统计事件：供服务端窗口的概览与实时曲线使用（携带当前测试的间隔统计与最近客户端地址）
-                let stats = match &snapshot {
-                    Some(s) => format!(
-                        r#","bandwidthMbps":{},"transferMb":{},"jitterMs":{},"lossPercent":{},"retransmits":{}"#,
-                        safe_f64(s.bandwidth_mbps),
-                        safe_f64(s.transfer_mb),
-                        safe_f64(s.jitter_ms),
-                        safe_f64(s.loss_percent),
-                        s.retransmits
-                    ),
-                    None => String::new(),
-                };
-                let peer = match &snapshot {
-                    Some(s) if !s.peer_ip.is_empty() => {
-                        format!(r#","peerIp":"{}","peerPort":{}"#, s.peer_ip, s.peer_port)
+                let mut payload = serde_json::json!({
+                    "uptime": uptime,
+                    "completed": done,
+                    "serving": is_serving,
+                });
+                if let Some(s) = &snapshot {
+                    let obj = payload.as_object_mut().unwrap();
+                    obj.insert(
+                        "bandwidthMbps".into(),
+                        serde_json::json!(safe_f64(s.bandwidth_mbps)),
+                    );
+                    obj.insert(
+                        "transferMb".into(),
+                        serde_json::json!(safe_f64(s.transfer_mb)),
+                    );
+                    obj.insert("jitterMs".into(), serde_json::json!(safe_f64(s.jitter_ms)));
+                    obj.insert(
+                        "lossPercent".into(),
+                        serde_json::json!(safe_f64(s.loss_percent)),
+                    );
+                    obj.insert("retransmits".into(), serde_json::json!(s.retransmits));
+                    if !s.peer_ip.is_empty() {
+                        obj.insert("peerIp".into(), serde_json::json!(s.peer_ip));
+                        obj.insert("peerPort".into(), serde_json::json!(s.peer_port));
                     }
-                    _ => String::new(),
-                };
-                let payload = format!(
-                    r#"{{"uptime":{},"completed":{},"serving":{}{}{}}}"#,
-                    uptime, done, is_serving, stats, peer
-                );
+                }
+                let payload = payload.to_string();
                 let _ = app.emit(
                     "test-event",
                     crate::models::TestEvent {
