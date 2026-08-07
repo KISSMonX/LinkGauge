@@ -54,7 +54,7 @@
 - 按测试任务保存日志，文件名区分完成和未完成状态
 - 测试安全中止（无未完成队列恢复，每次开始即全新测试）
 - JSON 配置导入、导出和本地保存
-- HTML、PDF 测试报告
+- HTML 测试报告，以及通过系统原生打印窗口输出的 PDF（两者共用相同图表和表格）
 - 纯 Rust riperf3 引擎：与标准 iperf3 服务端互通，无运行时外部依赖
 - iperf3 双向认证支持——客户端提供用户名 / 密码 / RSA 公钥（兼容 3.17 前的 PKCS#1 填充）；服务端模式可用自己的 RSA 私钥 + 授权用户文件要求客户端凭据；密码不落盘
 - CI 自动检查与打标签发布：Windows x64、macOS x64 / arm64、Linux x64 / arm64
@@ -108,7 +108,7 @@ flowchart LR
 | `get_network_interfaces` | 枚举所有 up 状态的 IPv4 接口（含 MAC 地址和链路速率） |
 | `get_custom_packet_length` | 从设置文件读取持久化的自定义报文长度 |
 | `save_custom_packet_length` | 校验并持久化自定义报文长度到设置文件 |
-| `generate_report` | 在应用数据目录中生成 HTML 或 PDF 报告 |
+| `generate_report` | 保存 HTML 报告，或打开适合打印的同版内容以输出 PDF |
 | `ssh_connect` | 连接远端主机并打开带 PTY 的交互式 shell |
 | `ssh_send` | 向远端 shell 写入数据（命令文本、`Ctrl+C` 等） |
 | `ssh_resize` | 按控制台可视区域同步远端 PTY 尺寸 |
@@ -347,7 +347,7 @@ macOS 与 Linux 上必须显式传 `--bundles`，因为 `tauri.conf.json` 的 `b
 3. 客户端模式下填写服务端地址、端口、测试时间及协议参数。
 4. 开始测试，在任务队列、实时曲线、统计信息和日志区域查看执行状态。
 5. 必要时停止测试。中途失败的测试项目可在日志和报告中查看原因。
-6. 一个或多个项目完成后，可生成 HTML 或 PDF 报告。
+6. 一个或多个项目完成后，可生成 HTML 报告；选择 PDF 时，在系统原生打印窗口中选择“保存为 PDF”。
 
 ### 通过 SSH 操作对端服务端
 
@@ -375,7 +375,7 @@ macOS 与 Linux 上必须显式传 `--bundles`，因为 `tauri.conf.json` 的 `b
 - 配置支持 JSON 导入和导出。
 - “保存设置”将客户端与服务端参数自动写入本地 WebView 存储。
 - 测试日志保存在 Tauri 对应操作系统的应用日志目录下的 `tests/`。
-- 报告保存在 Tauri 对应操作系统的应用数据目录下的 `reports/`。
+- HTML 报告默认保存在 Tauri 对应操作系统的应用数据目录 `reports/` 下；PDF 报告保存到系统打印窗口中选择的位置。
 - 自定义报文长度持久化到 Tauri 应用配置目录下的 `settings.json`。
 - SSH 连接参数（主机、端口、用户名、认证方式、私钥路径）与其他设置一同持久化；登录密码与私钥口令**不保存**——与 iperf3 认证密码一样只存在于内存，不写入导出的配置，重启后需重新输入。
 

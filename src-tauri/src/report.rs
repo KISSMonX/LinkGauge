@@ -2,11 +2,14 @@ use crate::models::{MetricPoint, ReportRequest};
 use chrono::Local;
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::fs;
 
 #[tauri::command]
 pub async fn generate_report(app: AppHandle, request: ReportRequest) -> Result<String, String> {
+    if request.format.eq_ignore_ascii_case("pdf") {
+        return print_html(app, &request).await;
+    }
     let dir = app
         .path()
         .app_data_dir()
@@ -20,7 +23,6 @@ pub async fn generate_report(app: AppHandle, request: ReportRequest) -> Result<S
     let requested = request.save_path.as_deref().map(PathBuf::from).or_else(|| {
         match request.format.to_lowercase().as_str() {
             "html" => Some(dir.join(format!("linkgauge-report-{stamp}.html"))),
-            "pdf" => Some(dir.join(format!("linkgauge-report-{stamp}.pdf"))),
             _ => None,
         }
     });
@@ -29,7 +31,6 @@ pub async fn generate_report(app: AppHandle, request: ReportRequest) -> Result<S
     };
     match request.format.to_lowercase().as_str() {
         "html" => write_html(path, &request).await,
-        "pdf" => write_pdf(path, &request).await,
         _ => Err("报告格式仅支持 HTML 或 PDF".into()),
     }
 }
@@ -74,6 +75,72 @@ pub async fn open_report_dir(app: AppHandle) -> Result<String, String> {
 }
 
 async fn write_html(path: PathBuf, request: &ReportRequest) -> Result<String, String> {
+    let html = render_html(request);
+    fs::write(&path, html)
+        .await
+        .map_err(|e| format!("写入 HTML 报告失败：{e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// PDF 直接复用 HTML 渲染结果，由系统 WebView 的打印引擎完成分页与 PDF 输出。
+/// 不调用 Chrome/wkhtmltopdf 等外部程序，保持安装包不依赖外部可执行文件。
+async fn print_html(app: AppHandle, request: &ReportRequest) -> Result<String, String> {
+    let is_en = request.locale == "en";
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("print");
+    fs::create_dir_all(&dir).await.map_err(|e| {
+        if is_en {
+            format!("Failed to create the print cache directory: {e}")
+        } else {
+            format!("无法创建打印缓存目录：{e}")
+        }
+    })?;
+    let path = dir.join("linkgauge-report-print.html");
+    let html = render_html(request).replace(
+        "</body>",
+        r#"<script>addEventListener('load',()=>setTimeout(()=>window.print(),250));</script></body>"#,
+    );
+    fs::write(&path, html).await.map_err(|e| {
+        if is_en {
+            format!("Failed to prepare the PDF print page: {e}")
+        } else {
+            format!("无法准备 PDF 打印页面：{e}")
+        }
+    })?;
+    let url = tauri::Url::from_file_path(&path).map_err(|_| {
+        if is_en {
+            format!("Failed to open the print page: {}", path.to_string_lossy())
+        } else {
+            format!("无法打开打印页面：{}", path.to_string_lossy())
+        }
+    })?;
+    if let Some(window) = app.get_webview_window("report-print") {
+        window.destroy().map_err(|e| e.to_string())?;
+    }
+    WebviewWindowBuilder::new(&app, "report-print", WebviewUrl::External(url))
+        .title(if request.locale == "en" {
+            "LinkGauge Report · Print / Save as PDF"
+        } else {
+            "LinkGauge 报告 · 打印 / 保存为 PDF"
+        })
+        .inner_size(1100.0, 820.0)
+        .min_inner_size(800.0, 600.0)
+        .center()
+        .build()
+        .map_err(|e| {
+            if is_en {
+                format!("Failed to open the PDF print window: {e}")
+            } else {
+                format!("无法打开 PDF 打印窗口：{e}")
+            }
+        })?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn render_html(request: &ReportRequest) -> String {
     let logs = request
         .logs
         .iter()
@@ -115,7 +182,7 @@ async fn write_html(path: PathBuf, request: &ReportRequest) -> Result<String, St
     };
     let html = if is_en {
         format!(
-            r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>LinkGauge Test Report</title><style>body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}table.kv th,table.kv td{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}</style></head><body><h1>LinkGauge Test Report</h1><p>Generated: {}</p>{}{}{}<section><h2>Run Logs</h2><div class="logs">{}</div></section></body></html>"#,
+            r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>LinkGauge Test Report</title><style>@page{{size:A4;margin:12mm}}body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0;break-inside:avoid}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}table.kv th,table.kv td{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}@media print{{body{{max-width:none;margin:0}}.logs{{max-height:none;overflow:visible}}}}</style></head><body><h1>LinkGauge Test Report</h1><p>Generated: {}</p>{}{}{}<section><h2>Run Logs</h2><div class="logs">{}</div></section></body></html>"#,
             Local::now().format("%Y-%m-%d %H:%M:%S"),
             config_section,
             stats_section,
@@ -124,7 +191,7 @@ async fn write_html(path: PathBuf, request: &ReportRequest) -> Result<String, St
         )
     } else {
         format!(
-            r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>LinkGauge 测试报告</title><style>body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}table.kv th,table.kv td{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}</style></head><body><h1>LinkGauge 测试报告</h1><p>生成时间：{}</p>{}{}{}<section><h2>执行日志</h2><div class="logs">{}</div></section></body></html>"#,
+            r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>LinkGauge 测试报告</title><style>@page{{size:A4;margin:12mm}}body{{font:14px Arial,'Microsoft YaHei';max-width:1000px;margin:35px auto;color:#172033}}h1{{color:#096edc}}section{{border:1px solid #dce2ea;border-radius:8px;padding:18px;margin:16px 0;break-inside:avoid}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e5e9ef;text-align:right}}th:first-child,td:first-child{{text-align:left}}table.kv th,table.kv td{{text-align:left}}.logs{{font:12px Consolas;max-height:360px;overflow:auto}}@media print{{body{{max-width:none;margin:0}}.logs{{max-height:none;overflow:visible}}}}</style></head><body><h1>LinkGauge 测试报告</h1><p>生成时间：{}</p>{}{}{}<section><h2>执行日志</h2><div class="logs">{}</div></section></body></html>"#,
             Local::now().format("%Y-%m-%d %H:%M:%S"),
             config_section,
             stats_section,
@@ -132,87 +199,7 @@ async fn write_html(path: PathBuf, request: &ReportRequest) -> Result<String, St
             logs
         )
     };
-    fs::write(&path, html)
-        .await
-        .map_err(|e| format!("写入 HTML 报告失败：{e}"))?;
-    Ok(path.to_string_lossy().to_string())
-}
-
-async fn write_pdf(path: PathBuf, request: &ReportRequest) -> Result<String, String> {
-    let avg = request
-        .summary
-        .get("averageBandwidth")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let max = request
-        .summary
-        .get("maxBandwidth")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let loss = request
-        .summary
-        .get("lossPercent")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let mut lines = vec![
-        "LinkGauge Test Report".to_string(),
-        format!("Generated: {}", Local::now().format("%Y-%m-%d %H:%M:%S")),
-        format!("Average bandwidth: {avg:.2} Mbps"),
-        format!("Maximum bandwidth: {max:.2} Mbps"),
-        format!("Packet loss: {loss:.2}%"),
-        format!("Samples: {}", request.points.len()),
-        format!("Log entries: {}", request.logs.len()),
-    ];
-    // 按测试项目逐项输出汇总行（纯文本 PDF 不含曲线；每项一行，A4 单页可容纳）
-    if !request.items.is_empty() {
-        lines.push(String::new());
-        for item in &request.items {
-            let n = item.points.len();
-            let item_avg = if n > 0 {
-                item.points.iter().map(|p| p.bandwidth_mbps).sum::<f64>() / n as f64
-            } else {
-                0.0
-            };
-            lines.push(format!(
-                "{} ({}): {n} samples, avg {item_avg:.2} Mbps",
-                item.label,
-                status_word(&item.status, true)
-            ));
-        }
-    }
-    let content = lines
-        .iter()
-        .enumerate()
-        .map(|(i, l)| {
-            format!(
-                "BT /F1 {} Tf 55 {} Td ({}) Tj ET\n",
-                if i == 0 { 20 } else { 12 },
-                780 - (i as i32 * 32),
-                pdf_escape(l)
-            )
-        })
-        .collect::<String>();
-    let mut objects = [String::new(), "<< /Type /Catalog /Pages 2 0 R >>".into(), "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".into(), format!("<< /Length {} >>\nstream\n{}endstream", content.len(), content), "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into()];
-    let mut pdf = "%PDF-1.4\n".to_string();
-    let mut offsets = vec![0usize];
-    for (i, obj) in objects.iter_mut().enumerate().skip(1) {
-        offsets.push(pdf.len());
-        pdf.push_str(&format!("{} 0 obj\n{}\nendobj\n", i, obj));
-    }
-    let xref = pdf.len();
-    pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len()));
-    for offset in offsets.iter().skip(1) {
-        pdf.push_str(&format!("{:010} 00000 n \n", offset));
-    }
-    pdf.push_str(&format!(
-        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF",
-        objects.len(),
-        xref
-    ));
-    fs::write(&path, pdf.as_bytes())
-        .await
-        .map_err(|e| format!("写入 PDF 报告失败：{e}"))?;
-    Ok(path.to_string_lossy().to_string())
+    html
 }
 fn escape_html(value: &str) -> String {
     value
@@ -527,17 +514,11 @@ fn svg_curve(points: &[MetricPoint], is_en: bool) -> String {
     )
 }
 
-fn pdf_escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('(', "\\(")
-        .replace(')', "\\)")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::svg_curve;
-    use crate::models::MetricPoint;
+    use super::{render_html, svg_curve};
+    use crate::models::{MetricPoint, ReportItem, ReportRequest};
+    use serde_json::json;
 
     #[test]
     fn single_sample_curve_renders_a_visible_point() {
@@ -551,5 +532,32 @@ mod tests {
         );
         assert!(svg.contains("<circle"));
         assert!(svg.contains("100.0"));
+    }
+
+    #[test]
+    fn html_report_contains_print_layout_and_chart() {
+        let request = ReportRequest {
+            format: "pdf".into(),
+            save_path: None,
+            locale: "en".into(),
+            config: json!({}),
+            summary: json!({}),
+            points: Vec::new(),
+            items: vec![ReportItem {
+                label: "TCP Bandwidth".into(),
+                status: "success".into(),
+                points: vec![MetricPoint {
+                    second: 1,
+                    bandwidth_mbps: 100.0,
+                    ..Default::default()
+                }],
+            }],
+            logs: Vec::new(),
+        };
+
+        let html = render_html(&request);
+        assert!(html.contains("@page{size:A4"));
+        assert!(html.contains("<svg"));
+        assert!(html.contains("<circle"));
     }
 }

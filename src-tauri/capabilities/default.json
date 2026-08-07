@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default desktop capability",
-  "windows": ["main", "client", "server"],
-  "permissions": ["core:default", "core:window:allow-destroy", "dialog:default"]
+  "windows": ["main", "client", "server", "report-print"],
+  "permissions": ["core:default", "core:webview:allow-print", "core:window:allow-destroy", "dialog:default"]
 }

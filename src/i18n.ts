@@ -104,6 +104,7 @@ const zh = {
 
   // 报告 / 预览模式
   'report.generated': '报告已生成',
+  'report.printOpened': '已打开系统打印窗口，请选择“保存为 PDF”并指定文件位置',
   'report.saveTitle': '保存测试报告',
   'report.exported': '配置已导出',
   'preview.title': '预览模式',
@@ -514,6 +515,7 @@ const en: Record<MessageKey, string> = {
   'confirm.exitButton': 'Quit',
 
   'report.generated': 'Report generated',
+  'report.printOpened': 'The system print dialog is open. Choose “Save as PDF” and select a destination.',
   'report.saveTitle': 'Save Test Report',
   'report.exported': 'Config exported',
   'preview.title': 'Preview mode',
