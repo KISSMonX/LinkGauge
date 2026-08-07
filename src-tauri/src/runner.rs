@@ -745,48 +745,61 @@ pub(crate) async fn finish_engine<R: tauri::Runtime>(
                 .map(|s| s.end.ceil().max(1.0) as i64)
                 .unwrap_or(request.duration.max(1) as i64);
             emit_final_summary(app, session_id, task_id, report, measured_end);
-            match outcome.termination {
-                Termination::Completed => {
-                    append_log(log, tr(locale, "测试结果: 完成", "Result: completed"));
-                    finish_ok(app, session_id, task_id, log, "success").await;
-                    ClientTaskResult::Success
-                }
-                Termination::Interrupted => {
-                    append_log(log, tr(locale, "测试结果: 手动停止", "Result: manual stop"));
-                    finish_ok(app, session_id, task_id, log, "stopped").await;
-                    ClientTaskResult::Stopped
-                }
-                Termination::ServerTerminated => {
-                    let message = tr(
-                        locale,
-                        "服务端主动终止了测试",
-                        "The server terminated the test",
-                    )
-                    .to_string();
-                    fail_engine(app, session_id, task_id, log, locale, &message, false).await;
-                    ClientTaskResult::Failed
-                }
-                Termination::ServerError(msg) => {
-                    let message = tr_format!(
-                        locale,
-                        "服务端返回错误：{}",
-                        "Server returned an error: {}",
-                        msg
-                    );
-                    fail_engine(app, session_id, task_id, log, locale, &message, false).await;
-                    ClientTaskResult::Failed
-                }
-                other => {
-                    let message = tr_format!(
-                        locale,
-                        "测试异常结束：{:?}",
-                        "Test ended abnormally: {:?}",
-                        other
-                    );
-                    fail_engine(app, session_id, task_id, log, locale, &message, false).await;
-                    ClientTaskResult::Failed
-                }
-            }
+            return dispatch_finish(app, session_id, task_id, log, locale, outcome.termination)
+                .await;
+        }
+    }
+}
+
+/// 按测试终止原因分发到对应的结果处理路径。
+async fn dispatch_finish<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    task_id: &str,
+    log: &SessionLog,
+    locale: &str,
+    termination: Termination,
+) -> ClientTaskResult {
+    match termination {
+        Termination::Completed => {
+            append_log(log, tr(locale, "测试结果: 完成", "Result: completed"));
+            finish_ok(app, session_id, task_id, log, "success").await;
+            ClientTaskResult::Success
+        }
+        Termination::Interrupted => {
+            append_log(log, tr(locale, "测试结果: 手动停止", "Result: manual stop"));
+            finish_ok(app, session_id, task_id, log, "stopped").await;
+            ClientTaskResult::Stopped
+        }
+        Termination::ServerTerminated => {
+            let message = tr(
+                locale,
+                "服务端主动终止了测试",
+                "The server terminated the test",
+            )
+            .to_string();
+            fail_engine(app, session_id, task_id, log, locale, &message, false).await;
+            ClientTaskResult::Failed
+        }
+        Termination::ServerError(msg) => {
+            let message = tr_format!(
+                locale,
+                "服务端返回错误：{}",
+                "Server returned an error: {}",
+                msg
+            );
+            fail_engine(app, session_id, task_id, log, locale, &message, false).await;
+            ClientTaskResult::Failed
+        }
+        other => {
+            let message = tr_format!(
+                locale,
+                "测试异常结束：{:?}",
+                "Test ended abnormally: {:?}",
+                other
+            );
+            fail_engine(app, session_id, task_id, log, locale, &message, false).await;
+            ClientTaskResult::Failed
         }
     }
 }
