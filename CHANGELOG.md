@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0](https://github.com/KISSMonX/LinkGauge/compare/v0.2.1...v0.3.0) (2026-08-07)
+
+
+### Features
+
+* **error:** make ValidationError messages bilingual (zh/en) ([a19d6dc](https://github.com/KISSMonX/LinkGauge/commit/a19d6dc9df00641fc3e54e53479227cf75d889c9))
+
+
+### Bug Fixes
+
+* **clippy:** group extracted function args into context structs to satisfy too_many_arguments ([d18d44d](https://github.com/KISSMonX/LinkGauge/commit/d18d44d3fe591367292d2c278f4d8789620549da))
+* drain ping output on child exit, log rename failures, handle NaN in reports, atomic settings write, PID guard ([1c860b3](https://github.com/KISSMonX/LinkGauge/commit/1c860b3234c00cb26aa0617edcc677c4499479e2))
+* prevent heartbeat orphan on panic, log silent catch blocks, retry window sync ([26b452a](https://github.com/KISSMonX/LinkGauge/commit/26b452ac24238e8ecfeedab33653ce704d0aac0b))
+* **runner:** eliminate Notify race between stop_test and spawn cleanup ([b269d25](https://github.com/KISSMonX/LinkGauge/commit/b269d25cc8c7c43da9ad5436dbb757cd7f6bc9c0))
+* **settings:** log warning when settings.json is corrupt instead of silently resetting ([9591b7d](https://github.com/KISSMonX/LinkGauge/commit/9591b7d9c84c2f2d9179f597796acff93e46b99f))
+* **test:** add server-ready delay in congestion_control_works_end_to_end to prevent flaky CI failures on Ubuntu ([d82ccb8](https://github.com/KISSMonX/LinkGauge/commit/d82ccb8aba34be0d69784e2b4f8e2b9ee96dfda7))
+
+
+### Performance Improvements
+
+* **client:** compute client_params_for once instead of four times in run_engine_client ([15239b5](https://github.com/KISSMonX/LinkGauge/commit/15239b5edb1552d69b854d6f2eda0eb6f8b08857))
+* **runner:** cache ping regex with LazyLock to avoid recompilation on every line ([690d807](https://github.com/KISSMonX/LinkGauge/commit/690d807af63309cd184606b3b94b07c2ffd6b6da))
+
 ## [0.2.1](https://github.com/KISSMonX/LinkGauge/compare/v0.3.0...v0.2.1) (2026-08-07)
 
 
