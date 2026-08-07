@@ -4,6 +4,7 @@
 //! （启动 / 中断 / 查看进程等），远端输出实时回传给前端控制台。
 //! 使用纯 Rust 的 russh 实现，不依赖系统 ssh 客户端，与 riperf3 引擎一样零外部依赖。
 
+pub(crate) use crate::runner::tr;
 use crate::runner::{current_locale, AppState};
 use crate::ssh_session::{run_session, tauri_sink};
 use serde::{Deserialize, Serialize};
@@ -18,15 +19,6 @@ use std::{
 use tauri::{AppHandle, State};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use uuid::Uuid;
-
-/// 按界面语言选择消息文案（locale 为空时默认中文），与 runner 保持一致
-pub(crate) fn tr<'a>(locale: &str, zh: &'a str, en: &'a str) -> &'a str {
-    if locale == "en" {
-        en
-    } else {
-        zh
-    }
-}
 
 /// 连接超时：DNS 解析 + TCP 握手 + SSH 协商
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
