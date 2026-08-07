@@ -336,56 +336,51 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
         request.bind_ip.clone()
     };
     let port = request.port;
-    let heartbeat = tauri::async_runtime::spawn(server_heartbeat(
-        log.clone(),
-        app.clone(),
-        session_id.clone(),
-        request.task_id.clone(),
-        completed.clone(),
-        serving.clone(),
-        latest.clone(),
-        locale_handle.clone(),
+    let heartbeat = tauri::async_runtime::spawn(server_heartbeat(HeartbeatCtx {
+        log: log.clone(),
+        app: app.clone(),
+        session_id: session_id.clone(),
+        task_id: request.task_id.clone(),
+        completed: completed.clone(),
+        serving: serving.clone(),
+        latest: latest.clone(),
+        locale_handle: locale_handle.clone(),
         interval_secs,
         bind_short,
         port,
-    ));
+    }));
 
     loop {
         // 每次迭代实时读取界面语言（切换语言后服务端日志立即跟随）
         let locale = current_locale(&locale_handle);
         match bound.run_once().await {
             Ok(outcome) => {
-                if !handle_server_connection(
-                    &app,
-                    &session_id,
-                    &request.task_id,
-                    &log,
-                    &locale,
-                    outcome,
-                    &serving,
-                    &completed,
-                    &latest,
-                    &heartbeat,
-                )
-                .await
-                {
+                let ctx = ServerListenCtx {
+                    app: &app,
+                    session_id: &session_id,
+                    task_id: &request.task_id,
+                    log: &log,
+                    locale: &locale,
+                    serving: &serving,
+                    latest: &latest,
+                    heartbeat: &heartbeat,
+                };
+                if !handle_server_connection(ctx, outcome, &completed).await {
                     return;
                 }
             }
             Err(error) => {
-                if !handle_server_listen_error(
-                    &app,
-                    &session_id,
-                    &request.task_id,
-                    &log,
-                    &locale,
-                    error,
-                    &serving,
-                    &latest,
-                    &heartbeat,
-                )
-                .await
-                {
+                let ctx = ServerListenCtx {
+                    app: &app,
+                    session_id: &session_id,
+                    task_id: &request.task_id,
+                    log: &log,
+                    locale: &locale,
+                    serving: &serving,
+                    latest: &latest,
+                    heartbeat: &heartbeat,
+                };
+                if !handle_server_listen_error(ctx, error).await {
                     return;
                 }
             }
@@ -397,8 +392,8 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
 // 辅助函数：从 run_engine_server 拆分，降低函数圈复杂度
 // ---------------------------------------------------------------------------
 
-/// 周期性心跳：按 interval_secs 间隔输出服务端运行状态日志与统计事件。
-async fn server_heartbeat<R: tauri::Runtime>(
+/// 心跳任务的上下文（参数过多，用 struct 满足 clippy::too_many_arguments）。
+struct HeartbeatCtx<R: tauri::Runtime> {
     log: SessionLog,
     app: AppHandle<R>,
     session_id: String,
@@ -410,7 +405,35 @@ async fn server_heartbeat<R: tauri::Runtime>(
     interval_secs: u64,
     bind_short: String,
     port: u16,
-) {
+}
+
+/// 服务端监听结果处理器的上下文（参数过多，用 struct 满足 clippy）。
+struct ServerListenCtx<'a, R: tauri::Runtime> {
+    app: &'a AppHandle<R>,
+    session_id: &'a str,
+    task_id: &'a str,
+    log: &'a SessionLog,
+    locale: &'a str,
+    serving: &'a AtomicBool,
+    latest: &'a Mutex<Option<ServerInterval>>,
+    heartbeat: &'a tauri::async_runtime::JoinHandle<()>,
+}
+
+/// 周期性心跳：按 interval_secs 间隔输出服务端运行状态日志与统计事件。
+async fn server_heartbeat<R: tauri::Runtime>(ctx: HeartbeatCtx<R>) {
+    let HeartbeatCtx {
+        log,
+        app,
+        session_id,
+        task_id,
+        completed,
+        serving,
+        latest,
+        locale_handle,
+        interval_secs,
+        bind_short,
+        port,
+    } = ctx;
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     ticker.tick().await; // 跳过立即触发的第一次
     let started = std::time::Instant::now();
@@ -487,17 +510,20 @@ async fn server_heartbeat<R: tauri::Runtime>(
 
 /// 处理一次成功的服务端连接测试结果。返回 `true` 表示继续监听。
 async fn handle_server_connection<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    session_id: &str,
-    task_id: &str,
-    log: &SessionLog,
-    locale: &str,
+    ctx: ServerListenCtx<'_, R>,
     outcome: RunOutcome,
-    serving: &AtomicBool,
     completed: &AtomicU64,
-    latest: &Mutex<Option<ServerInterval>>,
-    heartbeat: &tauri::async_runtime::JoinHandle<()>,
 ) -> bool {
+    let ServerListenCtx {
+        app,
+        session_id,
+        task_id,
+        log,
+        locale,
+        serving,
+        latest,
+        heartbeat,
+    } = ctx;
     serving.store(false, Ordering::Relaxed);
     completed.fetch_add(1, Ordering::Relaxed);
     // 记录本次连接的客户端地址（服务端概览"对端=客户端"的数据源）
@@ -569,16 +595,19 @@ async fn handle_server_connection<R: tauri::Runtime>(
 
 /// 处理服务端监听循环中的错误。返回 `true` 表示继续监听。
 async fn handle_server_listen_error<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    session_id: &str,
-    task_id: &str,
-    log: &SessionLog,
-    locale: &str,
+    ctx: ServerListenCtx<'_, R>,
     error: RiperfError,
-    serving: &AtomicBool,
-    latest: &Mutex<Option<ServerInterval>>,
-    heartbeat: &tauri::async_runtime::JoinHandle<()>,
 ) -> bool {
+    let ServerListenCtx {
+        app,
+        session_id,
+        task_id,
+        log,
+        locale,
+        serving,
+        latest,
+        heartbeat,
+    } = ctx;
     serving.store(false, Ordering::Relaxed);
     *latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
     // 空闲时收到停止信号返回 Aborted，正常退出；idle_timeout 到期

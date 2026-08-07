@@ -58,6 +58,13 @@ fn spawn_ping(args: &[String]) -> Result<PingChild, String> {
     Ok(PingChild { child, rx, pid })
 }
 
+/// ping 子进程退出原因。
+struct PingExit {
+    success: bool,
+    stopped: bool,
+    timed_out: bool,
+}
+
 /// 处理 ping 退出结果：清理 PID、记录结果日志、发送结束事件。
 async fn finalize_ping<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -65,11 +72,9 @@ async fn finalize_ping<R: tauri::Runtime>(
     task_id: &str,
     log: &crate::runner::SessionLog,
     locale: &str,
-    final_success: bool,
-    final_stopped: bool,
-    final_timed_out: bool,
+    exit: PingExit,
 ) -> ClientTaskResult {
-    if final_timed_out {
+    if exit.timed_out {
         let message = tr(
             locale,
             "Ping 超过后端硬时限，已终止并继续下一项",
@@ -77,10 +82,10 @@ async fn finalize_ping<R: tauri::Runtime>(
         );
         fail_engine(app, session_id, task_id, log, locale, message, false).await;
         ClientTaskResult::Failed
-    } else if final_stopped {
+    } else if exit.stopped {
         finish_ok(app, session_id, task_id, log, "stopped").await;
         ClientTaskResult::Stopped
-    } else if final_success {
+    } else if exit.success {
         finish_ok(app, session_id, task_id, log, "success").await;
         ClientTaskResult::Success
     } else {
@@ -215,9 +220,11 @@ pub(crate) async fn run_ping<R: tauri::Runtime>(
         &request.task_id,
         &log,
         &locale,
-        final_success,
-        final_stopped,
-        final_timed_out,
+        PingExit {
+            success: final_success,
+            stopped: final_stopped,
+            timed_out: final_timed_out,
+        },
     )
     .await
 }
