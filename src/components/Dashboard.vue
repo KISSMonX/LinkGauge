@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { NetworkInfo, ServerConfig, TestConfig, TestItem, MetricPoint, TestSummary } from '../types'
-import { useI18n, type MessageKey } from '../i18n'
+import { itemLabel, useI18n } from '../i18n'
 import { formatBandwidth, formatTransfer } from '../format'
 import BandwidthChart from './BandwidthChart.vue'
 
@@ -14,7 +14,6 @@ const chartTitle = computed(() => {
   const label = props.current ? itemLabel(props.current.id) : (props.completedLabel || t('cfg.item.tcp-single'))
   return props.live ? t('dash.liveChart', { label }) : t('dash.doneChart', { label })
 })
-const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 </script>
 
 <template>

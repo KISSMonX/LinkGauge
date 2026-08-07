@@ -14,7 +14,7 @@ import SshConsole from './components/SshConsole.vue'
 import StatusPanel from './components/StatusPanel.vue'
 import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
-import { useI18n, type Locale, type MessageKey } from './i18n'
+import { itemLabel, useI18n, type Locale } from './i18n'
 import { theme, setTheme, type Theme } from './theme'
 import { clearTerminal } from './terminal'
 import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, NetworkSnapshot, ServerConfig, SshConfig, SshEvent, SyncState, TestConfig, TestItem, TestSummary } from './types'
@@ -22,7 +22,6 @@ import { useServer } from './composables/useServer'
 import { useSshConsole } from './composables/useSshConsole'
 
 const { t, locale, setLocale } = useI18n()
-const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 
 const defaults: TestConfig = { mode: 'client', serverIp: '', port: 5201, duration: 30, parallel: 4, bandwidth: -1, packetLength: 131072, udpPacketLength: 1460, interval: 1, omitSecs: 0, windowKb: 0, cport: 0, ipVersion: 0, getServerOutput: false, transferMode: 'time', transferAmount: 100, dscp: 0, congestionAlgo: '', udpDontFragment: false, mptcp: false, authEnabled: false, authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false }
 const serverDefaults: ServerConfig = { port: 5201, bindIp: '', interval: 1, authEnabled: false, authPrivateKeyPath: '', authUsersPath: '', authPkcs1Padding: false, idleTimeout: 0, maxDuration: 0, bitrateLimit: 0 }

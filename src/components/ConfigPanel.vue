@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { NetworkInfo, ServerConfig, SshConfig, SshStatus, TestConfig, TestItem } from '../types'
-import { useI18n, type MessageKey } from '../i18n'
+import { itemLabel, useI18n, type MessageKey } from '../i18n'
 import { useTabDrag } from '../composables/useTabDrag'
 import { useTooltip } from '../composables/useTooltip'
 import Icon from './Icon.vue'
@@ -38,7 +38,6 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 /** 当前展示的一侧：分离窗口固定为 detached，主窗口跟随激活标签 */
 const visibleSide = computed<'client' | 'server'>(() => props.detached ?? props.tab)
 

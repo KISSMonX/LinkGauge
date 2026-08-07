@@ -834,6 +834,11 @@ export function t(key: MessageKey, vars?: Record<string, string | number>): stri
   return text.replace(/\{(\w+)\}/g, (_, name: string) => String(vars[name] ?? `{${name}}`))
 }
 
+/** Shared i18n helper: builds the i18n key for a test-item label. */
+export function itemLabel(id: string): string {
+  return t(('cfg.item.' + id) as MessageKey)
+}
+
 export function useI18n() {
   return { locale, t, setLocale }
 }

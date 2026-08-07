@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import type { ItemHistory, LogEntry, TestItem } from '../types'
-import { useI18n, type MessageKey } from '../i18n'
+import { itemLabel, useI18n } from '../i18n'
 import Icon from './Icon.vue'
 
 const props = defineProps<{ items: TestItem[]; logs: LogEntry[]; serverRunning: boolean; mode?: 'full' | 'logs'; history?: Record<string, ItemHistory>; historySelected?: string; running?: boolean }>()
 const emit = defineEmits<{ clear: []; 'open-log-dir': []; report: []; select: [id: string] }>()
 const { t } = useI18n()
-const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 /** logs 模式（服务端分离窗口）只显示日志，隐藏客户端执行队列与报告区 */
 const showQueue = computed(() => props.mode !== 'logs')
 const filter = ref<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL')
