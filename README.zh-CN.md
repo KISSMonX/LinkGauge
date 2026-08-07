@@ -42,7 +42,7 @@
 - 实时带宽曲线和汇总统计
 - 本机及对端网络信息展示
 - 客户端概览显示当前连接的本地端口
-- 多网卡检测与接口选择弹窗（默认选中第一个接口）并显示链路速率
+- 多网卡检测与接口选择弹窗（默认选中第一个接口）并显示链路速率；Windows 直接调用系统 API，不启动辅助进程
 - 带宽预设（100 / 1000 Mbps、不限），默认跟随当前网卡链路速率
 - 客户端预热时间（`-O`）、TCP 套接字缓冲区（`-w`，0 = 自动）、源端口（`--cport`）与 IPv4/IPv6 显式选择选项
 - 客户端 DSCP 标记（`--dscp`）与按量测试（`-n` / `-k`，传输量完成即结束）选项
@@ -104,8 +104,7 @@ flowchart LR
 | --- | --- |
 | `start_test` | 校验配置并启动 Ping 或 riperf3 客户端/服务端任务 |
 | `stop_test` | 发出取消信号：终止 Ping 进程或优雅中断 riperf3 测试 |
-| `get_network_info` | 读取本机 IP、MAC 地址、主机名和链路速率 |
-| `get_network_interfaces` | 枚举所有 up 状态的 IPv4 接口（含 MAC 地址和链路速率） |
+| `get_network_snapshot` | 非阻塞地一次读取主机名及所有 up 状态的 IPv4 接口（含 MAC 地址和链路速率） |
 | `get_custom_packet_length` | 从设置文件读取持久化的自定义报文长度 |
 | `save_custom_packet_length` | 校验并持久化自定义报文长度到设置文件 |
 | `generate_report` | 保存 HTML 报告，或打开适合打印的同版内容以输出 PDF |

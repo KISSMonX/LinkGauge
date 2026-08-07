@@ -17,7 +17,7 @@ import Icon from './components/Icon.vue'
 import { useI18n, type Locale, type MessageKey } from './i18n'
 import { theme, setTheme, type Theme } from './theme'
 import { clearTerminal, createTerminal, writeTerminal } from './terminal'
-import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, ServerConfig, ServerRuntimeStatus, SshConfig, SshEvent, SshSnapshot, SshStatus, SyncState, TestConfig, TestItem, TestSummary } from './types'
+import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, NetworkSnapshot, ServerConfig, ServerRuntimeStatus, SshConfig, SshEvent, SshSnapshot, SshStatus, SyncState, TestConfig, TestItem, TestSummary } from './types'
 
 const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
@@ -1093,12 +1093,12 @@ onMounted(async () => {
         // 启动时请求一次完整状态（serverSession/clientRunning 等），随后的事件才能正确匹配会话
         void emit('side-sync-request', { from: ownLabel })
       }
-      const [info, ifaces, customTcpLen, customUdpLen] = await Promise.all([
-        invoke<NetworkInfo>('get_network_info'),
-        invoke<InterfaceInfo[]>('get_network_interfaces'),
+      const [network, customTcpLen, customUdpLen] = await Promise.all([
+        invoke<NetworkSnapshot>('get_network_snapshot'),
         invoke<number>('get_custom_packet_length', { protocol: 'tcp' }),
         invoke<number>('get_custom_packet_length', { protocol: 'udp' }),
       ])
+      const { info, interfaces: ifaces } = network
       local.value = info
       savedTcpLength.value = customTcpLen
       savedUdpLength.value = customUdpLen

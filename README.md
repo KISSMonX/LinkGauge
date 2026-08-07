@@ -42,7 +42,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - Live bandwidth chart and aggregate statistics
 - Local and peer network information
 - Local port of the active connection shown in the client dashboard
-- Multi-NIC detection with an interface picker (the first interface is the default) and link-speed reporting
+- Multi-NIC detection with an interface picker (the first interface is the default) and link-speed reporting, using native OS APIs without helper processes on Windows
 - Bandwidth presets (100 / 1000 Mbps, unlimited) that default to the current NIC link speed
 - Warm-up omit period (`-O`), TCP socket buffer size (`-w`, 0 = auto), client source port (`--cport`), and explicit IPv4/IPv6 selection client options
 - DSCP marking (`--dscp`) and byte/block-limited tests (`-n` / `-k`, ending when the amount is transferred) client options
@@ -104,8 +104,7 @@ The application uses Tauri's two-process model:
 | --- | --- |
 | `start_test` | Validate configuration and run a Ping or riperf3 client/server task |
 | `stop_test` | Signal cancellation: kill the Ping process or gracefully interrupt the riperf3 run |
-| `get_network_info` | Read the local IP address, MAC address, hostname, and link speed |
-| `get_network_interfaces` | Enumerate all up IPv4 interfaces with MAC address and link speed |
+| `get_network_snapshot` | Read the hostname and all up IPv4 interfaces with MAC addresses and link speeds in one non-blocking snapshot |
 | `get_custom_packet_length` | Read the persisted custom packet length from the settings file |
 | `save_custom_packet_length` | Validate and persist a custom packet length to the settings file |
 | `generate_report` | Save an HTML report or open its print-ready rendering for native PDF output |

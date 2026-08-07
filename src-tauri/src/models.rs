@@ -195,6 +195,13 @@ pub struct InterfaceInfo {
     pub speed_mbps: u64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSnapshot {
+    pub info: NetworkInfo,
+    pub interfaces: Vec<InterfaceInfo>,
+}
+
 /// 单个测试项目的历史数据（报告按测试项目分组输出：数据表 + 曲线）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

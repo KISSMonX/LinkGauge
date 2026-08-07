@@ -139,6 +139,11 @@ export interface InterfaceInfo {
   speedMbps: number
 }
 
+export interface NetworkSnapshot {
+  info: NetworkInfo
+  interfaces: InterfaceInfo[]
+}
+
 export interface MetricPoint {
   second: number
   bandwidthMbps: number
