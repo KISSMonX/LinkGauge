@@ -226,6 +226,46 @@ pub async fn get_network_snapshot() -> NetworkSnapshot {
         })
 }
 
+// ---------------------------------------------------------------------------
+// 跨平台 shell 打开（消除 lib.rs / runner.rs / report.rs 三处重复的 cfg!() 分支）
+// ---------------------------------------------------------------------------
+
+/// 用系统文件管理器打开目录或文件路径
+pub(crate) fn open_path_in_shell(path: &std::path::Path) -> Result<(), String> {
+    let result = std::process::Command::new(if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    })
+    .arg(path)
+    .spawn()
+    .map_err(|e| format!("无法打开：{e}"))?;
+    drop(result);
+    Ok(())
+}
+
+/// 用系统默认浏览器打开 URL（仅允许 http/https 链接，调用方自行校验）
+pub(crate) fn open_url_in_browser(url: &str) -> Result<(), String> {
+    let result = std::process::Command::new(if cfg!(windows) {
+        "cmd"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    })
+    .args(if cfg!(windows) {
+        vec!["/C", "start", "", url]
+    } else {
+        vec![url]
+    })
+    .spawn()
+    .map_err(|e| format!("无法打开链接：{e}"))?;
+    drop(result);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::snapshot_from_interfaces;

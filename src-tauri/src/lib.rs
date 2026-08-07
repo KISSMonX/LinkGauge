@@ -79,28 +79,12 @@ fn get_app_info(app: tauri::AppHandle) -> serde_json::Value {
 }
 
 /// 用系统默认浏览器打开外部链接（「关于」页的项目地址 / 提交反馈）。
-/// 与 runner::open_log_dir 相同的方式：调系统命令，不引入额外依赖。
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("仅允许打开 http(s) 链接".into());
     }
-    let result = std::process::Command::new(if cfg!(windows) {
-        "cmd"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    })
-    .args(if cfg!(windows) {
-        vec!["/C", "start", "", url.as_str()]
-    } else {
-        vec![url.as_str()]
-    })
-    .spawn()
-    .map_err(|e| format!("无法打开链接：{e}"))?;
-    drop(result);
-    Ok(())
+    crate::system::open_url_in_browser(&url)
 }
 
 pub fn run() {

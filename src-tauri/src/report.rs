@@ -10,7 +10,6 @@ use crate::models::ReportRequest;
 use crate::report_html;
 use chrono::Local;
 use std::path::PathBuf;
-use std::process::Command;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::fs;
 
@@ -68,17 +67,7 @@ pub async fn open_report_dir(app: AppHandle) -> Result<String, String> {
     fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("无法创建报告目录：{e}"))?;
-    let result = Command::new(if cfg!(windows) {
-        "explorer"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    })
-    .arg(&dir)
-    .spawn()
-    .map_err(|e| format!("无法打开报告目录：{e}"))?;
-    drop(result);
+    crate::system::open_path_in_shell(&dir)?;
     Ok(dir.to_string_lossy().to_string())
 }
 

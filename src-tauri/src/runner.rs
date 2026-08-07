@@ -392,17 +392,7 @@ pub async fn open_log_dir<R: tauri::Runtime>(app: AppHandle<R>) -> Result<String
     fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("无法创建日志目录：{e}"))?;
-    let result = std::process::Command::new(if cfg!(windows) {
-        "explorer"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    })
-    .arg(&dir)
-    .spawn()
-    .map_err(|e| format!("无法打开日志目录：{e}"))?;
-    drop(result);
+    crate::system::open_path_in_shell(&dir)?;
     Ok(dir.to_string_lossy().to_string())
 }
 
