@@ -8,6 +8,8 @@ mod runner;
 mod server;
 mod settings;
 mod ssh;
+mod ssh_decoder;
+mod ssh_session;
 mod system;
 mod validation;
 
