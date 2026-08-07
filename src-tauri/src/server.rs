@@ -175,7 +175,7 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
             }
             let sum = &interval.sum;
             // 只更新统计字段，保留对端（客户端）地址
-            let mut guard = latest.lock().expect("lock server latest snapshot");
+            let mut guard = latest.lock().unwrap_or_else(|e| e.into_inner());
             let peer = guard
                 .as_ref()
                 .map(|s| (s.peer_ip.clone(), s.peer_port))
@@ -208,7 +208,7 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
             // 注意：锁必须在 if-let 外统一获取——if-let 的条件临时值（MutexGuard）
             // 存活到整个 if-let 语句结束，在 else 分支里再次 lock 会对同一线程
             // 重复获取 std Mutex 而死锁（客户端首次连接、快照为 None 时必现）
-            let mut snapshot_guard = latest.lock().expect("lock server latest snapshot");
+            let mut snapshot_guard = latest.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(snapshot) = snapshot_guard.as_mut() {
                 snapshot.peer_ip = host.clone();
                 snapshot.peer_port = port;
@@ -356,7 +356,7 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
                 let uptime = started.elapsed().as_secs();
                 let is_serving = serving.load(Ordering::Relaxed);
                 let done = completed.load(Ordering::Relaxed);
-                let snapshot = latest.lock().expect("lock server latest snapshot").clone();
+                let snapshot = latest.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 // 文本日志行（写文件 + 广播）
                 let status_text = if is_serving {
                     tr(&locale, "测试进行中", "test in progress")
@@ -436,7 +436,7 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
                     .first()
                     .map(|c| (c.remote_host.clone(), c.remote_port));
                 // 测试结束（客户端已断开）：清空对端地址与统计，心跳事件不再携带
-                *latest.lock().expect("lock server latest snapshot") = None;
+                *latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 if outcome.termination == Termination::Interrupted {
                     heartbeat.abort();
                     append_log(
@@ -495,7 +495,7 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
             }
             Err(error) => {
                 serving.store(false, Ordering::Relaxed);
-                *latest.lock().expect("lock server latest snapshot") = None;
+                *latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 // 空闲时收到停止信号返回 Aborted，正常退出；idle_timeout 到期
                 // 同样以 Aborted("idle timeout") 返回（one_off 下退出而非重启），
                 // 按原因区分日志文案
