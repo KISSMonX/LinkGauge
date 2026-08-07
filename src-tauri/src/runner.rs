@@ -99,7 +99,8 @@ pub async fn start_test<R: tauri::Runtime>(
     state: State<'_, AppState>,
     request: TestRequest,
 ) -> Result<String, String> {
-    crate::validation::validate(&request)?;
+    crate::validation::validate(&request)
+        .map_err(|e| e.message(&request.locale).to_string())?;
     let session_id = Uuid::new_v4().to_string();
     let sessions = state.sessions.clone();
     let pids = state.child_pids.clone();
@@ -213,7 +214,8 @@ pub async fn start_test_queue<R: tauri::Runtime>(
             )
             .into());
         }
-        crate::validation::validate(request)?;
+        crate::validation::validate(request)
+            .map_err(|e| e.message(&locale).to_string())?;
     }
 
     let session_id = Uuid::new_v4().to_string();
