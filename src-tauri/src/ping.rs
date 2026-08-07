@@ -49,11 +49,8 @@ pub(crate) async fn run_ping<R: tauri::Runtime>(
     else {
         return ClientTaskResult::Failed;
     };
-    let args = if cfg!(windows) {
-        vec!["-n".into(), "4".into(), request.server_ip.clone()]
-    } else {
-        vec!["-c".into(), "4".into(), request.server_ip.clone()]
-    };
+    let count_flag = if cfg!(windows) { "-n" } else { "-c" };
+    let args = vec![count_flag.into(), "4".into(), request.server_ip.clone()];
     let exec_line = crate::tr_format!(locale, "执行：ping {}", "Running: ping {}", args.join(" "));
     append_log(&log, &format!("[INFO] {exec_line}"));
     emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
