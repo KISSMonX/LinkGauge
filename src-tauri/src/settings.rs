@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager};
 struct AppSettings {
     /// TCP 自定义报文长度（默认 128KB，上限 1MB）
     custom_packet_length: Option<u32>,
-    /// UDP 自定义报文长度（默认 8KB，上限 64KB）
+    /// UDP 自定义报文长度（默认 1460 B，与 iperf3 的 DEFAULT_UDP_BLKSIZE 一致；上限 64KB）
     custom_udp_packet_length: Option<u32>,
 }
 
