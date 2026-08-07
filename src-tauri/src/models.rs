@@ -131,6 +131,16 @@ pub struct TestRequest {
     pub server_bitrate_limit_mbps: u64,
 }
 
+/// 后端当前实际运行的服务端会话；窗口重建或同步状态丢失后据此恢复界面。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerRuntimeStatus {
+    pub session_id: String,
+    pub bind_ip: String,
+    pub port: u16,
+    pub interval: u64,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricPoint {

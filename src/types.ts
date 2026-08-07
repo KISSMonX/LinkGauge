@@ -82,6 +82,14 @@ export interface ServerConfig {
   bitrateLimit: number
 }
 
+/** 后端当前实际运行的服务端会话，用于窗口重建后恢复界面状态。 */
+export interface ServerRuntimeStatus {
+  sessionId: string
+  bindIp: string
+  port: number
+  interval: number
+}
+
 /** 服务端页的 SSH 远程控制台连接参数（密码与私钥口令不落盘，仅在内存与窗口间流转） */
 export interface SshConfig {
   host: string
@@ -150,7 +158,7 @@ export interface LogEntry {
 export interface BackendEvent {
   sessionId: string
   taskId: string
-  type: 'start' | 'status' | 'log' | 'metric' | 'error' | 'complete' | 'queue-complete'
+  type: 'start' | 'status' | 'log' | 'metric' | 'summary' | 'error' | 'complete' | 'queue-complete'
   status?: TaskStatus
   level?: LogLevel
   message?: string

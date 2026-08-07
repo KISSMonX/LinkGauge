@@ -505,6 +505,17 @@ fn svg_curve(points: &[MetricPoint], is_en: bool) -> String {
         .map(|p| format!("{:.1},{:.1}", x_of(p.second), y_of(value(p))))
         .collect::<Vec<_>>()
         .join(" ");
+    // 单个样本无法形成线段（按量测试可能短于一个采样周期），至少画出数据点。
+    let single_point = if points.len() == 1 {
+        let p = &points[0];
+        format!(
+            r##"<circle cx="{:.1}" cy="{:.1}" r="3" fill="#096edc"/>"##,
+            x_of(p.second),
+            y_of(value(p))
+        )
+    } else {
+        String::new()
+    };
     let unit = if use_jitter { "ms" } else { "Mbps" };
     let y_axis = y_of(v_min) + 0.5;
     // 底部时间刻度与右上单位标签的坐标
@@ -512,7 +523,7 @@ fn svg_curve(points: &[MetricPoint], is_en: bool) -> String {
     let (t_max_x, t_max_y) = (w, h - 8.0);
     let (unit_x, unit_y) = (w - 2.0, pad_t - 4.0);
     format!(
-        r##"<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;background:#f6f8fb;border-radius:6px">{grid}<line x1="{pad_l}" y1="{y_axis:.1}" x2="{w}" y2="{y_axis:.1}" stroke="#d3dae3"/><text x="{t_min_x}" y="{t_min_y}" font-size="11" fill="#98a2b3">{t_min}s</text><text x="{t_max_x}" y="{t_max_y}" text-anchor="end" font-size="11" fill="#98a2b3">{t_max}s</text><text x="{unit_x}" y="{unit_y}" text-anchor="end" font-size="11" fill="#98a2b3">{unit}</text><polyline fill="none" stroke="#096edc" stroke-width="2" points="{poly}"/></svg>"##
+        r##"<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;background:#f6f8fb;border-radius:6px">{grid}<line x1="{pad_l}" y1="{y_axis:.1}" x2="{w}" y2="{y_axis:.1}" stroke="#d3dae3"/><text x="{t_min_x}" y="{t_min_y}" font-size="11" fill="#98a2b3">{t_min}s</text><text x="{t_max_x}" y="{t_max_y}" text-anchor="end" font-size="11" fill="#98a2b3">{t_max}s</text><text x="{unit_x}" y="{unit_y}" text-anchor="end" font-size="11" fill="#98a2b3">{unit}</text><polyline fill="none" stroke="#096edc" stroke-width="2" points="{poly}"/>{single_point}</svg>"##
     )
 }
 
@@ -521,4 +532,24 @@ fn pdf_escape(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('(', "\\(")
         .replace(')', "\\)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::svg_curve;
+    use crate::models::MetricPoint;
+
+    #[test]
+    fn single_sample_curve_renders_a_visible_point() {
+        let svg = svg_curve(
+            &[MetricPoint {
+                second: 1,
+                bandwidth_mbps: 100.0,
+                ..Default::default()
+            }],
+            false,
+        );
+        assert!(svg.contains("<circle"));
+        assert!(svg.contains("100.0"));
+    }
 }

@@ -17,7 +17,7 @@ import Icon from './components/Icon.vue'
 import { useI18n, type Locale, type MessageKey } from './i18n'
 import { theme, setTheme, type Theme } from './theme'
 import { clearTerminal, createTerminal, writeTerminal } from './terminal'
-import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, ServerConfig, SshConfig, SshEvent, SshSnapshot, SshStatus, SyncState, TestConfig, TestItem, TestSummary } from './types'
+import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, ServerConfig, ServerRuntimeStatus, SshConfig, SshEvent, SshSnapshot, SshStatus, SyncState, TestConfig, TestItem, TestSummary } from './types'
 
 const { t, locale, setLocale } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
@@ -349,7 +349,12 @@ async function applySync(payload: SyncState) {
   config.value = enforceConfigCapabilities(payload.config)
   serverConfig.value = payload.serverConfig
   local.value = payload.local
-  serverRunning.value = payload.serverRunning
+  // 后端服务端可能跨窗口重建继续运行；已知为运行中时，不接受其他窗口的陈旧
+  // false 快照覆盖。真实停止由后端 complete/error 事件或状态查询确认。
+  if (payload.serverRunning || !serverRunning.value) {
+    serverRunning.value = payload.serverRunning
+    serverSession.value = payload.serverSession
+  }
   // 队列运行状态只采纳新一轮、当前驱动、较新接管或同轮停止；非驱动副本只同步
   // enabled，不能用陈旧 items / queueIndex / clientRunning 回退驱动窗口。
   // 已绑定后端队列后，start/metric/complete 才是运行状态的事实来源；来自另一
@@ -379,7 +384,6 @@ async function applySync(payload: SyncState) {
   } else {
     items.value.forEach((item, i) => { const remote = payload.items[i]; if (remote) item.enabled = item.supported === false || (item.id === 'udp-df' && config.value.udpDontFragment) ? false : remote.enabled })
   }
-  serverSession.value = payload.serverSession
   savedTcpLength.value = payload.savedTcpLength
   savedUdpLength.value = payload.savedUdpLength
   // 运行中的瞬时数据已按权威来源处理；选择状态属于界面状态，可跨窗口同步
@@ -729,8 +733,27 @@ async function exitApp() {
 }
 
 /** 启动 riperf3 服务端（独立于客户端任务队列，两者可同时运行） */
+async function refreshServerState(announce = false) {
+  if (!isTauri()) return serverRunning.value
+  const status = await invoke<ServerRuntimeStatus | null>('get_server_status')
+  if (!status) {
+    serverRunning.value = false
+    serverSession.value = ''
+    return false
+  }
+  const recovered = !serverRunning.value || serverSession.value !== status.sessionId
+  serverSession.value = status.sessionId
+  serverRunning.value = true
+  serverConfig.value = { ...serverConfig.value, bindIp: status.bindIp, port: status.port, interval: status.interval }
+  if (announce && recovered) log('INFO', t('log.serverRecovered', { addr: status.bindIp || t('sdash.allAdapters'), port: status.port }))
+  return true
+}
+
 async function startServer() {
   if (serverRunning.value) return
+  if (isTauri()) {
+    try { if (await refreshServerState(true)) return } catch (e) { log('WARN', String(e)) }
+  }
   if (serverConfig.value.port < 1 || serverConfig.value.port > 65535) { errorDialog.value = { title: t('err.paramError'), message: t('err.port') }; return }
   if (serverConfig.value.interval < 1 || serverConfig.value.interval > 60) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverInterval') }; return }
   if (serverConfig.value.idleTimeout > 86400 || serverConfig.value.maxDuration > 86400) { errorDialog.value = { title: t('err.paramError'), message: t('err.serverLimitRange') }; return }
@@ -745,7 +768,11 @@ async function startServer() {
   try {
     serverSession.value = await invoke<string>('start_test', { request: { taskId: 'server', mode: 'server', protocol: 'tcp', transferMode: 'time', serverIp: local.value.ip, localIp: local.value.ip, bindIp: serverConfig.value.bindIp, locale: locale.value, port: serverConfig.value.port, duration: 0, parallel: 0, bandwidth: 0, packetLength: 0, interval: serverConfig.value.interval, serverAuthEnabled: serverConfig.value.authEnabled, serverAuthPrivateKeyPath: serverConfig.value.authEnabled ? serverConfig.value.authPrivateKeyPath.trim() : '', serverAuthUsersPath: serverConfig.value.authEnabled ? serverConfig.value.authUsersPath.trim() : '', serverAuthPkcs1Padding: serverConfig.value.authPkcs1Padding, serverIdleTimeout: serverConfig.value.idleTimeout, serverMaxDuration: serverConfig.value.maxDuration, serverBitrateLimitMbps: serverConfig.value.bitrateLimit } })
     serverRunning.value = true
-  } catch (error) { log('ERROR', String(error)); errorDialog.value = { title: t('err.serverStartFailed'), message: String(error) } }
+  } catch (error) {
+    // 查询与启动之间若另一窗口刚好启动成功，直接接管真实会话，不再弹重复启动错误。
+    try { if (await refreshServerState(true)) return } catch { /* 保留原始启动错误 */ }
+    log('ERROR', String(error)); errorDialog.value = { title: t('err.serverStartFailed'), message: String(error) }
+  }
 }
 async function stopServer() {
   if (!serverRunning.value) return
@@ -894,6 +921,21 @@ function handleEvent(event: BackendEvent) {
   // 客户端事件：停止或结束后的事件忽略
   if (!clientRunning.value) return
   if (event.type === 'metric' && event.metric) { points.value.push(event.metric); connected.value = true; if (event.taskId === 'ping' && event.metric.jitterMs) summary.pingAverage = event.metric.jitterMs }
+  if (event.type === 'summary' && event.metric) {
+    const metric = event.metric
+    // 少于两个区间的按量/按块任务无法形成折线，用全程平均值补成从 0 到实测
+    // 结束时间的水平线；正常长测试只更新汇总，不污染真实区间曲线。
+    if (event.taskId !== 'ping' && points.value.length < 2) {
+      points.value = [
+        { ...metric, second: 0, transferMb: 0 },
+        { ...metric, second: Math.max(1, metric.second) },
+      ]
+    }
+    summary.averageBandwidth = metric.bandwidthMbps
+    summary.totalTransferMb = metric.transferMb
+    summary.lossPercent = metric.lossPercent
+    summary.jitterMs = metric.jitterMs
+  }
   if (event.type === 'complete') completeCurrent(event.status || 'success')
   // 后端错误在发出事件前已经写入运行日志；这里只更新界面与队列，避免重复落盘
   if (event.type === 'error') failCurrent(event.message || t('err.execFailed'), event.fatal, false)
@@ -1065,6 +1107,7 @@ onMounted(async () => {
       if (side.value === 'hub' && interfaces.value.length > 1) { nicSelected.value = 0; nicDialog.value = true }
       unlisten = await listen<BackendEvent>('test-event', (e) => handleEvent(e.payload))
       unlistenSsh = await listen<SshEvent>('ssh-event', (e) => handleSshEvent(e.payload))
+      await refreshServerState(true)
     } catch (e) { log('WARN', t('log.sysInfoFailed', { e: String(e) })) }
   } else {
     // 浏览器预览模式：无网卡信息，使用回退默认值

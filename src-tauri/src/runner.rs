@@ -1,4 +1,4 @@
-use crate::models::{ClientLogAppend, MetricPoint, TestEvent, TestRequest};
+use crate::models::{ClientLogAppend, MetricPoint, ServerRuntimeStatus, TestEvent, TestRequest};
 use chrono::{Local, TimeZone};
 use regex::Regex;
 use riperf3::{ClientBuilder, ServerBuilder, Termination, TransportProtocol};
@@ -57,7 +57,7 @@ pub struct AppState {
     pub(crate) locale: Arc<RwLock<String>>,
     /// 当前服务端会话（单例）：重复启动服务端时拒绝。Windows 的 SO_REUSEADDR
     /// 允许同一端口双绑，双会话会造成心跳日志冲突、客户端连接随机分发
-    pub(crate) server_session: Arc<AsyncMutex<Option<String>>>,
+    pub(crate) server_session: Arc<AsyncMutex<Option<ServerRuntimeStatus>>>,
     /// 当前客户端队列会话（单例）：队列由后端串行驱动，避免多个窗口各自推进。
     pub(crate) client_queue_session: Arc<AsyncMutex<Option<String>>>,
 }
@@ -73,6 +73,29 @@ pub fn set_locale(state: State<'_, AppState>, locale: String) {
     if let Ok(mut guard) = state.locale.write() {
         *guard = locale;
     }
+}
+
+/// 查询后端真实服务端状态。窗口刷新、分离窗口销毁或旧同步包都可能让前端丢失
+/// serverRunning；不能再靠前端副本猜测服务是否仍在监听。
+#[tauri::command]
+pub async fn get_server_status(
+    state: State<'_, AppState>,
+) -> Result<Option<ServerRuntimeStatus>, String> {
+    let mut server_guard = state.server_session.lock().await;
+    let mut session_guard = state.sessions.lock().await;
+    let Some(existing) = server_guard.clone() else {
+        return Ok(None);
+    };
+    let active = matches!(
+        session_guard.get(&existing.session_id),
+        Some(SessionSignal::Engine(tx)) if !tx.is_closed()
+    );
+    if active {
+        return Ok(Some(existing));
+    }
+    session_guard.remove(&existing.session_id);
+    *server_guard = None;
+    Ok(None)
 }
 
 /// 应用退出时同步终止所有遗留 ping 测试进程
@@ -132,7 +155,7 @@ pub async fn start_test<R: tauri::Runtime>(
             let mut session_guard = state.sessions.lock().await;
             if let Some(existing) = server_guard.as_ref() {
                 let active = matches!(
-                    session_guard.get(existing),
+                    session_guard.get(&existing.session_id),
                     Some(SessionSignal::Engine(tx)) if !tx.is_closed()
                 );
                 if active {
@@ -143,11 +166,16 @@ pub async fn start_test<R: tauri::Runtime>(
                     )
                     .to_string());
                 }
-                session_guard.remove(existing);
+                session_guard.remove(&existing.session_id);
                 *server_guard = None;
             }
             session_guard.insert(session_id.clone(), SessionSignal::Engine(tx));
-            *server_guard = Some(session_id.clone());
+            *server_guard = Some(ServerRuntimeStatus {
+                session_id: session_id.clone(),
+                bind_ip: request.bind_ip.clone(),
+                port: request.port,
+                interval: request.interval,
+            });
         }
         let server_session = state.server_session.clone();
         tauri::async_runtime::spawn(async move {
@@ -156,7 +184,10 @@ pub async fn start_test<R: tauri::Runtime>(
             // 绝不能把新会话的标记清空。
             {
                 let mut server_guard = server_session.lock().await;
-                if server_guard.as_deref() == Some(spawned_id.as_str()) {
+                if server_guard
+                    .as_ref()
+                    .is_some_and(|server| server.session_id == spawned_id)
+                {
                     *server_guard = None;
                 }
             }
@@ -321,7 +352,10 @@ pub async fn stop_test(state: State<'_, AppState>, session_id: String) -> Result
     }
     if already_ended {
         let mut server_guard = state.server_session.lock().await;
-        if server_guard.as_deref() == Some(session_id.as_str()) {
+        if server_guard
+            .as_ref()
+            .is_some_and(|server| server.session_id == session_id)
+        {
             *server_guard = None;
         }
         drop(server_guard);
@@ -1474,6 +1508,7 @@ async fn run_ping<R: tauri::Runtime>(
         tokio::spawn(read_lines(stderr, tx, true));
     }
     drop(tx);
+    let mut ping_sample = 0;
     let mut final_success = false;
     let mut final_stopped = false;
     let mut final_timed_out = false;
@@ -1491,7 +1526,8 @@ async fn run_ping<R: tauri::Runtime>(
                     let output_line = format!("[{level}] {line}");
                     append_log(&log, &output_line);
                     emit_log(&app, &session_id, &request.task_id, level, line.clone());
-                    if let Some(metric) = parse_ping_metric(&line) {
+                    if let Some(metric) = parse_ping_metric(&line, ping_sample + 1) {
+                        ping_sample += 1;
                         emit_metric(&app, &session_id, &request.task_id, metric);
                     }
                 }
@@ -1584,9 +1620,10 @@ async fn read_lines<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-fn parse_ping_metric(line: &str) -> Option<MetricPoint> {
+fn parse_ping_metric(line: &str, second: i64) -> Option<MetricPoint> {
     let ping = Regex::new(r"(?i)(?:time|时间)[=<＝]\s*(\d+(?:\.\d+)?)\s*ms").ok()?;
     ping.captures(line).map(|c| MetricPoint {
+        second,
         jitter_ms: c[1].parse().unwrap_or(0.0),
         ..Default::default()
     })
@@ -1917,9 +1954,9 @@ async fn finish_engine<R: tauri::Runtime>(
                 .sum_sent
                 .as_ref()
                 .or(report.end.sum_received.as_ref())
-                .map(|s| s.end.round() as i64)
-                .unwrap_or(request.duration as i64);
-            emit_final_metric(app, session_id, task_id, report, measured_end);
+                .map(|s| s.end.ceil().max(1.0) as i64)
+                .unwrap_or(request.duration.max(1) as i64);
+            emit_final_summary(app, session_id, task_id, report, measured_end);
             match outcome.termination {
                 Termination::Completed => {
                     append_log(log, tr(locale, "测试结果: 完成", "Result: completed"));
@@ -2026,8 +2063,9 @@ fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, locale: &st
     }
 }
 
-/// 补发一个最终指标点：携带对端方向的抖动/丢包与全程平均带宽，供前端汇总统计
-fn emit_final_metric<R: tauri::Runtime>(
+/// 最终汇总与区间采样语义不同：它是全程平均带宽与总传输量，不能追加到实时
+/// 曲线，否则最后会在同一时间坐标产生明显竖直突变。
+fn emit_final_summary<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
     task_id: &str,
@@ -2049,17 +2087,25 @@ fn emit_final_metric<R: tauri::Runtime>(
         (None, None) => None,
     };
     if let Some(side) = side {
-        emit_metric(
-            app,
-            session_id,
-            task_id,
-            MetricPoint {
-                second,
-                bandwidth_mbps: side.bits_per_second / 1_000_000.0,
-                transfer_mb: side.bytes as f64 / 1_000_000.0,
-                jitter_ms: side.jitter_ms.unwrap_or(0.0),
-                loss_percent: side.lost_percent.unwrap_or(0.0),
-                retransmits: side.retransmits.unwrap_or(0).max(0) as u64,
+        let _ = app.emit(
+            "test-event",
+            TestEvent {
+                session_id: session_id.into(),
+                task_id: task_id.into(),
+                event_type: "summary".into(),
+                status: None,
+                level: None,
+                message: None,
+                metric: Some(MetricPoint {
+                    second,
+                    bandwidth_mbps: side.bits_per_second / 1_000_000.0,
+                    transfer_mb: side.bytes as f64 / 1_000_000.0,
+                    jitter_ms: side.jitter_ms.unwrap_or(0.0),
+                    loss_percent: side.lost_percent.unwrap_or(0.0),
+                    retransmits: side.retransmits.unwrap_or(0).max(0) as u64,
+                }),
+                log_path: None,
+                fatal: None,
             },
         );
     }
@@ -2342,8 +2388,8 @@ fn emit_error<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_log, client_params_for, client_task_timeout, is_server_unreachable, validate,
-        TestLog,
+        append_log, client_params_for, client_task_timeout, is_server_unreachable,
+        parse_ping_metric, validate, TestLog,
     };
     use crate::models::TestRequest;
     use riperf3::TransportProtocol;
@@ -2373,6 +2419,16 @@ mod tests {
             content,
             "[INFO] 第一行\n[INFO] 第二行\n多行内容\n内含换行\n"
         );
+    }
+
+    #[test]
+    fn ping_metrics_keep_sample_order_for_charting() {
+        let first = parse_ping_metric("Reply from 127.0.0.1: time<1ms", 1).unwrap();
+        let second = parse_ping_metric("来自 127.0.0.1 的回复: 时间=2ms", 2).unwrap();
+        assert_eq!(first.second, 1);
+        assert_eq!(second.second, 2);
+        assert_eq!(first.jitter_ms, 1.0);
+        assert_eq!(second.jitter_ms, 2.0);
     }
 
     #[test]
@@ -2888,7 +2944,12 @@ mod queue_tests {
                 .lock()
                 .await
                 .insert(stale_id.clone(), SessionSignal::Engine(stale_tx));
-            *state.server_session.lock().await = Some(stale_id.clone());
+            *state.server_session.lock().await = Some(ServerRuntimeStatus {
+                session_id: stale_id.clone(),
+                bind_ip: "127.0.0.1".into(),
+                port,
+                interval: 1,
+            });
         }
 
         let mut request = base_request("server", port, Local::now().timestamp_millis());
@@ -2910,6 +2971,13 @@ mod queue_tests {
 
         let duplicate = start_test(handle.clone(), app.state::<AppState>(), request.clone()).await;
         assert!(duplicate.is_err(), "活动服务端仍必须拒绝重复启动");
+        let status = get_server_status(app.state::<AppState>())
+            .await
+            .unwrap()
+            .expect("活动服务端必须可供重建窗口恢复");
+        assert_eq!(status.session_id, first);
+        assert_eq!(status.bind_ip, "127.0.0.1");
+        assert_eq!(status.port, port);
 
         stop_test(app.state::<AppState>(), first).await.unwrap();
         assert!(app
@@ -3032,14 +3100,29 @@ mod queue_tests {
             .map(|(task, _, _)| task.clone())
             .collect();
         assert_eq!(starts, task_ids, "后端必须严格按队列顺序启动每个测试项");
-        assert!(
-            events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(_, kind, message)| kind == "log" && message.starts_with("第 ")),
-            "输出周期指标必须同步到界面日志，不能长期停在开始测试"
-        );
+        {
+            let captured = events.lock().unwrap();
+            for task_id in task_ids {
+                let summary = captured
+                    .iter()
+                    .position(|(task, kind, _)| task == task_id && kind == "summary")
+                    .unwrap_or_else(|| panic!("{task_id} 必须发出独立最终汇总"));
+                let complete = captured
+                    .iter()
+                    .position(|(task, kind, _)| task == task_id && kind == "complete")
+                    .unwrap();
+                assert!(
+                    summary < complete,
+                    "{task_id} 必须先汇总再完成，前端才能保存曲线"
+                );
+            }
+            assert!(
+                captured
+                    .iter()
+                    .any(|(_, kind, message)| kind == "log" && message.starts_with("第 ")),
+                "输出周期指标必须同步到界面日志，不能长期停在开始测试"
+            );
+        }
         let final_message = events
             .lock()
             .unwrap()
