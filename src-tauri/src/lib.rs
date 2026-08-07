@@ -3,6 +3,7 @@ mod error;
 mod models;
 mod ping;
 mod report;
+mod report_html;
 mod runner;
 mod server;
 mod settings;
