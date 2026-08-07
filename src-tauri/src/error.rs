@@ -47,16 +47,32 @@ impl ValidationError {
         let en = locale == "en";
         match self {
             Self::DurationRequired => {
-                if en { "Duration must be greater than 0" } else { "持续时间必须大于 0" }
+                if en {
+                    "Duration must be greater than 0"
+                } else {
+                    "持续时间必须大于 0"
+                }
             }
             Self::IntervalRequired => {
-                if en { "Output interval must be greater than 0" } else { "输出周期必须大于 0" }
+                if en {
+                    "Output interval must be greater than 0"
+                } else {
+                    "输出周期必须大于 0"
+                }
             }
             Self::ServerIpRequired => {
-                if en { "Server address cannot be empty" } else { "服务端地址不能为空" }
+                if en {
+                    "Server address cannot be empty"
+                } else {
+                    "服务端地址不能为空"
+                }
             }
             Self::InvalidPort => {
-                if en { "Invalid port" } else { "端口无效" }
+                if en {
+                    "Invalid port"
+                } else {
+                    "端口无效"
+                }
             }
             Self::ServerAuthIncomplete => {
                 if en {
@@ -66,37 +82,81 @@ impl ValidationError {
                 }
             }
             Self::OmitOnlyTimeMode => {
-                if en { "Warm-up (-O) is only supported in time-based mode" } else { "预热（-O）仅支持按时长模式" }
+                if en {
+                    "Warm-up (-O) is only supported in time-based mode"
+                } else {
+                    "预热（-O）仅支持按时长模式"
+                }
             }
             Self::OmitTooLong => {
-                if en { "Warm-up time must be shorter than the test duration" } else { "预热时间必须小于测试时长" }
+                if en {
+                    "Warm-up time must be shorter than the test duration"
+                } else {
+                    "预热时间必须小于测试时长"
+                }
             }
             Self::WindowTooLarge { .. } => {
-                if en { "Socket buffer cannot exceed 16 MB" } else { "套接字缓冲区不能超过 16MB" }
+                if en {
+                    "Socket buffer cannot exceed 16 MB"
+                } else {
+                    "套接字缓冲区不能超过 16MB"
+                }
             }
             Self::InvalidIpVersion { .. } => {
-                if en { "IP version must be 0 (auto), 4, or 6" } else { "IP 协议族只能是 0（自动）、4 或 6" }
+                if en {
+                    "IP version must be 0 (auto), 4, or 6"
+                } else {
+                    "IP 协议族只能是 0（自动）、4 或 6"
+                }
             }
             Self::ServerIdleTimeoutTooLarge => {
-                if en { "Server idle timeout cannot exceed 86400 seconds" } else { "服务端空闲超时不能超过 86400 秒" }
+                if en {
+                    "Server idle timeout cannot exceed 86400 seconds"
+                } else {
+                    "服务端空闲超时不能超过 86400 秒"
+                }
             }
             Self::ServerMaxDurationTooLarge => {
-                if en { "Maximum test duration cannot exceed 86400 seconds" } else { "单次测试最大时长不能超过 86400 秒" }
+                if en {
+                    "Maximum test duration cannot exceed 86400 seconds"
+                } else {
+                    "单次测试最大时长不能超过 86400 秒"
+                }
             }
             Self::ServerBitrateLimitTooLarge => {
-                if en { "Server bitrate limit cannot exceed 1,000,000 Mbps" } else { "服务端带宽上限不能超过 1000000 Mbps" }
+                if en {
+                    "Server bitrate limit cannot exceed 1,000,000 Mbps"
+                } else {
+                    "服务端带宽上限不能超过 1000000 Mbps"
+                }
             }
             Self::TransferAmountRequired => {
-                if en { "Transfer amount must be greater than 0" } else { "按量测试的传输量必须大于 0" }
+                if en {
+                    "Transfer amount must be greater than 0"
+                } else {
+                    "按量测试的传输量必须大于 0"
+                }
             }
             Self::InvalidTransferMode => {
-                if en { "Transfer mode must be time, bytes, or blocks" } else { "测试结束条件只能是 time / bytes / blocks" }
+                if en {
+                    "Transfer mode must be time, bytes, or blocks"
+                } else {
+                    "测试结束条件只能是 time / bytes / blocks"
+                }
             }
             Self::DscpOutOfRange => {
-                if en { "DSCP value must be between 0 and 63" } else { "DSCP 值应在 0-63 之间" }
+                if en {
+                    "DSCP value must be between 0 and 63"
+                } else {
+                    "DSCP 值应在 0-63 之间"
+                }
             }
             Self::CongestionAlgoNotSupported => {
-                if en { "Congestion control algorithm (-C) is only supported on Linux/FreeBSD" } else { "拥塞控制算法（-C）仅支持 Linux/FreeBSD" }
+                if en {
+                    "Congestion control algorithm (-C) is only supported on Linux/FreeBSD"
+                } else {
+                    "拥塞控制算法（-C）仅支持 Linux/FreeBSD"
+                }
             }
         }
     }

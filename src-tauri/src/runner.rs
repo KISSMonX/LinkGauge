@@ -23,8 +23,8 @@ use tokio::{
 use uuid::Uuid;
 
 // i18n 工具函数（定义在 crate::i18n,此处 re-export 供其他模块通过 crate::runner 导入）
-pub(crate) use crate::i18n::tr;
 pub(crate) use crate::i18n::current_locale;
+pub(crate) use crate::i18n::tr;
 
 /// 每个会话的中断信号：ping 走进程取消标志,riperf3 走 watch 通道（优雅终止）
 pub(crate) enum SessionSignal {
@@ -107,8 +107,7 @@ pub async fn start_test<R: tauri::Runtime>(
     state: State<'_, AppState>,
     request: TestRequest,
 ) -> Result<String, String> {
-    crate::validation::validate(&request)
-        .map_err(|e| e.message(&request.locale).to_string())?;
+    crate::validation::validate(&request).map_err(|e| e.message(&request.locale).to_string())?;
     let session_id = Uuid::new_v4().to_string();
     let sessions = state.sessions.clone();
     let pids = state.child_pids.clone();
@@ -252,8 +251,7 @@ pub async fn start_test_queue<R: tauri::Runtime>(
             )
             .into());
         }
-        crate::validation::validate(request)
-            .map_err(|e| e.message(&locale).to_string())?;
+        crate::validation::validate(request).map_err(|e| e.message(&locale).to_string())?;
     }
 
     let session_id = Uuid::new_v4().to_string();
