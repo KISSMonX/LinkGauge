@@ -3,7 +3,7 @@
 //! 包含 run_session 主循环、Handler（主机密钥校验）、事件汇（Sink）
 //! 以及端到端集成测试。
 
-use crate::runner::current_locale;
+use crate::i18n::current_locale;
 use crate::ssh::{tr, Sink, SshEvent, SshInput, SshRequest, SshScrollback, CONNECT_TIMEOUT};
 use crate::ssh_decoder::Decoder;
 use russh::keys::{

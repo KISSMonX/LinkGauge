@@ -2,6 +2,7 @@ use crate::client::{self, ClientTaskResult};
 use crate::models::{ClientLogAppend, MetricPoint, ServerRuntimeStatus, TestEvent, TestRequest};
 use crate::ping;
 use crate::server;
+use crate::tr_format;
 use chrono::{Local, TimeZone};
 use riperf3::Termination;
 use std::{
@@ -21,26 +22,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
-/// 按界面语言选择消息文案（locale 为空时默认中文）
-pub(crate) fn tr<'a>(locale: &str, zh: &'a str, en: &'a str) -> &'a str {
-    if locale == "en" {
-        en
-    } else {
-        zh
-    }
-}
-
-/// 按界面语言选择格式化模板（模板必须是字面量，format! 才能编译期检查）
-#[macro_export]
-macro_rules! tr_format {
-    ($locale:expr, $zh:literal, $en:literal $(, $arg:expr)* $(,)?) => {{
-        if $locale == "en" {
-            format!($en $(, $arg)*)
-        } else {
-            format!($zh $(, $arg)*)
-        }
-    }};
-}
+// i18n 工具函数（定义在 crate::i18n，此处 re-export 供其他模块通过 crate::runner 导入）
+pub(crate) use crate::i18n::tr;
+pub(crate) use crate::i18n::current_locale;
 
 /// 每个会话的中断信号：ping 走进程取消标志，riperf3 走 watch 通道（优雅终止）
 pub(crate) enum SessionSignal {
@@ -60,11 +44,6 @@ pub struct AppState {
     pub(crate) server_session: Arc<AsyncMutex<Option<ServerRuntimeStatus>>>,
     /// 当前客户端队列会话（单例）：队列由后端串行驱动，避免多个窗口各自推进。
     pub(crate) client_queue_session: Arc<AsyncMutex<Option<String>>>,
-}
-
-/// 读取当前界面语言（日志输出时调用，避免使用会话启动时的快照）
-pub(crate) fn current_locale(handle: &Arc<RwLock<String>>) -> String {
-    handle.read().map(|v| v.clone()).unwrap_or_default()
 }
 
 /// 切换界面语言：运行中的客户端/服务端会话日志立即改用新语言输出

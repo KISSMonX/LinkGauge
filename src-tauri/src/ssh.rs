@@ -4,8 +4,9 @@
 //! （启动 / 中断 / 查看进程等），远端输出实时回传给前端控制台。
 //! 使用纯 Rust 的 russh 实现，不依赖系统 ssh 客户端，与 riperf3 引擎一样零外部依赖。
 
-pub(crate) use crate::runner::tr;
-use crate::runner::{current_locale, AppState};
+pub(crate) use crate::i18n::tr;
+use crate::i18n::current_locale;
+use crate::runner::AppState;
 use crate::ssh_session::{run_session, tauri_sink};
 use serde::{Deserialize, Serialize};
 use std::{

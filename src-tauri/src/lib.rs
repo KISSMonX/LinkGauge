@@ -1,5 +1,6 @@
 mod client;
 mod error;
+mod i18n;
 mod models;
 mod ping;
 mod report;
