@@ -17,16 +17,16 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     fs::{self, OpenOptions},
-    sync::{watch, Mutex as AsyncMutex},
-    time::{sleep, Duration},
+    sync::{watch, Mutex as AsyncMutex, Notify},
+    time::Duration,
 };
 use uuid::Uuid;
 
-// i18n 工具函数（定义在 crate::i18n，此处 re-export 供其他模块通过 crate::runner 导入）
+// i18n 工具函数（定义在 crate::i18n,此处 re-export 供其他模块通过 crate::runner 导入）
 pub(crate) use crate::i18n::tr;
 pub(crate) use crate::i18n::current_locale;
 
-/// 每个会话的中断信号：ping 走进程取消标志，riperf3 走 watch 通道（优雅终止）
+/// 每个会话的中断信号：ping 走进程取消标志,riperf3 走 watch 通道（优雅终止）
 pub(crate) enum SessionSignal {
     Ping(Arc<AtomicBool>),
     Engine(watch::Sender<Option<String>>),
@@ -35,14 +35,16 @@ pub(crate) enum SessionSignal {
 #[derive(Default)]
 pub struct AppState {
     pub(crate) sessions: Arc<AsyncMutex<HashMap<String, SessionSignal>>>,
-    /// ping 子进程残留 PID 集合（riperf3 为进程内引擎，无子进程）
+    /// 每个会话的完成通知器：stop_test 等待此通知而不再轮询 sessions map
+    pub(crate) session_done: Arc<AsyncMutex<HashMap<String, Arc<Notify>>>>,
+    /// ping 子进程残留 PID 集合（riperf3 为进程内引擎,无子进程）
     pub(crate) child_pids: Arc<AsyncMutex<HashSet<u32>>>,
-    /// 界面语言（zh / en，空 = zh）：运行时可变，切换语言后运行中会话的引擎日志实时跟随
+    /// 界面语言（zh / en,空 = zh）：运行时可变,切换语言后运行中会话的引擎日志实时跟随
     pub(crate) locale: Arc<RwLock<String>>,
     /// 当前服务端会话（单例）：重复启动服务端时拒绝。Windows 的 SO_REUSEADDR
-    /// 允许同一端口双绑，双会话会造成心跳日志冲突、客户端连接随机分发
+    /// 允许同一端口双绑,双会话会造成心跳日志冲突、客户端连接随机分发
     pub(crate) server_session: Arc<AsyncMutex<Option<ServerRuntimeStatus>>>,
-    /// 当前客户端队列会话（单例）：队列由后端串行驱动，避免多个窗口各自推进。
+    /// 当前客户端队列会话（单例）：队列由后端串行驱动,避免多个窗口各自推进。
     pub(crate) client_queue_session: Arc<AsyncMutex<Option<String>>>,
 }
 
@@ -72,8 +74,14 @@ pub async fn get_server_status(
     if active {
         return Ok(Some(existing.clone()));
     }
-    session_guard.remove(&existing.session_id);
+    let stale_id = existing.session_id.clone();
+    session_guard.remove(&stale_id);
     *server_guard = None;
+    // 先释放 sessions / server_session 锁,再拿 session_done,
+    // 避免与 spawn 清理（先拿 session_done 再拿 sessions）形成交叉死锁
+    drop(session_guard);
+    drop(server_guard);
+    state.session_done.lock().await.remove(&stale_id);
     Ok(None)
 }
 
@@ -108,11 +116,18 @@ pub async fn start_test<R: tauri::Runtime>(
     let spawned_id = session_id.clone();
     if request.task_id == "ping" {
         let cancelled = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(Notify::new());
         state
             .sessions
             .lock()
             .await
             .insert(session_id.clone(), SessionSignal::Ping(cancelled.clone()));
+        state
+            .session_done
+            .lock()
+            .await
+            .insert(session_id.clone(), done.clone());
+        let session_done = state.session_done.clone();
         tauri::async_runtime::spawn(async move {
             ping::run_ping(
                 app,
@@ -123,13 +138,17 @@ pub async fn start_test<R: tauri::Runtime>(
                 locale_handle,
             )
             .await;
+            if let Some(d) = session_done.lock().await.remove(&spawned_id) {
+                d.notify_one();
+            }
             sessions.lock().await.remove(&spawned_id);
         });
     } else if request.mode == "server" || request.task_id == "server" {
         let (tx, rx) = watch::channel(None);
+        let done = Arc::new(Notify::new());
         // 服务端单例与 sessions 在同一临界区内核对：标记存在但会话表已无该 ID
-        // 说明上次异常清理留下了陈旧状态，可安全自愈；真实活动会话仍拒绝重复启动。
-        // 锁顺序固定为 server_session → sessions，清理路径保持一致，避免交叉死锁。
+        // 说明上次异常清理留下了陈旧状态,可安全自愈；真实活动会话仍拒绝重复启动。
+        // 锁顺序固定为 server_session → sessions,清理路径保持一致,避免交叉死锁。
         {
             let mut server_guard = state.server_session.lock().await;
             let mut session_guard = state.sessions.lock().await;
@@ -141,7 +160,7 @@ pub async fn start_test<R: tauri::Runtime>(
                 if active {
                     return Err(tr(
                         &request.locale,
-                        "服务端已在运行，请先停止当前服务端",
+                        "服务端已在运行,请先停止当前服务端",
                         "The server is already running. Stop it before starting again.",
                     )
                     .to_string());
@@ -150,6 +169,11 @@ pub async fn start_test<R: tauri::Runtime>(
                 *server_guard = None;
             }
             session_guard.insert(session_id.clone(), SessionSignal::Engine(tx));
+            state
+                .session_done
+                .lock()
+                .await
+                .insert(session_id.clone(), done.clone());
             *server_guard = Some(ServerRuntimeStatus {
                 session_id: session_id.clone(),
                 bind_ip: request.bind_ip.clone(),
@@ -158,9 +182,10 @@ pub async fn start_test<R: tauri::Runtime>(
             });
         }
         let server_session = state.server_session.clone();
+        let session_done = state.session_done.clone();
         tauri::async_runtime::spawn(async move {
             server::run_engine_server(app, spawned_id.clone(), request, rx, locale_handle).await;
-            // 先按 ID 清除单例标记再移除会话；若期间已有新服务端启动，旧任务
+            // 先按 ID 清除单例标记再移除会话；若期间已有新服务端启动,旧任务
             // 绝不能把新会话的标记清空。
             {
                 let mut server_guard = server_session.lock().await;
@@ -171,24 +196,37 @@ pub async fn start_test<R: tauri::Runtime>(
                     *server_guard = None;
                 }
             }
+            if let Some(d) = session_done.lock().await.remove(&spawned_id) {
+                d.notify_one();
+            }
             sessions.lock().await.remove(&spawned_id);
         });
     } else {
         let (tx, rx) = watch::channel(None);
+        let done = Arc::new(Notify::new());
         state
             .sessions
             .lock()
             .await
             .insert(session_id.clone(), SessionSignal::Engine(tx));
+        state
+            .session_done
+            .lock()
+            .await
+            .insert(session_id.clone(), done.clone());
+        let session_done = state.session_done.clone();
         tauri::async_runtime::spawn(async move {
             client::run_engine_client(app, spawned_id.clone(), request, rx, locale_handle).await;
+            if let Some(d) = session_done.lock().await.remove(&spawned_id) {
+                d.notify_one();
+            }
             sessions.lock().await.remove(&spawned_id);
         });
     }
     Ok(session_id)
 }
 
-/// 后端串行执行完整客户端队列。队列推进不再依赖某个 WebView 的 JS 定时器，
+/// 后端串行执行完整客户端队列。队列推进不再依赖某个 WebView 的 JS 定时器,
 /// 因而窗口分离、销毁或后台节流都不会让下一项永远无法启动。
 #[tauri::command]
 pub async fn start_test_queue<R: tauri::Runtime>(
@@ -220,6 +258,7 @@ pub async fn start_test_queue<R: tauri::Runtime>(
 
     let session_id = Uuid::new_v4().to_string();
     let (tx, rx) = watch::channel(None);
+    let done = Arc::new(Notify::new());
     {
         let mut queue_guard = state.client_queue_session.lock().await;
         let mut sessions_guard = state.sessions.lock().await;
@@ -231,7 +270,7 @@ pub async fn start_test_queue<R: tauri::Runtime>(
             if active {
                 return Err(tr(
                     &locale,
-                    "客户端测试队列已在运行，请先停止当前测试",
+                    "客户端测试队列已在运行,请先停止当前测试",
                     "A client test queue is already running. Stop it before starting again.",
                 )
                 .to_string());
@@ -242,9 +281,15 @@ pub async fn start_test_queue<R: tauri::Runtime>(
         sessions_guard.insert(session_id.clone(), SessionSignal::Engine(tx));
         *queue_guard = Some(session_id.clone());
     }
+    state
+        .session_done
+        .lock()
+        .await
+        .insert(session_id.clone(), done.clone());
 
     let spawned_id = session_id.clone();
     let sessions = state.sessions.clone();
+    let session_done = state.session_done.clone();
     let queue_session = state.client_queue_session.clone();
     let child_pids = state.child_pids.clone();
     let locale_handle = state.locale.clone();
@@ -305,6 +350,9 @@ pub async fn start_test_queue<R: tauri::Runtime>(
                 *queue_guard = None;
             }
         }
+        if let Some(d) = session_done.lock().await.remove(&spawned_id) {
+            d.notify_one();
+        }
         sessions.lock().await.remove(&spawned_id);
     });
     Ok(session_id)
@@ -346,23 +394,25 @@ pub async fn stop_test(state: State<'_, AppState>, session_id: String) -> Result
         }
         return Ok(());
     }
-    // stop_test 的完成语义必须是「任务已退出」，不能只是「信号已发送」；否则前端
-    // 会先显示已停止并允许重启，而后端单例仍在清理，随即误报“服务端已在运行”。
-    for _ in 0..100 {
-        if !sessions.lock().await.contains_key(&session_id) {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(50)).await;
+    // stop_test 的完成语义必须是「任务已退出」,不能只是「信号已发送」；否则前端
+    // 会先显示已停止并允许重启,而后端单例仍在清理,随即误报"服务端已在运行"。
+    // 通过 Notify 事件通知等待,不再轮询 sessions map。
+    let done = state.session_done.lock().await.remove(&session_id);
+    if let Some(done) = done {
+        let _ = tokio::time::timeout(Duration::from_secs(5), done.notified()).await;
+    }
+    if !sessions.lock().await.contains_key(&session_id) {
+        return Ok(());
     }
     Err(tr(
         &current_locale(&state.locale),
-        "停止请求已发送，但任务未在 5 秒内退出",
+        "停止请求已发送,但任务未在 5 秒内退出",
         "The stop request was sent, but the task did not exit within 5 seconds.",
     )
     .to_string())
 }
 
-/// 用系统文件管理器打开测试日志目录，返回目录路径
+/// 用系统文件管理器打开测试日志目录,返回目录路径
 #[tauri::command]
 pub async fn open_log_dir<R: tauri::Runtime>(app: AppHandle<R>) -> Result<String, String> {
     let dir = app
@@ -377,13 +427,13 @@ pub async fn open_log_dir<R: tauri::Runtime>(app: AppHandle<R>) -> Result<String
     Ok(dir.to_string_lossy().to_string())
 }
 
-/// 日志文件句柄：回调（同步）与主任务（异步）共用，加锁串行写入
+/// 日志文件句柄：回调（同步）与主任务（异步）共用,加锁串行写入
 pub(crate) struct TestLog {
     pub(crate) file: Arc<Mutex<StdFile>>,
     pub(crate) working_path: std::path::PathBuf,
     pub(crate) base_name: String,
-    /// 客户端运行日志：一轮队列的所有测试项共用并持续追加，finish 时不重命名；
-    /// false = 服务端单会话文件，完成时重命名为 -completed/-incomplete
+    /// 客户端运行日志：一轮队列的所有测试项共用并持续追加,finish 时不重命名；
+    /// false = 服务端单会话文件,完成时重命名为 -completed/-incomplete
     pub(crate) shared: bool,
 }
 pub(crate) type SessionLog = Arc<TestLog>;
@@ -392,7 +442,7 @@ pub(crate) type SessionLog = Arc<TestLog>;
 // 日志与结果处理
 // ---------------------------------------------------------------------------
 
-/// 创建测试日志文件并写入文件头，失败时发出错误事件
+/// 创建测试日志文件并写入文件头,失败时发出错误事件
 pub(crate) async fn setup_log<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
@@ -402,7 +452,7 @@ pub(crate) async fn setup_log<R: tauri::Runtime>(
 ) -> Option<SessionLog> {
     let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
     // 服务端与客户端日志分开记录。客户端不再按测试项分文件：一轮队列的所有
-    // 测试项（同一 runId）写入同一个运行日志 客户端-{本机IP}-{对端IP}-{运行时间}，
+    // 测试项（同一 runId）写入同一个运行日志 客户端-{本机IP}-{对端IP}-{运行时间},
     // 前缀随界面语言（客户端 / Client）；无 runId 时退化为本次会话时间戳。
     // 服务端保持单会话文件 服务端-{本机IP}-{端口}-{时间}
     let (shared, base_name) = if request.mode == "server" || request.task_id == "server" {
@@ -458,8 +508,8 @@ pub(crate) async fn setup_log<R: tauri::Runtime>(
         );
         return None;
     }
-    // 共享运行日志直接以最终文件名存在（无「进行中」后缀，也不重命名）；
-    // 服务端保留 进行中/in progress 工作名，完成时由 finish_log 重命名
+    // 共享运行日志直接以最终文件名存在（无「进行中」后缀,也不重命名）；
+    // 服务端保留 进行中/in progress 工作名,完成时由 finish_log 重命名
     let working_path = if shared {
         log_dir.join(format!("{base_name}.log"))
     } else {
@@ -516,7 +566,7 @@ pub(crate) async fn setup_log<R: tauri::Runtime>(
 }
 
 /// 同步追加一行日志（实时回调与主任务共用）。统一补换行：日志文件与界面日志
-/// 一样逐行呈现（此前只写内容不换行，多行输出在文件里粘成一行）
+/// 一样逐行呈现（此前只写内容不换行,多行输出在文件里粘成一行）
 pub(crate) fn append_log(log: &SessionLog, line: &str) {
     if let Ok(mut file) = log.file.lock() {
         let _ = file.write_all(line.as_bytes());
@@ -525,8 +575,8 @@ pub(crate) fn append_log(log: &SessionLog, line: &str) {
 }
 
 /// 客户端运行日志的路径推导（与 setup_log 的客户端分支一致）：按 runId 时间戳
-/// 定位，前缀随界面语言（客户端 / Client）。运行中切换界面语言时前缀可能与
-/// 创建时不同，按时间戳在日志目录中找回既有文件，避免超时补写落到新文件
+/// 定位,前缀随界面语言（客户端 / Client）。运行中切换界面语言时前缀可能与
+/// 创建时不同,按时间戳在日志目录中找回既有文件,避免超时补写落到新文件
 pub(crate) fn client_run_log_path<R: tauri::Runtime>(
     app: &AppHandle<R>,
     run_id: i64,
@@ -572,7 +622,7 @@ pub(crate) fn client_run_log_path<R: tauri::Runtime>(
 }
 
 /// 前端生成的队列级日志补写客户端运行日志文件：看门狗超时 / 首事件探针失败 /
-/// 驱动接管等前端日志不在后端事件流里，经此落入运行日志；写入失败静默跳过
+/// 驱动接管等前端日志不在后端事件流里,经此落入运行日志；写入失败静默跳过
 #[tauri::command]
 pub async fn append_client_log<R: tauri::Runtime>(app: AppHandle<R>, request: ClientLogAppend) {
     let Some(path) = client_run_log_path(
@@ -594,8 +644,8 @@ pub async fn append_client_log<R: tauri::Runtime>(app: AppHandle<R>, request: Cl
 }
 
 /// 客户端连不上服务端（未启动 / 端口错误 / 主机名解析失败 / 连接超时）——环境性
-/// 问题，队列里剩余引擎项必然同样失败。前端收到 fatal 事件后中止整个队列。
-/// 注意不能按 Io 错误一锅端：如 MPTCP 在不支持的平台上也是 Io(Unsupported)，
+/// 问题,队列里剩余引擎项必然同样失败。前端收到 fatal 事件后中止整个队列。
+/// 注意不能按 Io 错误一锅端：如 MPTCP 在不支持的平台上也是 Io(Unsupported),
 /// 那种逐项失败（如 tcp-mptcp）应继续队列而不是中止。
 pub(crate) fn is_server_unreachable(error: &riperf3::RiperfError) -> bool {
     match error {
@@ -623,7 +673,7 @@ pub(crate) async fn finish_engine<R: tauri::Runtime>(
     match outcome {
         Err(error) => {
             // 服务端不可达（未启动 / 端口错 / DNS 失败 / 超时）单独归类：给出可操作
-            // 的排查文案并标记 fatal，前端收到后中止整个队列
+            // 的排查文案并标记 fatal,前端收到后中止整个队列
             let (message, fatal) = if is_server_unreachable(&error) {
                 (
                     tr_format!(
@@ -638,8 +688,8 @@ pub(crate) async fn finish_engine<R: tauri::Runtime>(
                 &error,
                 riperf3::RiperfError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported
             ) {
-                // 平台不支持（如 Windows/macOS 内核无 IPPROTO_MPTCP，socket 创建报
-                // WSAEOPNOTSUPP）：给出明确文案，而非引擎的「无法连接服务端」误导
+                // 平台不支持（如 Windows/macOS 内核无 IPPROTO_MPTCP,socket 创建报
+                // WSAEOPNOTSUPP）：给出明确文案,而非引擎的「无法连接服务端」误导
                 // 信息；逐项失败继续队列（不中止）
                 (
                     tr_format!(
@@ -651,7 +701,7 @@ pub(crate) async fn finish_engine<R: tauri::Runtime>(
                     false,
                 )
             } else {
-                // 两类可操作的失败给出具体排查方向，其余沿用引擎原文
+                // 两类可操作的失败给出具体排查方向,其余沿用引擎原文
                 let message = match &error {
                     riperf3::RiperfError::ServerBusy => tr(
                         locale,
@@ -661,7 +711,7 @@ pub(crate) async fn finish_engine<R: tauri::Runtime>(
                     .to_string(),
                     riperf3::RiperfError::AccessDenied => tr(
                         locale,
-                        "认证被服务端拒绝：请核对用户名、密码，以及 RSA 公钥是否与服务端 --authorized-users-path 中的条目匹配；若对端 iperf3 低于 3.17，需勾选「PKCS#1 填充」。",
+                        "认证被服务端拒绝：请核对用户名、密码,以及 RSA 公钥是否与服务端 --authorized-users-path 中的条目匹配；若对端 iperf3 低于 3.17,需勾选「PKCS#1 填充」。",
                         "Authentication rejected: verify the username, password, and that the RSA public key matches an entry in the server's --authorized-users-path. Tick \"PKCS#1 padding\" if the peer iperf3 is older than 3.17.",
                     )
                     .to_string(),
@@ -684,15 +734,15 @@ pub(crate) async fn finish_engine<R: tauri::Runtime>(
                     "[INFO] {}",
                     tr(
                         locale,
-                        "测试结束，最终汇总：",
+                        "测试结束,最终汇总：",
                         "Test finished, final summary:"
                     )
                 ),
             );
             append_engine_summary(log, report, locale);
             // --get-server-output：服务端视角的汇总文本（标准 iperf3 服务端为
-            // 文本模式时才会产生；本机 LinkGauge 服务端是 JSON 模式，通常为空）。
-            // 写入测试日志并广播一条日志事件，随日志一并进入报告
+            // 文本模式时才会产生；本机 LinkGauge 服务端是 JSON 模式,通常为空）。
+            // 写入测试日志并广播一条日志事件,随日志一并进入报告
             if let Some(text) = report
                 .server_output_text
                 .as_deref()
@@ -707,7 +757,7 @@ pub(crate) async fn finish_engine<R: tauri::Runtime>(
                 append_log(log, &block);
                 emit_log(app, session_id, task_id, "INFO", block);
             }
-            // 汇总终点即实测结束秒（按量模式 / 预热下与名义 duration 不同，须取实测值）
+            // 汇总终点即实测结束秒（按量模式 / 预热下与名义 duration 不同,须取实测值）
             let measured_end = report
                 .end
                 .sum_sent
@@ -775,9 +825,9 @@ async fn dispatch_finish<R: tauri::Runtime>(
     }
 }
 
-/// 追加最终汇总（发送/接收方向的传输量与平均带宽，UDP 附抖动丢包）
-/// 最终汇总文本（发送/接收方向的传输量与平均带宽，UDP 附抖动丢包）：逐行
-/// [INFO] 前缀，测试项日志与客户端运行汇总文件共用
+/// 追加最终汇总（发送/接收方向的传输量与平均带宽,UDP 附抖动丢包）
+/// 最终汇总文本（发送/接收方向的传输量与平均带宽,UDP 附抖动丢包）：逐行
+/// [INFO] 前缀,测试项日志与客户端运行汇总文件共用
 pub(crate) fn engine_summary_lines(report: &riperf3::Report, locale: &str) -> String {
     let mut out = String::new();
     if let Some(sent) = &report.end.sum_sent {
@@ -835,8 +885,8 @@ pub(crate) fn append_engine_summary(log: &SessionLog, report: &riperf3::Report, 
     }
 }
 
-/// 最终汇总与区间采样语义不同：它是全程平均带宽与总传输量，不能追加到实时
-/// 曲线，否则最后会在同一时间坐标产生明显竖直突变。
+/// 最终汇总与区间采样语义不同：它是全程平均带宽与总传输量,不能追加到实时
+/// 曲线,否则最后会在同一时间坐标产生明显竖直突变。
 pub(crate) fn emit_final_summary<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session_id: &str,
@@ -955,7 +1005,7 @@ pub(crate) async fn finish_log(log: &SessionLog, success: bool) -> String {
         let _ = file.flush();
     }
     if log.shared {
-        // 客户端运行日志：整轮队列持续追加，不重命名
+        // 客户端运行日志：整轮队列持续追加,不重命名
         return log.working_path.to_string_lossy().to_string();
     }
     let final_path = log.working_path.with_file_name(format!(
@@ -974,7 +1024,7 @@ pub(crate) fn safe_name(value: &str) -> String {
         .collect()
 }
 
-/// 任务显示名：随界面语言输出，日志文件名（经 safe_name 净化）与日志头部共用——
+/// 任务显示名：随界面语言输出,日志文件名（经 safe_name 净化）与日志头部共用——
 /// 英文模式下产出英文文件名（如 Client-…-TCP One-way Bandwidth-…）
 pub(crate) fn task_label(locale: &str, id: &str) -> &'static str {
     if locale == "en" {
@@ -1081,7 +1131,7 @@ pub(crate) fn emit_queue_complete<R: tauri::Runtime>(
             event_type: "queue-complete".into(),
             status: Some(status.into()),
             level: None,
-            // 队列结束时携带最终逐项状态，供所有窗口一次性校准；否则漏掉某个
+            // 队列结束时携带最终逐项状态,供所有窗口一次性校准；否则漏掉某个
             // complete 的旧窗口会把 running 状态通过停止同步覆盖回其他窗口。
             message: Some(serde_json::json!({ "items": items }).to_string()),
             metric: None,
@@ -1167,7 +1217,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    /// 日志文件逐行换行：append_log 统一补 \n，多行内容与界面日志一样分行呈现
+    /// 日志文件逐行换行：append_log 统一补 \n,多行内容与界面日志一样分行呈现
     #[test]
     fn append_log_separates_lines_with_newline() {
         let dir = std::env::temp_dir().join(format!("linkgauge-log-test-{}", uuid::Uuid::new_v4()));
@@ -1300,7 +1350,7 @@ mod tests {
 
     #[test]
     fn tcp_tasks_map_to_tcp_regardless_of_protocol_field() {
-        // 混合队列中协议由 task_id 决定，request.protocol 字段不再参与
+        // 混合队列中协议由 task_id 决定,request.protocol 字段不再参与
         assert_eq!(
             client_params_for(&request("tcp-single", "client", "udp")).protocol,
             TransportProtocol::Tcp
@@ -1327,8 +1377,8 @@ mod tests {
     }
 
     /// 回归：界面选「不限制」的 UDP 测试必须解析出 0 并显式下发。
-    /// 曾经映射为 None 且调用点「为 None 就不调用 bandwidth()」，
-    /// 于是 riperf3 套用 iperf3 的 UDP_RATE 默认值，把不限速的 UDP
+    /// 曾经映射为 None 且调用点「为 None 就不调用 bandwidth()」,
+    /// 于是 riperf3 套用 iperf3 的 UDP_RATE 默认值,把不限速的 UDP
     /// 测试实际限到约 1 Mbps。
     #[test]
     fn udp_unlimited_bandwidth_stays_zero() {
@@ -1338,7 +1388,7 @@ mod tests {
             assert_eq!(
                 client_params_for(&req).bandwidth_bps,
                 0,
-                "{task}：不限制必须解析为 0，否则引擎会套用 1 Mibit/s 默认值"
+                "{task}：不限制必须解析为 0,否则引擎会套用 1 Mibit/s 默认值"
             );
         }
     }
@@ -1467,7 +1517,7 @@ mod tests {
         req.duration = 0;
         // 默认 0 = 不限制：全部通过
         assert!(crate::validation::validate(&req).is_ok());
-        // 上限边界：86400 通过，超限拒绝
+        // 上限边界：86400 通过,超限拒绝
         req.server_idle_timeout = 86400;
         req.server_max_duration = 86400;
         assert!(crate::validation::validate(&req).is_ok());
@@ -1477,7 +1527,7 @@ mod tests {
         req.server_max_duration = 86401;
         assert!(crate::validation::validate(&req).is_err());
         req.server_max_duration = 0;
-        // 带宽上限：1_000_000 Mbps 通过，超限拒绝
+        // 带宽上限：1_000_000 Mbps 通过,超限拒绝
         req.server_bitrate_limit_mbps = 1_000_000;
         assert!(crate::validation::validate(&req).is_ok());
         req.server_bitrate_limit_mbps = 1_000_001;
@@ -1568,7 +1618,7 @@ mod tests {
 
     #[test]
     fn byte_items_force_transfer_mode() {
-        // tcp-bytes：即使全局为按时长，也强制 bytes（数量取全局 transfer_amount）
+        // tcp-bytes：即使全局为按时长,也强制 bytes（数量取全局 transfer_amount）
         let mut req = request("tcp-bytes", "client", "tcp");
         req.transfer_mode = "time".into();
         req.transfer_amount = 5;
@@ -1587,7 +1637,7 @@ mod tests {
 
     #[test]
     fn feature_items_force_flags() {
-        // tcp-mptcp / udp-df：无论全局开关，测试项强制对应标志
+        // tcp-mptcp / udp-df：无论全局开关,测试项强制对应标志
         let req = request("tcp-mptcp", "client", "tcp");
         assert!(client_params_for(&req).mptcp);
         let req = request("udp-df", "client", "udp");
@@ -1618,8 +1668,8 @@ mod tests {
 
     #[test]
     fn server_request_without_transfer_mode_passes_validation() {
-        // 回归：服务端启动请求不携带 transfer_mode（serde 缺省空串），
-        // 空串必须按 time 处理，否则「启动服务」报错
+        // 回归：服务端启动请求不携带 transfer_mode（serde 缺省空串）,
+        // 空串必须按 time 处理,否则「启动服务」报错
         let mut req = request("server", "server", "tcp");
         req.duration = 0;
         req.transfer_mode = String::new();
@@ -1631,7 +1681,7 @@ mod tests {
     }
 
     /// 服务端不可达分类：连接被拒 / DNS 失败 / 超时 → fatal；平台不支持（如
-    /// Windows 上的 MPTCP，同样落在 Io）与认证拒绝等 → 非 fatal（队列继续）
+    /// Windows 上的 MPTCP,同样落在 Io）与认证拒绝等 → 非 fatal（队列继续）
     #[test]
     fn server_unreachable_classification() {
         use std::io::ErrorKind;
@@ -1642,7 +1692,7 @@ mod tests {
         assert!(is_server_unreachable(
             &riperf3::RiperfError::ConnectionTimeout
         ));
-        // 非 fatal：MPTCP 在 Windows 上就是 Io(Unsupported)，逐项失败应继续队列
+        // 非 fatal：MPTCP 在 Windows 上就是 Io(Unsupported),逐项失败应继续队列
         assert!(!is_server_unreachable(&io(ErrorKind::Unsupported)));
         assert!(!is_server_unreachable(&riperf3::RiperfError::ServerBusy));
         assert!(!is_server_unreachable(&riperf3::RiperfError::AccessDenied));
@@ -1655,12 +1705,12 @@ mod queue_tests {
     use std::sync::{Arc, Mutex};
     use tauri::Listener;
 
-    /// 基础请求（tests 模块的 request 为兄弟模块私有，此处内联构造）
+    /// 基础请求（tests 模块的 request 为兄弟模块私有,此处内联构造）
     fn base_request(task_id: &str, port: u16, run_id: i64) -> TestRequest {
         TestRequest {
             task_id: task_id.into(),
             mode: "client".into(),
-            run_id, // 每次运行唯一：汇总文件按 runId 区分，避免跨运行累积
+            run_id, // 每次运行唯一：汇总文件按 runId 区分,避免跨运行累积
             protocol: String::new(),
             server_ip: "127.0.0.1".into(),
             local_ip: "127.0.0.1".into(),
@@ -1698,8 +1748,8 @@ mod queue_tests {
         }
     }
 
-    /// 服务端异常退出可能留下单例标记和已关闭的会话信号；下一次启动应自愈，
-    /// 正常停止则必须等清理完成，随后可立即在同一端口重新启动。
+    /// 服务端异常退出可能留下单例标记和已关闭的会话信号；下一次启动应自愈,
+    /// 正常停止则必须等清理完成,随后可立即在同一端口重新启动。
     #[tokio::test(flavor = "multi_thread")]
     async fn server_session_recovers_stale_state_and_restarts_after_stop() {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1770,7 +1820,7 @@ mod queue_tests {
         stop_test(app.state::<AppState>(), second).await.unwrap();
     }
 
-    /// 快任务链端到端：tcp-bytes → udp-bytes → tcp-blocks 连续毫秒级任务，
+    /// 快任务链端到端：tcp-bytes → udp-bytes → tcp-blocks 连续毫秒级任务,
     /// 每个都必须收到 complete（复现「卡在第 N 项」——若后端事件缺失此处直接失败）
     #[tokio::test(flavor = "multi_thread")]
     async fn fast_task_chain_emits_complete_per_item() {
@@ -1779,7 +1829,7 @@ mod queue_tests {
         let port = probe.local_addr().unwrap().port();
         drop(probe);
 
-        // 服务端：循环 run_once 持续服务，测试结束发中断退出
+        // 服务端：循环 run_once 持续服务,测试结束发中断退出
         let (server_tx, server_rx) = tokio::sync::watch::channel(None);
         let server = riperf3::ServerBuilder::new()
             .port(Some(port))
@@ -1816,9 +1866,9 @@ mod queue_tests {
         });
 
         // 复现用户队列：ping 后连续 TCP/UDP 项（含 bidir 后的下一个连接——
-        // 服务端 run_once 处理反向连接返回后需回到监听，若服务端卡在旧会话，
+        // 服务端 run_once 处理反向连接返回后需回到监听,若服务端卡在旧会话,
         // 后续项的 complete 会缺失）
-        // 每次运行唯一 runId：汇总文件按 runId 命名，避免与历史运行的文件混淆
+        // 每次运行唯一 runId：汇总文件按 runId 命名,避免与历史运行的文件混淆
         let run_id = Local::now().timestamp_millis();
         let task_ids = [
             "tcp-single",
@@ -1890,14 +1940,14 @@ mod queue_tests {
                     .unwrap();
                 assert!(
                     summary < complete,
-                    "{task_id} 必须先汇总再完成，前端才能保存曲线"
+                    "{task_id} 必须先汇总再完成,前端才能保存曲线"
                 );
             }
             assert!(
                 captured
                     .iter()
                     .any(|(_, kind, message)| kind == "log" && message.starts_with("第 ")),
-                "输出周期指标必须同步到界面日志，不能长期停在开始测试"
+                "输出周期指标必须同步到界面日志,不能长期停在开始测试"
             );
         }
         let final_message = events
@@ -1914,7 +1964,7 @@ mod queue_tests {
             .iter()
             .all(|item| item["status"].as_str() == Some("success")));
 
-        // 客户端运行汇总文件：同一 runId 的 8 个测试项写入同一个文件，逐项有结果
+        // 客户端运行汇总文件：同一 runId 的 8 个测试项写入同一个文件,逐项有结果
         let summary_dir = app.path().app_log_dir().unwrap().join("tests");
         let run_stamp = Local
             .timestamp_millis_opt(run_id)
@@ -1954,7 +2004,7 @@ mod queue_tests {
                 server_ip: "127.0.0.1".into(),
                 locale: "zh".into(),
                 level: "ERROR".into(),
-                message: "任务 tcp-single 超过 30 秒未完成（超时，标记失败并继续下一项）".into(),
+                message: "任务 tcp-single 超过 30 秒未完成（超时,标记失败并继续下一项）".into(),
             },
         )
         .await;
