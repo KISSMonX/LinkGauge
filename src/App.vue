@@ -990,13 +990,13 @@ onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyn
       />
       <ConfigPanel
         v-else-if="side === 'client'"
-        detached="client" :tab="activeTab" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :mptcp-supported="mptcpSupported" :congestion-control-supported="congestionControlSupported" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="updateConfig" @update:server-config="serverConfig = $event" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength"
+        detached="client" :tab="activeTab" :config="config" :items="items" :mptcp-supported="mptcpSupported" :congestion-control-supported="congestionControlSupported" :client-running="clientRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
+        @update:config="updateConfig" @toggle-item="toggleItem" @reset="reset" @start="start" @stop="requestStop" @clear="clearLogs" @pick-nic="openNicDialog" @pick-public-key="pickPublicKey" @save-custom-length="saveCustomLength"
       />
       <ConfigPanel
         v-else-if="side === 'server'"
-        detached="server" :tab="'server'" :config="config" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :items="items" :mptcp-supported="mptcpSupported" :congestion-control-supported="congestionControlSupported" :client-running="clientRunning" :server-running="serverRunning" :local="local" :saved-custom-length="savedTcpLength" :saved-custom-udp-length="savedUdpLength"
-        @update:config="updateConfig" @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @start="start" @stop="requestStop" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic="openNicDialog()" @pick-nic-server="openNicDialog('bindIp')" @pick-public-key="pickPublicKey" @pick-auth-key="pickServerAuthKey" @pick-auth-users="pickServerAuthUsers" @save-custom-length="saveCustomLength" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
+        detached="server" :tab="'server'" :server-config="serverConfig" :ssh-config="sshConfig" :ssh-status="sshStatus" :server-running="serverRunning"
+        @update:server-config="serverConfig = $event" @update:ssh-config="sshConfig = $event" @start-server="startServer" @stop-server="requestStopServer" @clear="clearLogs" @pick-nic-server="openNicDialog('bindIp')" @pick-auth-key="pickServerAuthKey" @pick-auth-users="pickServerAuthUsers" @ssh-connect="sshConnect" @ssh-disconnect="sshDisconnect" @pick-private-key="pickPrivateKey"
       />
       <div v-else class="panel config-panel dock-empty">
         <h2>{{ t('tab.detachedTitle') }}</h2>

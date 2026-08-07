@@ -7,7 +7,20 @@ import { useTooltip } from '../composables/useTooltip'
 import Icon from './Icon.vue'
 
 /** tabs：主窗口已停靠的标签列表（undefined = 分离窗口，仅显示 detached 一侧） */
-const props = defineProps<{ tabs?: ('client' | 'server')[]; detached?: 'client' | 'server'; tab: 'client' | 'server'; config: TestConfig; serverConfig: ServerConfig; sshConfig: SshConfig; sshStatus: SshStatus; items: TestItem[]; mptcpSupported: boolean; congestionControlSupported: boolean; clientRunning: boolean; serverRunning: boolean; local: NetworkInfo; savedCustomLength: number; savedCustomUdpLength: number }>()
+const props = withDefaults(defineProps<{ tabs?: ('client' | 'server')[]; detached?: 'client' | 'server'; tab: 'client' | 'server'; config?: TestConfig; serverConfig?: ServerConfig; sshConfig?: SshConfig; sshStatus?: SshStatus; items?: TestItem[]; mptcpSupported?: boolean; congestionControlSupported?: boolean; clientRunning?: boolean; serverRunning?: boolean; local?: NetworkInfo; savedCustomLength?: number; savedCustomUdpLength?: number }>(), {
+  config: () => ({ mode: 'client' as const, serverIp: '', port: 5201, duration: 10, parallel: 1, bandwidth: 0, packetLength: 1500, udpPacketLength: 1500, omitSecs: 0, interval: 1, windowKb: 0, cport: 0, ipVersion: 0, transferMode: 'time' as const, transferAmount: 10, dscp: 0, congestionAlgo: '', udpDontFragment: false, mptcp: false, getServerOutput: false, authEnabled: false, authPkcs1Padding: false, authUsername: '', authPassword: '', authPublicKeyPath: '' }),
+  serverConfig: () => ({ port: 5201, bindIp: '', interval: 1, authEnabled: false, authPrivateKeyPath: '', authUsersPath: '', authPkcs1Padding: false, idleTimeout: 0, maxDuration: 0, bitrateLimit: 0 }),
+  sshConfig: () => ({ host: '', port: 22, username: 'root', authMethod: 'password' as const, password: '', privateKeyPath: '', passphrase: '' }),
+  sshStatus: 'idle' as SshStatus,
+  items: () => [] as TestItem[],
+  mptcpSupported: false,
+  congestionControlSupported: false,
+  clientRunning: false,
+  serverRunning: false,
+  local: () => ({ ip: '', mac: '', hostname: '', interfaceName: '', speedMbps: 0 }),
+  savedCustomLength: 1500,
+  savedCustomUdpLength: 1500,
+})
 const emit = defineEmits<{
   'update:tab': [value: 'client' | 'server']
   'update:config': [value: TestConfig]
