@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { NetworkInfo, ServerConfig, SshConfig, SshStatus, TestConfig, TestItem } from '../types'
 import { useI18n, type MessageKey } from '../i18n'
+import { useTabDrag } from '../composables/useTabDrag'
+import { useTooltip } from '../composables/useTooltip'
 import Icon from './Icon.vue'
 
 /** tabs：主窗口已停靠的标签列表（undefined = 分离窗口，仅显示 detached 一侧） */
@@ -37,66 +39,11 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
-const isTauri = () => '__TAURI_INTERNALS__' in window
 /** 当前展示的一侧：分离窗口固定为 detached，主窗口跟随激活标签 */
 const visibleSide = computed<'client' | 'server'>(() => props.detached ?? props.tab)
 
-// —— 标签页拖拽分离：pointer 事件 + 跟随光标的幽灵标签，拖出阈值松开即分离 ——
-const DETACH_THRESHOLD = 100
-const drag = ref<{ side: 'client' | 'server'; startX: number; startY: number; ghost: HTMLElement } | null>(null)
-const dragFar = ref(false)
-const suppressedClick = ref(false)
-
-function startTabDrag(side: 'client' | 'server', event: PointerEvent) {
-  // 仅在桌面端、主窗口标签栏可用；分离窗口没有标签栏
-  if (!isTauri() || !props.tabs?.length || event.button !== 0) return
-  const ghost = document.createElement('div')
-  ghost.className = 'tab-ghost'
-  ghost.textContent = t(side === 'client' ? 'common.client' : 'common.server')
-  document.body.appendChild(ghost)
-  drag.value = { side, startX: event.clientX, startY: event.clientY, ghost }
-  dragFar.value = false
-  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-  event.preventDefault()
-}
-function onTabDragMove(event: PointerEvent) {
-  const d = drag.value
-  if (!d) return
-  const dist = Math.hypot(event.clientX - d.startX, event.clientY - d.startY)
-  dragFar.value = dist > DETACH_THRESHOLD
-  d.ghost.textContent = t(d.side === 'client' ? 'common.client' : 'common.server')
-  d.ghost.classList.toggle('detach', dragFar.value)
-  if (dragFar.value) d.ghost.textContent += ` ${t('tab.detachRelease')}`
-  d.ghost.style.transform = `translate(${event.clientX - 8}px, ${event.clientY - 8}px)`
-}
-function endTabDrag(event: PointerEvent) {
-  const d = drag.value
-  if (!d) return
-  drag.value = null
-  dragFar.value = false
-  d.ghost.remove()
-  // pointercancel（捕获中断/窗口失焦）只清理，不触发分离
-  if (event.type !== 'pointerup') return
-  // 拖出阈值 = 分离；阈值内松开 = 弹回（本次拖拽抑制随后的 click 切标签）
-  if (Math.hypot(event.clientX - d.startX, event.clientY - d.startY) > DETACH_THRESHOLD) {
-    suppressedClick.value = true
-    emit('detach', d.side)
-  }
-}
-function onTabClick() {
-  // 拖拽结束后浏览器仍会派发 click，这里直接吞掉，避免误切换标签
-  if (suppressedClick.value) { suppressedClick.value = false; return }
-}
-/** 窗口失焦（拖拽中切到其他程序）时清理幽灵标签，避免残留 */
-function cancelTabDrag() {
-  const d = drag.value
-  if (!d) return
-  drag.value = null
-  dragFar.value = false
-  d.ghost.remove()
-}
-onMounted(() => { window.addEventListener('blur', cancelTabDrag) })
-onUnmounted(() => { window.removeEventListener('blur', cancelTabDrag) })
+// —— 标签页拖拽分离（composable 提取） ——
+const { dragFar, suppressedClick, startTabDrag, onTabDragMove, endTabDrag, onTabClick } = useTabDrag(t, props.tabs, (side) => emit('detach', side))
 
 const set = <K extends keyof TestConfig>(key: K, value: TestConfig[K]) => emit('update:config', { ...props.config, [key]: value })
 const setServer = <K extends keyof ServerConfig>(key: K, value: ServerConfig[K]) => emit('update:server-config', { ...props.serverConfig, [key]: value })
@@ -118,28 +65,8 @@ const amountLabel = computed(() => {
   return blocksOnly ? t('cfg.transferAmountBlocks') : t('cfg.transferAmountBytes')
 })
 
-// —— 悬停/点击提示（测试项介绍 + 参数项注释共用）：
-// fixed 定位浮动层不受面板 overflow 裁剪；hover 跟随鼠标，点击固定显示 ——
-const tooltip = ref<{ text: string; x: number; y: number; pinned: boolean } | null>(null)
-/** 贴近视口右/下缘时回退坐标，避免提示被挤出屏幕 */
-const clampTip = (x: number, y: number) => ({ x: Math.min(x + 14, window.innerWidth - 280), y: Math.min(y + 14, window.innerHeight - 70) })
-function showTip(event: MouseEvent, text: string) {
-  tooltip.value = { text, ...clampTip(event.clientX, event.clientY), pinned: false }
-}
-function moveTip(event: MouseEvent) {
-  if (tooltip.value && !tooltip.value.pinned) tooltip.value = { ...tooltip.value, ...clampTip(event.clientX, event.clientY) }
-}
-/** 点击切换固定显示：再次点击同一提示关闭；固定期间鼠标移开不隐藏 */
-function pinTip(event: MouseEvent, text: string) {
-  if (tooltip.value?.pinned && tooltip.value.text === text) {
-    tooltip.value = null
-    return
-  }
-  tooltip.value = { text, ...clampTip(event.clientX, event.clientY), pinned: true }
-}
-function hideTip() {
-  if (!tooltip.value?.pinned) tooltip.value = null
-}
+// —— 悬停/点击提示（composable 提取） ——
+const { tooltip, showTip, moveTip, pinTip, hideTip } = useTooltip()
 
 /** 带宽限制选项：当前网卡速率（默认） + 100 / 1000 / 0（不限制），相同速率去重 */
 const bandwidthOptions = computed(() => {
