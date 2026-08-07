@@ -70,5 +70,5 @@ export function useTabDrag(
   onMounted(() => { window.addEventListener('blur', cancelTabDrag) })
   onUnmounted(() => { window.removeEventListener('blur', cancelTabDrag) })
 
-  return { dragFar, suppressedClick, startTabDrag, onTabDragMove, endTabDrag, onTabClick }
+  return { startTabDrag, onTabDragMove, endTabDrag, onTabClick }
 }

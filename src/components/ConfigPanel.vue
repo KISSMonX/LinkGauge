@@ -43,7 +43,7 @@ const itemLabel = (id: string) => t(('cfg.item.' + id) as MessageKey)
 const visibleSide = computed<'client' | 'server'>(() => props.detached ?? props.tab)
 
 // —— 标签页拖拽分离（composable 提取） ——
-const { dragFar, suppressedClick, startTabDrag, onTabDragMove, endTabDrag, onTabClick } = useTabDrag(t, props.tabs, (side) => emit('detach', side))
+const { startTabDrag, onTabDragMove, endTabDrag, onTabClick } = useTabDrag(t, props.tabs, (side) => emit('detach', side))
 
 const set = <K extends keyof TestConfig>(key: K, value: TestConfig[K]) => emit('update:config', { ...props.config, [key]: value })
 const setServer = <K extends keyof ServerConfig>(key: K, value: ServerConfig[K]) => emit('update:server-config', { ...props.serverConfig, [key]: value })
