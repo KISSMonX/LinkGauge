@@ -17,3 +17,12 @@ export function formatTransfer(mb: number): string {
   if (mb >= 1000) return `${(mb / 1000).toFixed(2)} GB`
   return `${mb.toFixed(2)} MB`
 }
+
+/** 秒数 → H:MM:SS 格式（hours 段仅在 ≥1 小时时显示） */
+export function formatTime(s: number): string {
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const mmss = `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+  return h > 0 ? `${String(h).padStart(2, '0')}:${mmss}` : `00:${mmss}`
+}

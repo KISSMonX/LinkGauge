@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import type { MetricPoint, SshStatus } from '../types'
 import { useI18n } from '../i18n'
-import { formatBandwidth, formatTransfer } from '../format'
+import { formatBandwidth, formatTime, formatTransfer } from '../format'
 import BandwidthChart from './BandwidthChart.vue'
 import ServerViewTabs from './ServerViewTabs.vue'
 
@@ -12,7 +12,6 @@ const props = defineProps<{ bindTarget: string; port: number; running: boolean; 
 const emit = defineEmits<{ 'update:view': [value: 'overview' | 'ssh'] }>()
 const { t } = useI18n()
 const currentBandwidth = computed(() => props.points.at(-1)?.bandwidthMbps || 0)
-const formatTime = (s: number) => `00:${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 const validPoints = computed(() => props.points.filter((p) => p.bandwidthMbps > 0))
 const avgBandwidth = computed(() => {
   const valid = validPoints.value

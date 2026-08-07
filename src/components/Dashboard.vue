@@ -2,14 +2,13 @@
 import { computed } from 'vue'
 import type { NetworkInfo, ServerConfig, TestConfig, TestItem, MetricPoint, TestSummary } from '../types'
 import { itemLabel, useI18n } from '../i18n'
-import { formatBandwidth, formatTransfer } from '../format'
+import { formatBandwidth, formatTime, formatTransfer } from '../format'
 import BandwidthChart from './BandwidthChart.vue'
 
 const props = defineProps<{ local: NetworkInfo; config: TestConfig; serverConfig: ServerConfig; current?: TestItem; points: MetricPoint[]; progress: number; elapsed: number; summary: TestSummary; connected: boolean; serverRunning: boolean; live?: boolean; completedLabel?: string; localPort?: number }>()
 const { t } = useI18n()
 const currentBandwidth = computed(() => props.points.at(-1)?.bandwidthMbps || 0)
 const remain = computed(() => Math.max(0, props.config.duration - props.elapsed))
-const formatTime = (s: number) => `00:${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 const chartTitle = computed(() => {
   const label = props.current ? itemLabel(props.current.id) : (props.completedLabel || t('cfg.item.tcp-single'))
   return props.live ? t('dash.liveChart', { label }) : t('dash.doneChart', { label })
