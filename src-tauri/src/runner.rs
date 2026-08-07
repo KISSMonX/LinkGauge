@@ -1012,7 +1012,14 @@ pub(crate) async fn finish_log(log: &SessionLog, success: bool) -> String {
         log.base_name,
         if success { "completed" } else { "incomplete" }
     ));
-    let _ = fs::rename(&log.working_path, &final_path).await;
+    if let Err(e) = fs::rename(&log.working_path, &final_path).await {
+        eprintln!(
+            "[linkgauge] 日志重命名失败 {} -> {}：{e}",
+            log.working_path.display(),
+            final_path.display()
+        );
+        return log.working_path.to_string_lossy().to_string();
+    }
     final_path.to_string_lossy().to_string()
 }
 

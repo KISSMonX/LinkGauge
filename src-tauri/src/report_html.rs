@@ -50,6 +50,15 @@ pub(crate) fn render_html(request: &ReportRequest) -> String {
     }
 }
 
+/// 安全地将 f64 格式化为字符串，将 NaN / Inf 替换为 "—" 避免出现在 HTML 中。
+fn fmt_finite(v: f64, precision: usize) -> String {
+    if v.is_finite() {
+        format!("{v:.precision$}")
+    } else {
+        "—".to_string()
+    }
+}
+
 pub(crate) fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -230,7 +239,9 @@ fn readable_value(key: &str, v: &serde_json::Value, is_en: bool) -> String {
         serde_json::Value::Number(n) => n
             .as_f64()
             .map(|f| {
-                if f.fract() == 0.0 {
+                if !f.is_finite() {
+                    "—".to_string()
+                } else if f.fract() == 0.0 {
                     format!("{f:.0}")
                 } else {
                     format!("{f:.2}")
@@ -266,11 +277,24 @@ fn table_rows(points: &[MetricPoint]) -> String {
         .iter()
         .map(|p| {
             format!(
-                "<tr><td>{}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}</td><td>{:.2}%</td></tr>",
-                p.second, p.bandwidth_mbps, p.transfer_mb, p.jitter_ms, p.loss_percent
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}%</td></tr>",
+                fmt_field(p.second, 0),
+                fmt_finite(p.bandwidth_mbps, 2),
+                fmt_finite(p.transfer_mb, 2),
+                fmt_finite(p.jitter_ms, 2),
+                fmt_finite(p.loss_percent, 2),
             )
         })
         .collect::<String>()
+}
+
+/// Format an i64 field; delegates to fmt_finite (NaN → "—").
+fn fmt_field(v: i64, precision: usize) -> String {
+    if precision == 0 {
+        v.to_string()
+    } else {
+        fmt_finite(v as f64, precision)
+    }
 }
 
 pub(crate) fn status_word(status: &str, is_en: bool) -> String {
@@ -344,6 +368,10 @@ pub(crate) fn svg_curve(points: &[MetricPoint], is_en: bool) -> String {
     }
     let poly = points
         .iter()
+        .filter(|p| {
+            let v = value(p);
+            v.is_finite() && x_of(p.second).is_finite() && y_of(v).is_finite()
+        })
         .map(|p| format!("{:.1},{:.1}", x_of(p.second), y_of(value(p))))
         .collect::<Vec<_>>()
         .join(" ");

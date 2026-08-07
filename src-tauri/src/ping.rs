@@ -33,6 +33,31 @@ struct PingChild {
     pid: Option<u32>,
 }
 
+/// 从 child_pids 集合中移除 PID 的 RAII 守卫。
+/// 即使 ping 任务被 abort（future 直接 drop），PID 也不会泄漏在集合中。
+struct PidGuard {
+    pid: Option<u32>,
+    pids: Arc<AsyncMutex<HashSet<u32>>>,
+}
+
+impl PidGuard {
+    fn new(pid: Option<u32>, pids: Arc<AsyncMutex<HashSet<u32>>>) -> Self {
+        Self { pid, pids }
+    }
+}
+
+impl Drop for PidGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            let pids = self.pids.clone();
+            // 防护性清理：不在 Drop 中阻塞,提交一个尽力而为的清理任务
+            tauri::async_runtime::spawn(async move {
+                pids.lock().await.remove(&pid);
+            });
+        }
+    }
+}
+
 /// 启动 ping 子进程，挂接 stdout / stderr 读取器。
 fn spawn_ping(args: &[String]) -> Result<PingChild, String> {
     let mut command = Command::new("ping");
@@ -156,31 +181,42 @@ pub(crate) async fn run_ping<R: tauri::Runtime>(
             return ClientTaskResult::Failed;
         }
     };
-    if let Some(pid) = pid {
-        child_pids.lock().await.insert(pid);
-    }
+    let _pid_guard = PidGuard::new(pid, child_pids.clone());
     let mut ping_sample = 0;
     let mut final_success = false;
     let mut final_stopped = false;
     let mut final_timed_out = false;
+
+    /// 处理一行 ping 输出：写入日志、发送事件、解析指标。
+    macro_rules! process_line {
+        ($line:expr, $is_error:expr) => {{
+            let level = if $is_error { "WARN" } else { "INFO" };
+            let output_line = format!("[{level}] {}", $line);
+            append_log(&log, &output_line);
+            emit_log(&app, &session_id, &request.task_id, level, $line.clone());
+            if let Some(metric) = parse_ping_metric(&$line, ping_sample + 1) {
+                ping_sample += 1;
+                emit_metric(&app, &session_id, &request.task_id, metric);
+            }
+        }};
+    }
+
     let hard_timeout = sleep(client_task_timeout(&request));
     tokio::pin!(hard_timeout);
     loop {
         tokio::select! {
             status = child.wait() => {
                 final_success = status.map(|value| value.success()).unwrap_or(false);
+                // 子进程退出后，通道中可能还有已缓冲的行未读取
+                // —— 耗尽它们，避免丢失最后几行输出（#5）。
+                while let Ok((line, is_error)) = rx.try_recv() {
+                    process_line!(line, is_error);
+                }
                 break;
             }
             line = rx.recv() => {
                 if let Some((line, is_error)) = line {
-                    let level = if is_error { "WARN" } else { "INFO" };
-                    let output_line = format!("[{level}] {line}");
-                    append_log(&log, &output_line);
-                    emit_log(&app, &session_id, &request.task_id, level, line.clone());
-                    if let Some(metric) = parse_ping_metric(&line, ping_sample + 1) {
-                        ping_sample += 1;
-                        emit_metric(&app, &session_id, &request.task_id, metric);
-                    }
+                    process_line!(line, is_error);
                 }
             }
             _ = sleep(Duration::from_millis(100)) => {
@@ -198,9 +234,6 @@ pub(crate) async fn run_ping<R: tauri::Runtime>(
                 break;
             }
         }
-    }
-    if let Some(pid) = pid {
-        child_pids.lock().await.remove(&pid);
     }
     append_log(
         &log,

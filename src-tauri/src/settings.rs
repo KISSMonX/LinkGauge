@@ -45,7 +45,10 @@ fn save_settings(app: &AppHandle, settings: &AppSettings) -> Result<(), String> 
         fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     }
     let text = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
-    fs::write(path, text).map_err(|error| error.to_string())
+    // 先写入临时文件再原子重命名，避免并发写入时读到半截内容。
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &text).map_err(|error| error.to_string())?;
+    fs::rename(&tmp, &path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
