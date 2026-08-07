@@ -5,9 +5,9 @@
 use crate::models::TestRequest;
 use crate::runner::{
     append_engine_summary, append_log, current_locale, emit_log, fail_engine, finish_ok,
-    task_label, tr,
+    task_label, tr, SessionLog,
 };
-use riperf3::{ServerBuilder, Termination};
+use riperf3::{RiperfError, RunOutcome, ServerBuilder, Termination};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, RwLock,
@@ -336,207 +336,290 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
         request.bind_ip.clone()
     };
     let port = request.port;
-    let heartbeat = {
-        let log = log.clone();
-        let app = app.clone();
-        let session_id = session_id.clone();
-        let task_id = request.task_id.clone();
-        let completed = completed.clone();
-        let serving = serving.clone();
-        let latest = latest.clone();
-        let locale_handle = locale_handle.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
-            ticker.tick().await; // 跳过立即触发的第一次
-            let started = std::time::Instant::now();
-            loop {
-                ticker.tick().await;
-                // 界面语言运行时可变：心跳日志与状态事件实时读取当前语言
-                let locale = current_locale(&locale_handle);
-                let uptime = started.elapsed().as_secs();
-                let is_serving = serving.load(Ordering::Relaxed);
-                let done = completed.load(Ordering::Relaxed);
-                let snapshot = latest.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                // 文本日志行（写文件 + 广播）
-                let status_text = if is_serving {
-                    tr(&locale, "测试进行中", "test in progress")
-                } else {
-                    tr(&locale, "空闲", "idle")
-                };
-                let message = crate::tr_format!(
-                    &locale,
-                    "运行状态：监听 {}:{}，已运行 {}s，累计完成 {} 次测试，当前{}",
-                    "Status: listening on {}:{}, up {}s, {} tests completed, currently {}",
-                    bind_short,
-                    port,
-                    uptime,
-                    done,
-                    status_text
-                );
-                append_log(&log, &format!("[INFO] {message}"));
-                emit_log(&app, &session_id, &task_id, "INFO", message);
-                // 结构化统计事件：供服务端窗口的概览与实时曲线使用（携带当前测试的间隔统计与最近客户端地址）
-                let mut payload = serde_json::json!({
-                    "uptime": uptime,
-                    "completed": done,
-                    "serving": is_serving,
-                });
-                if let Some(s) = &snapshot {
-                    let obj = payload.as_object_mut().unwrap();
-                    obj.insert(
-                        "bandwidthMbps".into(),
-                        serde_json::json!(safe_f64(s.bandwidth_mbps)),
-                    );
-                    obj.insert(
-                        "transferMb".into(),
-                        serde_json::json!(safe_f64(s.transfer_mb)),
-                    );
-                    obj.insert("jitterMs".into(), serde_json::json!(safe_f64(s.jitter_ms)));
-                    obj.insert(
-                        "lossPercent".into(),
-                        serde_json::json!(safe_f64(s.loss_percent)),
-                    );
-                    obj.insert("retransmits".into(), serde_json::json!(s.retransmits));
-                    if !s.peer_ip.is_empty() {
-                        obj.insert("peerIp".into(), serde_json::json!(s.peer_ip));
-                        obj.insert("peerPort".into(), serde_json::json!(s.peer_port));
-                    }
-                }
-                let payload = payload.to_string();
-                let _ = app.emit(
-                    "test-event",
-                    crate::models::TestEvent {
-                        session_id: session_id.clone(),
-                        task_id: task_id.clone(),
-                        event_type: "status".into(),
-                        status: None,
-                        level: None,
-                        message: Some(payload),
-                        metric: None,
-                        log_path: None,
-                        fatal: None,
-                    },
-                );
-            }
-        })
-    };
+    let heartbeat = tauri::async_runtime::spawn(server_heartbeat(
+        log.clone(),
+        app.clone(),
+        session_id.clone(),
+        request.task_id.clone(),
+        completed.clone(),
+        serving.clone(),
+        latest.clone(),
+        locale_handle.clone(),
+        interval_secs,
+        bind_short,
+        port,
+    ));
 
     loop {
         // 每次迭代实时读取界面语言（切换语言后服务端日志立即跟随）
         let locale = current_locale(&locale_handle);
         match bound.run_once().await {
             Ok(outcome) => {
-                serving.store(false, Ordering::Relaxed);
-                completed.fetch_add(1, Ordering::Relaxed);
-                // 记录本次连接的客户端地址（服务端概览"对端=客户端"的数据源）
-                let peer = outcome
-                    .report
-                    .start
-                    .connected
-                    .first()
-                    .map(|c| (c.remote_host.clone(), c.remote_port));
-                // 测试结束（客户端已断开）：清空对端地址与统计，心跳事件不再携带
-                *latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                if outcome.termination == Termination::Interrupted {
-                    heartbeat.abort();
-                    append_log(
-                        &log,
-                        tr(
-                            &locale,
-                            "测试结果: 服务端已停止（手动停止）",
-                            "Result: server stopped (manual stop)",
-                        ),
-                    );
-                    emit_log(
-                        &app,
-                        &session_id,
-                        &request.task_id,
-                        "INFO",
-                        tr(
-                            &locale,
-                            "服务端已停止（手动停止）",
-                            "Server stopped (manual stop)",
-                        )
-                        .into(),
-                    );
-                    finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
-                    return;
-                }
-                // 单次测试结束：写入汇总并继续监听
-                let peer_text = peer
-                    .as_ref()
-                    .map(|(ip, p)| format!("{ip}:{p}"))
-                    .unwrap_or_else(|| tr(&locale, "未知地址", "unknown address").to_string());
-                append_log(
-                    &log,
-                    &format!(
-                        "[INFO] {}",
-                        crate::tr_format!(
-                            locale,
-                            "客户端 {} 完成测试，汇总如下：",
-                            "Client {} finished a test, summary:",
-                            peer_text
-                        )
-                    ),
-                );
-                append_engine_summary(&log, &outcome.report, &locale);
-                emit_log(
+                if !handle_server_connection(
                     &app,
                     &session_id,
                     &request.task_id,
-                    "INFO",
-                    crate::tr_format!(
-                        locale,
-                        "一次测试完成（客户端 {}），继续监听…",
-                        "Test finished (client {}), still listening…",
-                        peer_text
-                    ),
-                );
-            }
-            Err(error) => {
-                serving.store(false, Ordering::Relaxed);
-                *latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                // 空闲时收到停止信号返回 Aborted，正常退出；idle_timeout 到期
-                // 同样以 Aborted("idle timeout") 返回（one_off 下退出而非重启），
-                // 按原因区分日志文案
-                if let riperf3::RiperfError::Aborted(msg) = &error {
-                    heartbeat.abort();
-                    let (result_zh, result_en) = if msg == "idle timeout" {
-                        (
-                            "测试结果: 服务端已停止（空闲超时）",
-                            "Result: server stopped (idle timeout)",
-                        )
-                    } else {
-                        (
-                            "测试结果: 服务端已停止（手动停止）",
-                            "Result: server stopped (manual stop)",
-                        )
-                    };
-                    let (reason_zh, reason_en) = if msg == "idle timeout" {
-                        ("服务端已停止（空闲超时）", "Server stopped (idle timeout)")
-                    } else {
-                        ("服务端已停止（手动停止）", "Server stopped (manual stop)")
-                    };
-                    append_log(&log, tr(&locale, result_zh, result_en));
-                    emit_log(
-                        &app,
-                        &session_id,
-                        &request.task_id,
-                        "INFO",
-                        tr(&locale, reason_zh, reason_en).into(),
-                    );
-                    finish_ok(&app, &session_id, &request.task_id, &log, "stopped").await;
+                    &log,
+                    &locale,
+                    outcome,
+                    &serving,
+                    &completed,
+                    &latest,
+                    &heartbeat,
+                )
+                .await
+                {
                     return;
                 }
-                let warn = crate::tr_format!(
-                    locale,
-                    "一次连接处理失败：{}，继续监听",
-                    "Failed to handle a connection: {}, still listening",
-                    error
-                );
-                append_log(&log, &format!("[WARN] {warn}"));
-                emit_log(&app, &session_id, &request.task_id, "WARN", warn);
+            }
+            Err(error) => {
+                if !handle_server_listen_error(
+                    &app,
+                    &session_id,
+                    &request.task_id,
+                    &log,
+                    &locale,
+                    error,
+                    &serving,
+                    &latest,
+                    &heartbeat,
+                )
+                .await
+                {
+                    return;
+                }
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 辅助函数：从 run_engine_server 拆分，降低函数圈复杂度
+// ---------------------------------------------------------------------------
+
+/// 周期性心跳：按 interval_secs 间隔输出服务端运行状态日志与统计事件。
+async fn server_heartbeat<R: tauri::Runtime>(
+    log: SessionLog,
+    app: AppHandle<R>,
+    session_id: String,
+    task_id: String,
+    completed: Arc<AtomicU64>,
+    serving: Arc<AtomicBool>,
+    latest: Arc<Mutex<Option<ServerInterval>>>,
+    locale_handle: Arc<RwLock<String>>,
+    interval_secs: u64,
+    bind_short: String,
+    port: u16,
+) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+    ticker.tick().await; // 跳过立即触发的第一次
+    let started = std::time::Instant::now();
+    loop {
+        ticker.tick().await;
+        // 界面语言运行时可变：心跳日志与状态事件实时读取当前语言
+        let locale = current_locale(&locale_handle);
+        let uptime = started.elapsed().as_secs();
+        let is_serving = serving.load(Ordering::Relaxed);
+        let done = completed.load(Ordering::Relaxed);
+        let snapshot = latest.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        // 文本日志行（写文件 + 广播）
+        let status_text = if is_serving {
+            tr(&locale, "测试进行中", "test in progress")
+        } else {
+            tr(&locale, "空闲", "idle")
+        };
+        let message = crate::tr_format!(
+            &locale,
+            "运行状态：监听 {}:{}，已运行 {}s，累计完成 {} 次测试，当前{}",
+            "Status: listening on {}:{}, up {}s, {} tests completed, currently {}",
+            bind_short,
+            port,
+            uptime,
+            done,
+            status_text
+        );
+        append_log(&log, &format!("[INFO] {message}"));
+        emit_log(&app, &session_id, &task_id, "INFO", message);
+        // 结构化统计事件：供服务端窗口的概览与实时曲线使用
+        let mut payload = serde_json::json!({
+            "uptime": uptime,
+            "completed": done,
+            "serving": is_serving,
+        });
+        if let Some(s) = &snapshot {
+            let obj = payload.as_object_mut().unwrap();
+            obj.insert(
+                "bandwidthMbps".into(),
+                serde_json::json!(safe_f64(s.bandwidth_mbps)),
+            );
+            obj.insert(
+                "transferMb".into(),
+                serde_json::json!(safe_f64(s.transfer_mb)),
+            );
+            obj.insert("jitterMs".into(), serde_json::json!(safe_f64(s.jitter_ms)));
+            obj.insert(
+                "lossPercent".into(),
+                serde_json::json!(safe_f64(s.loss_percent)),
+            );
+            obj.insert("retransmits".into(), serde_json::json!(s.retransmits));
+            if !s.peer_ip.is_empty() {
+                obj.insert("peerIp".into(), serde_json::json!(s.peer_ip));
+                obj.insert("peerPort".into(), serde_json::json!(s.peer_port));
+            }
+        }
+        let payload = payload.to_string();
+        let _ = app.emit(
+            "test-event",
+            crate::models::TestEvent {
+                session_id: session_id.clone(),
+                task_id: task_id.clone(),
+                event_type: "status".into(),
+                status: None,
+                level: None,
+                message: Some(payload),
+                metric: None,
+                log_path: None,
+                fatal: None,
+            },
+        );
+    }
+}
+
+/// 处理一次成功的服务端连接测试结果。返回 `true` 表示继续监听。
+async fn handle_server_connection<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    task_id: &str,
+    log: &SessionLog,
+    locale: &str,
+    outcome: RunOutcome,
+    serving: &AtomicBool,
+    completed: &AtomicU64,
+    latest: &Mutex<Option<ServerInterval>>,
+    heartbeat: &tauri::async_runtime::JoinHandle<()>,
+) -> bool {
+    serving.store(false, Ordering::Relaxed);
+    completed.fetch_add(1, Ordering::Relaxed);
+    // 记录本次连接的客户端地址（服务端概览"对端=客户端"的数据源）
+    let peer = outcome
+        .report
+        .start
+        .connected
+        .first()
+        .map(|c| (c.remote_host.clone(), c.remote_port));
+    // 测试结束（客户端已断开）：清空对端地址与统计，心跳事件不再携带
+    *latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if outcome.termination == Termination::Interrupted {
+        heartbeat.abort();
+        append_log(
+            log,
+            tr(
+                locale,
+                "测试结果: 服务端已停止（手动停止）",
+                "Result: server stopped (manual stop)",
+            ),
+        );
+        emit_log(
+            app,
+            session_id,
+            task_id,
+            "INFO",
+            tr(
+                locale,
+                "服务端已停止（手动停止）",
+                "Server stopped (manual stop)",
+            )
+            .into(),
+        );
+        finish_ok(app, session_id, task_id, log, "stopped").await;
+        return false;
+    }
+    // 单次测试结束：写入汇总并继续监听
+    let peer_text = peer
+        .as_ref()
+        .map(|(ip, p)| format!("{ip}:{p}"))
+        .unwrap_or_else(|| tr(locale, "未知地址", "unknown address").to_string());
+    append_log(
+        log,
+        &format!(
+            "[INFO] {}",
+            crate::tr_format!(
+                locale,
+                "客户端 {} 完成测试，汇总如下：",
+                "Client {} finished a test, summary:",
+                peer_text
+            )
+        ),
+    );
+    append_engine_summary(log, &outcome.report, locale);
+    emit_log(
+        app,
+        session_id,
+        task_id,
+        "INFO",
+        crate::tr_format!(
+            locale,
+            "一次测试完成（客户端 {}），继续监听…",
+            "Test finished (client {}), still listening…",
+            peer_text
+        ),
+    );
+    true
+}
+
+/// 处理服务端监听循环中的错误。返回 `true` 表示继续监听。
+async fn handle_server_listen_error<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    task_id: &str,
+    log: &SessionLog,
+    locale: &str,
+    error: RiperfError,
+    serving: &AtomicBool,
+    latest: &Mutex<Option<ServerInterval>>,
+    heartbeat: &tauri::async_runtime::JoinHandle<()>,
+) -> bool {
+    serving.store(false, Ordering::Relaxed);
+    *latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    // 空闲时收到停止信号返回 Aborted，正常退出；idle_timeout 到期
+    // 同样以 Aborted("idle timeout") 返回（one_off 下退出而非重启），
+    // 按原因区分日志文案
+    if let RiperfError::Aborted(msg) = &error {
+        heartbeat.abort();
+        let (result_zh, result_en) = if msg == "idle timeout" {
+            (
+                "测试结果: 服务端已停止（空闲超时）",
+                "Result: server stopped (idle timeout)",
+            )
+        } else {
+            (
+                "测试结果: 服务端已停止（手动停止）",
+                "Result: server stopped (manual stop)",
+            )
+        };
+        let (reason_zh, reason_en) = if msg == "idle timeout" {
+            ("服务端已停止（空闲超时）", "Server stopped (idle timeout)")
+        } else {
+            ("服务端已停止（手动停止）", "Server stopped (manual stop)")
+        };
+        append_log(log, tr(locale, result_zh, result_en));
+        emit_log(
+            app,
+            session_id,
+            task_id,
+            "INFO",
+            tr(locale, reason_zh, reason_en).into(),
+        );
+        finish_ok(app, session_id, task_id, log, "stopped").await;
+        return false;
+    }
+    let warn = crate::tr_format!(
+        locale,
+        "一次连接处理失败：{}，继续监听",
+        "Failed to handle a connection: {}, still listening",
+        error
+    );
+    append_log(log, &format!("[WARN] {warn}"));
+    emit_log(app, session_id, task_id, "WARN", warn);
+    true
 }
