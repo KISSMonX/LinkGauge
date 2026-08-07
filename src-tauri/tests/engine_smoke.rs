@@ -7,6 +7,8 @@
 
 use riperf3::{ClientBuilder, ServerBuilder, Termination, TransportProtocol};
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
+use std::time::Duration;
 use tokio::sync::watch;
 
 /// 测试专用 RSA 密钥对（Node crypto 生成，仅用于本测试；公钥 SPKI PEM，
@@ -619,6 +621,8 @@ async fn congestion_control_works_end_to_end() {
     let bound = server.bind().await.unwrap();
     let addr = bound.local_addr().unwrap();
     let server_task = tokio::spawn(async move { bound.run_once().await });
+    // 给服务端一点时间启动 accept 循环，避免客户端连接时服务端还未就绪
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client = ClientBuilder::new("127.0.0.1")
         .port(Some(addr.port()))
