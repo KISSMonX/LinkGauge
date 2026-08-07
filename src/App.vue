@@ -70,6 +70,10 @@ const historyLabel = computed(() => selectedHistoryId.value ? itemLabel(selected
 const clientRunning = ref(false)
 const serverRunning = ref(false)
 const clientSession = ref('')
+/** 后端活动队列会话：不参与跨窗口同步，防止旧快照改写 clientSession 后丢弃真实事件。 */
+let activeClientQueueSession = ''
+/** 已处理的后端 start 序号（取队列下标）：不受响应式同步包回退影响。 */
+let activeQueueEventIndex = -1
 const serverSession = ref('')
 const activeTab = ref<'client' | 'server'>('client')
 const queue = ref<string[]>([])
@@ -140,13 +144,20 @@ let unlisten: UnlistenFn | undefined
 // —— 多窗口支持：窗口角色（主窗口 hub / 分离的 client / server）+ 标签停靠状态 ——
 const isTauri = () => '__TAURI_INTERNALS__' in window
 const ownLabel = isTauri() ? getCurrentWebviewWindow().label : 'main'
+/** 每次 WebView 创建时唯一；配合同步序号过滤自身回放和异步乱序包。 */
+const syncInstance = `${ownLabel}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+let syncSequence = 0
+const lastSyncSequence = new Map<string, number>()
 /** hub = 主窗口（标签页容器）；client / server = 分离出的独立窗口 */
 const side = ref<'hub' | 'client' | 'server'>(ownLabel === 'main' ? 'hub' : ownLabel === 'client' || ownLabel === 'server' ? ownLabel : 'hub')
 /** 主窗口中当前停靠的标签页列表（顺序固定为客户端在前） */
 const dockedTabs = ref<('client' | 'server')[]>(['client', 'server'])
-/** 驱动客户端任务队列的窗口 label：谁点「开始测试」谁驱动，其他窗口只展示不重复启动 */
+/** 客户端运行状态的同步权威窗口：实际测试队列由 Rust 后端串行执行 */
 const driver = ref('')
+/** 驱动权单调版本：同一轮测试内每次合法接管递增，防止旧窗口自称驱动并回退队列 */
+const driverRevision = ref(0)
 let syncing = false
+let syncApplyToken = 0
 /** 分离窗口启动后收到首个远端状态同步前，禁止对外广播：
  *  否则启动瞬间会把空 points/logs/会话广播出去，覆盖其他窗口的实时数据 */
 let stateReady = side.value === 'hub'
@@ -209,6 +220,7 @@ watch(sshConfig, (value) => { localStorage.setItem('linkgauge-ssh-config', JSON.
 
 // —— 跨窗口状态同步：任何本地变更广播 side-sync，其他窗口应用（syncing 标志防回声循环） ——
 function syncBundle(withLogs = false): SyncState {
+  syncSequence += 1
   return {
     config: config.value,
     serverConfig: serverConfig.value,
@@ -221,7 +233,10 @@ function syncBundle(withLogs = false): SyncState {
     queue: queue.value,
     queueIndex: queueIndex.value,
     driver: driver.value,
+    driverRevision: driverRevision.value,
     source: ownLabel,
+    sourceInstance: syncInstance,
+    syncSequence,
     savedTcpLength: savedTcpLength.value,
     savedUdpLength: savedUdpLength.value,
     summary: { ...summary },
@@ -253,57 +268,90 @@ function syncBundle(withLogs = false): SyncState {
     sshStatus: sshStatus.value,
   }
 }
+let syncQueued = false
+let syncEmitChain: Promise<void> = Promise.resolve()
 function emitSync() {
   if (!isTauri() || syncing || !stateReady) return
-  void emit('side-sync', syncBundle())
+  if (syncQueued) return
+  syncQueued = true
+  queueMicrotask(() => {
+    syncQueued = false
+    if (syncing || !stateReady) return
+    const payload = syncBundle()
+    // 同一窗口的快照串行发送，避免多个 watcher 同时 emit 后跨异步边界乱序到达。
+    syncEmitChain = syncEmitChain.then(() => emit('side-sync', payload)).catch(() => {})
+  })
 }
 async function applySync(payload: SyncState) {
+  // app.emit 会广播回发起窗口；自身快照可能在本地状态已前进后才返回，必须丢弃。
+  if (payload.source === ownLabel) return
+  const incomingInstance = payload.sourceInstance || payload.source
+  const incomingSequence = payload.syncSequence ?? 0
+  const lastSequence = lastSyncSequence.get(incomingInstance) ?? -1
+  if (incomingSequence > 0 && incomingSequence <= lastSequence) return
+  if (incomingSequence > 0) lastSyncSequence.set(incomingInstance, incomingSequence)
+  const applyToken = ++syncApplyToken
   syncing = true
-  // 首次同步（新分离窗口的初始化应答）视为可信快照，全量采纳；之后进入来源过滤
+  // 新分离窗口只应收到当前驱动的运行中快照；若异常收到非驱动快照，保持未就绪，
+  // 等待权威应答，避免第一次响应来自旧窗口时直接绑定错误驱动
   const firstSync = !stateReady
+  const validDriverClaim = payload.source === payload.driver
+  const incomingDriverRevision = payload.driverRevision ?? 0
+  if (firstSync && payload.clientRunning && !validDriverClaim) {
+    if (applyToken === syncApplyToken) syncing = false
+    return
+  }
   // 收到任何远端同步即视为已就绪（自己的广播在就绪前被抑制，此处收到的必为远端）
   stateReady = true
+  const localRunId = startedAt.value
+  const sameRun = payload.startedAt === localRunId
+  // 新一轮只能由「source=driver」的发起窗口建立；startedAt 单调递增，旧运行包
+  // 无法覆盖新运行。接管同样要求版本递增，旧窗口即使仍自称驱动也会被拒绝。
+  const newRun = payload.clientRunning && payload.startedAt > localRunId && validDriverClaim
+  const takeover = payload.clientRunning && sameRun && validDriverClaim && incomingDriverRevision > driverRevision.value
+  const currentDriver = sameRun && payload.source === driver.value && payload.driver === driver.value && incomingDriverRevision === driverRevision.value
+  // 停止状态同样只采纳当前同步权威窗口；所有窗口都会收到后端 queue-complete，
+  // 非权威窗口不得用漏事件的旧 items（仍为 running）覆盖最终状态。
+  const sameRunStop = sameRun && !payload.clientRunning && currentDriver
+  const acceptClientState = firstSync || newRun || takeover || currentDriver || sameRunStop
   config.value = payload.config
   serverConfig.value = payload.serverConfig
   local.value = payload.local
-  clientRunning.value = payload.clientRunning
   serverRunning.value = payload.serverRunning
-  // 队列运行中的展示状态（items 状态、进度、图表数据）只随驱动窗口同步：非驱动
-  // 窗口也会处理 complete 事件（本地更新状态但不推进队列），其副本总是滞后——
-  // 「已完成项仍标 running、新项还是 waiting」，整体替换会把驱动窗口的高亮/进度
-  // 回退。勾选（enabled）任意窗口可改，正常采纳；clientRunning=false（停止后）
-  // 恢复全量采纳，让 stopped/failed 标记与历史数据收敛。
-  if (firstSync || payload.source === payload.driver || !clientRunning.value) {
+  // 队列运行状态只采纳新一轮、当前驱动、较新接管或同轮停止；非驱动副本只同步
+  // enabled，不能用陈旧 items / queueIndex / clientRunning 回退驱动窗口。
+  // 已绑定后端队列后，start/metric/complete 才是运行状态的事实来源；来自另一
+  // 窗口、但生成于事件处理前的合法旧快照也不能回退当前项。
+  const preserveBackendState = !!activeClientQueueSession && payload.clientSession === activeClientQueueSession
+  if (acceptClientState && !preserveBackendState) {
+    clientRunning.value = payload.clientRunning
     items.value = payload.items
     progress.value = payload.progress
     points.value = payload.points
     completedPoints.value = payload.completedPoints
     itemHistory.value = payload.itemHistory
-  } else {
-    items.value.forEach((item, i) => { const remote = payload.items[i]; if (remote) item.enabled = remote.enabled })
-  }
-  serverSession.value = payload.serverSession
-  // 队列推进状态（queue/queueIndex/clientSession/driver）只采纳驱动窗口的同步：
-  // 非驱动窗口收到 complete 也会执行 completeCurrent（更新状态但不推进队列），
-  // 其广播携带旧 queueIndex；若驱动窗口采纳，队列会被「回退」到上一项——新任务
-  // 事件全部被会话匹配丢弃、看门狗因当前任务不匹配而失效，表现为随机静默卡死
-  // （日志停在「开始第 N+1 项」，进度条停在「第 N 项」）。clientRunning 保持
-  // 全源采纳：任意窗口点「停止」都要立即生效。
-  if (payload.source === payload.driver) {
     clientSession.value = payload.clientSession
     queue.value = payload.queue
     queueIndex.value = payload.queueIndex
     driver.value = payload.driver
+    driverRevision.value = incomingDriverRevision
+    Object.assign(summary, payload.summary)
+    completedLabel.value = payload.completedLabel
+    startedAt.value = payload.startedAt
+    connected.value = payload.connected
+    clientLocalPort.value = payload.clientLocalPort
+    if (payload.clientRunning && payload.clientSession) {
+      activeClientQueueSession = payload.clientSession
+      activeQueueEventIndex = payload.queueIndex
+    }
+  } else {
+    items.value.forEach((item, i) => { const remote = payload.items[i]; if (remote) item.enabled = remote.enabled })
   }
+  serverSession.value = payload.serverSession
   savedTcpLength.value = payload.savedTcpLength
   savedUdpLength.value = payload.savedUdpLength
-  Object.assign(summary, payload.summary)
-  // 运行中的瞬时数据已在上方按驱动窗口来源处理；UI 日志本地保留，与远端引擎日志合并
-  completedLabel.value = payload.completedLabel
+  // 运行中的瞬时数据已按权威来源处理；选择状态属于界面状态，可跨窗口同步
   selectedHistoryId.value = payload.selectedHistoryId
-  startedAt.value = payload.startedAt
-  connected.value = payload.connected
-  clientLocalPort.value = payload.clientLocalPort
   // 常规同步包不带日志（空数组），各窗口由 test-event 广播自行累积，不做替换；
   // 仅窗口初始化应答（withLogs）携带历史日志时整体合并一次
   if (payload.logs.length > 0) logs.value = [...logs.value.filter((l) => l.module === 'UI'), ...payload.logs]
@@ -322,7 +370,8 @@ async function applySync(payload: SyncState) {
   setTheme(payload.theme)
   // 等本次 Vue 变更刷完再解除标志，避免应用远端状态触发的 watcher 再广播回去
   await nextTick()
-  syncing = false
+  // 多个异步 applySync 可能交叠；只有最后开始应用的包可以解除广播抑制。
+  if (applyToken === syncApplyToken) syncing = false
 }
 /** 运行状态/会话等变化即时同步；计时器只在运行期间走动（已用时由 startedAt 推算，ticker 只负责触发重算） */
 watch(clientRunning, (running) => {
@@ -336,6 +385,7 @@ watch(serverSession, () => emitSync())
 watch(queue, () => emitSync())
 watch(queueIndex, () => emitSync())
 watch(driver, () => emitSync())
+watch(driverRevision, () => emitSync())
 watch(items, () => emitSync(), { deep: true })
 watch(local, () => emitSync())
 watch(savedTcpLength, () => emitSync())
@@ -352,7 +402,8 @@ watch(progress, () => emitSync())
 watch(startedAt, () => emitSync())
 watch(connected, () => emitSync())
 watch(clientLocalPort, () => emitSync())
-watch(logs, () => emitSync(), { deep: true })
+// 日志由 test-event 直接广播；不随每行变化再发送完整状态包。新窗口初始化时
+// syncBundle(true) 会一次性携带已有日志。
 watch(serverUptime, () => emitSync())
 watch(serverCompleted, () => emitSync())
 watch(serverServing, () => emitSync())
@@ -383,10 +434,10 @@ function dockTab(s: 'client' | 'server') {
   if (side.value !== 'hub') return
   const wasDetached = !dockedTabs.value.includes(s)
   dockedTabs.value = (['client', 'server'] as ('client' | 'server')[]).filter((x) => dockedTabs.value.includes(x) || x === s)
-  // 驱动窗口被收回时由主窗口接管队列驱动；若正处在任务间隙则补跑下一项
+  // 驱动窗口被收回时由主窗口接管同步权；测试队列始终由 Rust 后端继续执行。
   if (wasDetached && driver.value === s && clientRunning.value) {
+    driverRevision.value += 1
     driver.value = ownLabel
-    if (!current.value && queueIndex.value + 1 < queue.value.length) void runNext()
   }
 }
 /** 主窗口空状态：请求子窗口自行关闭（走 side-close → 正常收回流程），超时兜底直接收回 */
@@ -466,6 +517,7 @@ function validate() {
 
 /** 未启用认证时清空凭据后再下发，避免此前填过的用户名/密码被意外发送 */
 const authPayload = () => (config.value.authEnabled ? {} : { authUsername: '', authPassword: '', authPublicKeyPath: '', authPkcs1Padding: false })
+const clientRequest = (taskId: string) => ({ taskId, localIp: local.value.ip, locale: locale.value, runId: startedAt.value, ...config.value, ...authPayload() })
 
 /** 选择服务端 RSA 公钥文件（iperf3 认证用，对应 --rsa-public-key-path） */
 async function pickPublicKey() {
@@ -588,8 +640,7 @@ function openLink(url: string) {
 }
 
 async function start() {
-  // 重复开始守卫：队列运行中再次点击开始会在非驱动窗口产生第二个「驱动」，
-  // 双 start_test 调用、事件交错（配合 applySync 的驱动来源过滤）
+  // 重复开始守卫：后端另有客户端队列单例兜底，防止多窗口同时发起两轮测试。
   if (clientRunning.value) { log('WARN', t('log.alreadyRunning')); return }
   // 开始即全新一轮测试：以当前勾选的项目为队列，不涉及上次未完成测试的恢复
   if (config.value.bandwidth < 0) config.value.bandwidth = local.value.speedMbps > 0 ? local.value.speedMbps : 0
@@ -598,14 +649,26 @@ async function start() {
   const selected = items.value.filter((i) => i.enabled)
   if (!selected.length) { errorDialog.value = { title: t('err.noSelection'), message: t('err.noSelectionMsg') }; return }
   items.value.forEach((i) => { if (i.enabled) i.status = 'waiting' })
-  points.value = []; progress.value = 0; connected.value = false; startedAt.value = Date.now()
+  points.value = []; progress.value = 0; connected.value = false; startedAt.value = Math.max(Date.now(), startedAt.value + 1)
   selectedHistoryId.value = '' // 新一轮测试开始：图表回到实时模式
   summary.startedAt = new Date().toLocaleString('zh-CN', { hour12: false }); summary.completed = 0; summary.total = selected.length; summary.logPaths = []
   queue.value = selected.map((i) => i.id); queueIndex.value = -1; clientRunning.value = true
-  // 本窗口成为队列驱动者：只有它会在任务结束后启动下一项
+  // 本窗口成为多窗口状态同步的权威来源；实际测试队列由 Rust 后端串行驱动。
+  driverRevision.value = 1
   driver.value = ownLabel
   config.value.mode = 'client'
-  await runNext()
+  if (!isTauri()) { await runNext(); return }
+  activeClientQueueSession = ''
+  activeQueueEventIndex = -1
+  try {
+    const sid = await invoke<string>('start_test_queue', { requests: queue.value.map(clientRequest) })
+    if (clientRunning.value) { activeClientQueueSession = sid; clientSession.value = sid }
+  } catch (error) {
+    activeClientQueueSession = ''
+    activeQueueEventIndex = -1
+    if (queueIndex.value < 0) queueIndex.value = 0
+    failCurrent(String(error), true)
+  }
 }
 
 /** 停止确认弹窗：点击「停止测试 / 停止服务」先询问用户，确认后才真正停止 */
@@ -651,35 +714,17 @@ async function startServer() {
 }
 async function stopServer() {
   if (!serverRunning.value) return
-  try { if (isTauri() && serverSession.value) await invoke('stop_test', { sessionId: serverSession.value }) } catch (e) { log('WARN', String(e)) }
-  serverRunning.value = false; serverSession.value = ''
-  log('INFO', t('log.stopServer'))
+  try {
+    if (isTauri() && serverSession.value) await invoke('stop_test', { sessionId: serverSession.value })
+    serverRunning.value = false; serverSession.value = ''
+    log('INFO', t('log.stopServer'))
+  } catch (e) {
+    // 后端尚未确认退出时保持运行态，禁止用户立即重启撞上仍在清理的单例会话
+    log('WARN', String(e))
+    errorDialog.value = { title: t('err.serverError'), message: String(e) }
+  }
 }
 
-// —— 任务看门狗：事件丢失时的兜底推进（防静默卡死）——
-// 曾出现任务完成/失败事件未达前端时队列无限等待、日志图表静止的故障；
-// 启动任务后若在期限内未收到 complete/error，强制标记失败并继续下一项
-let watchdogTimer: number | undefined
-/** 首事件探针定时器：任务启动后若 10 秒内收不到任何本任务事件，直接判失败（见 armWatchdog） */
-let firstEventTimer: number | undefined
-/** 看门狗武装时的队列游标：超时触发条件 = 队列尚未越过该游标（越过 = 任务已正常
- *  完成/失败并推进）。按游标而非当前任务 id 判定——即使游标被任何异常回退，
- *  超时也必然触发，任何卡死都无法静默持续 */
-let watchdogArmedIndex = -1
-let firstEventArmedIndex = -1
-/** 任务类型感知的硬时限：从任务启动起算、不可被事件续期——任何卡死（invoke
- *  挂起、事件丢失、运行中途挂起）都必然超时，标记失败并继续下一项。按量/块
- *  任务若配置了带宽，按 传输量/带宽 估算预期时长 + 15 秒（下限 30 秒），避免
- *  慢速链路上的大传输量被误杀；ping 30 秒；按时长任务 duration+30 秒 */
-function taskLimitMs(taskId: string) {
-  if (taskId === 'tcp-bytes' || taskId === 'udp-bytes' || taskId === 'tcp-blocks') {
-    const bw = config.value.bandwidth
-    const expectedMs = bw > 0 ? (config.value.transferAmount * 8 / bw) * 1000 : 0
-    return Math.max(30_000, expectedMs + 15_000)
-  }
-  if (taskId === 'ping') return 30_000
-  return Math.max((config.value.duration + 30) * 1000, 30_000)
-}
 /** 前端生成的队列级日志补写客户端运行日志文件：这类日志不在后端事件流里
  * （界面可见但文件没有），经后端 append_client_log 命令落入运行日志 */
 function appendRunLog(level: string, message: string) {
@@ -688,54 +733,6 @@ function appendRunLog(level: string, message: string) {
     request: { runId: startedAt.value, localIp: local.value.ip, serverIp: config.value.serverIp, locale: locale.value, level, message },
   }).catch((e) => log('WARN', `运行日志补写失败（${String(e)}）——旧构建未注册 append_client_log 命令时需要重启应用`))
 }
-
-function armWatchdog(taskId: string) {
-  clearTimeout(watchdogTimer)
-  const limitMs = taskLimitMs(taskId)
-  watchdogArmedIndex = queueIndex.value
-  watchdogTimer = window.setTimeout(() => {
-    if (!clientRunning.value || queueIndex.value > watchdogArmedIndex) return
-    const msg = `任务 ${taskId} 超过 ${Math.round(limitMs / 1000)} 秒未完成（超时，标记失败并继续下一项）`
-    failCurrent(msg)
-  }, limitMs)
-  // 首事件探针：后端任务一旦启动会毫秒级发出「执行」事件；10 秒内没有任何本
-  // 任务事件基本可断定 invoke 丢失或事件通道异常（「开始第 N 项后连执行日志
-  // 都没有」的卡死形态）——直接判失败继续队列；迟到事件由任务匹配安全丢弃，
-  // 不会误伤
-  clearTimeout(firstEventTimer)
-  firstEventArmedIndex = queueIndex.value
-  firstEventTimer = window.setTimeout(() => {
-    if (!clientRunning.value || queueIndex.value > firstEventArmedIndex) return
-    const msg = t('log.taskNoStart', { task: itemLabel(taskId) })
-    failCurrent(msg)
-  }, 10_000)
-}
-function disarmWatchdog() { clearTimeout(watchdogTimer); clearTimeout(firstEventTimer) }
-
-let passiveTimer: number | undefined
-/** 驱动死亡守卫（仅主窗口）：驱动窗口被强杀（未走 side-dock 收回流程）或卡死时
- *  其同步停滞、队列无人推进。主窗口对当前任务同步武装被动看门狗：期限内驱动
- *  未推进（queueIndex 未变）且任务仍标记运行中，则接管驱动角色并判失败继续。
- *  看门狗超时通常由驱动窗口自身的计时器处理，此处只在驱动失效时兜底 */
-function armPassiveWatchdog(taskId: string) {
-  clearTimeout(passiveTimer)
-  const limitMs = taskLimitMs(taskId)
-  const armedIndex = queueIndex.value
-  passiveTimer = window.setTimeout(() => {
-    if (side.value !== 'hub' || !clientRunning.value || driver.value === ownLabel) return
-    if (queueIndex.value > armedIndex) return
-    const cur = items.value.find((i) => i.id === taskId)
-    if (!cur || cur.status !== 'running') return
-    driver.value = ownLabel
-    const msg = t('log.driverDead', { driver: driver.value, task: itemLabel(taskId) })
-    failCurrent(msg)
-  }, limitMs)
-}
-watch([clientRunning, queueIndex, driver], () => {
-  if (!clientRunning.value || driver.value === ownLabel || side.value !== 'hub') { clearTimeout(passiveTimer); return }
-  const taskId = queue.value[queueIndex.value]
-  if (taskId) armPassiveWatchdog(taskId)
-})
 
 async function runNext() {
   queueIndex.value += 1
@@ -749,18 +746,7 @@ async function runNext() {
   // 每个任务独立缓存：开始时清空实时数据，完成后快照到 completedPoints
   points.value = []
   log('INFO', t('log.startTask', { label: item ? itemLabel(item.id) : t('st.serverRunning') }))
-  if (!isTauri()) { simulateTask(taskId); return }
-  // 看门狗必须在 invoke 之前武装：若 invoke 挂起（后端无响应），队列会无限期
-  // 卡在当前项且没有任何事件触发兜底——「卡在第 N 项、日志不刷新」的最后一条
-  // 静默路径。invoke 正常返回后由其后的 complete/error 事件解除。
-  armWatchdog(taskId)
-  try {
-    const sid = await invoke<string>('start_test', { request: { taskId, localIp: local.value.ip, locale: locale.value, runId: startedAt.value, ...config.value, ...authPayload() } })
-    // invoke 挂起期间看门狗可能已判失败并推进队列，迟到的会话 id 不能覆盖新任务
-    if (queue.value[queueIndex.value] === taskId) clientSession.value = sid
-  } catch (error) {
-    failCurrent(String(error))
-  }
+  simulateTask(taskId)
 }
 
 function simulateTask(taskId: string) {
@@ -774,6 +760,44 @@ function simulateTask(taskId: string) {
 }
 
 function handleEvent(event: BackendEvent) {
+  if (event.type === 'queue-complete' &&
+      event.sessionId === (activeClientQueueSession || clientSession.value)) {
+    try {
+      const finalState = JSON.parse(event.message || '{}') as { items?: { taskId: string; status: TestItem['status'] }[] }
+      let completed = 0
+      for (const result of finalState.items ?? []) {
+        const item = items.value.find((candidate) => candidate.id === result.taskId)
+        if (item) item.status = result.status
+        if (result.status === 'success') completed++
+      }
+      summary.completed = completed
+    } catch (e) {
+      log('WARN', `队列最终状态解析失败：${String(e)}`)
+    }
+    finishRun(event.status === 'success')
+    return
+  }
+  // 后端是客户端队列的唯一驱动者；每项开始时先广播 start，所有窗口据此切换
+  // 当前项。首个 start 可能早于 start_test_queue 的 invoke 返回，因此同时用它
+  // 建立队列会话 ID，后续事件再严格按「会话 + 当前任务」匹配。
+  if (event.type === 'start' && event.taskId !== 'server') {
+    if (!activeClientQueueSession && !clientRunning.value) return
+    if (activeClientQueueSession && event.sessionId !== activeClientQueueSession) return
+    const index = queue.value.indexOf(event.taskId)
+    if (index < 0 || index <= activeQueueEventIndex) return
+    activeClientQueueSession = event.sessionId
+    activeQueueEventIndex = index
+    clientRunning.value = true
+    clientSession.value = event.sessionId
+    queueIndex.value = index
+    const item = items.value.find((i) => i.id === event.taskId)
+    if (item) item.status = 'running'
+    progress.value = Math.round(((index + 1) / Math.max(1, queue.value.length)) * 100)
+    points.value = []
+    connected.value = false
+    log('INFO', t('log.startTask', { label: item ? itemLabel(item.id) : event.taskId }))
+    return
+  }
   // 客户端本地端口状态事件：必须在会话匹配之前处理——同机测试 connect 极快，
   // 该事件可能早于 invoke('start_test') 的返回值（sessionId 尚未更新）到达，
   // 按 sessionId 匹配会被丢弃，而端口只在连接时发出一次，错过就无法显示。
@@ -788,15 +812,12 @@ function handleEvent(event: BackendEvent) {
       }
     } catch { /* ignore */ }
   }
-  // 会话匹配：任务极快完成时（如按量测试在回环上毫秒级传完），complete/日志
-  // 事件可能早于 invoke('start_test') 返回（clientSession 尚未更新）到达，
-  // 按 sessionId 匹配会被丢弃、队列卡死（AGENTS.md 的 loopback 时序问题——
-  // localPort 有特例处理，普通事件没有）。双条件匹配：当前队列任务 id 或
-  // clientSession 任一命中即属当前客户端任务；两者都是串行单会话，上一个
-  // 任务的迟到事件会被同时过滤（taskId 与 sessionId 都不再指向它）
-  const currentTaskId = queue.value[queueIndex.value]
-  const isClient = event.taskId !== 'server' && clientRunning.value &&
-    ((!currentTaskId || event.taskId === currentTaskId) || event.sessionId === clientSession.value)
+  // start 事件已经建立队列会话并切换当前任务；其余事件严格双重匹配，上一项
+  // 的尾部日志或重复完成事件不能误标下一项、解除下一项状态。
+  const currentTaskId = queue.value[activeQueueEventIndex >= 0 ? activeQueueEventIndex : queueIndex.value]
+  const eventQueueSession = activeClientQueueSession || clientSession.value
+  const isClient = event.taskId !== 'server' && !!eventQueueSession &&
+    event.taskId === currentTaskId && event.sessionId === eventQueueSession
   const isServer = event.taskId === 'server' && serverRunning.value
   if (!isClient && !isServer) {
     // 任务切换瞬间，上一任务的迟到事件（引擎报告器最后一次 flush 与 complete
@@ -837,8 +858,6 @@ function handleEvent(event: BackendEvent) {
   }
   // 客户端事件：停止或结束后的事件忽略
   if (!clientRunning.value) return
-  // 首事件探针解除：收到当前任务的任何事件（执行/指标/端口状态等）即视为启动成功
-  if (event.taskId === currentTaskId) clearTimeout(firstEventTimer)
   if (event.type === 'metric' && event.metric) { points.value.push(event.metric); connected.value = true; if (event.taskId === 'ping' && event.metric.jitterMs) summary.pingAverage = event.metric.jitterMs }
   if (event.type === 'complete') completeCurrent(event.status || 'success')
   // 后端错误在发出事件前已经写入运行日志；这里只更新界面与队列，避免重复落盘
@@ -852,7 +871,6 @@ function snapshotItem(id: string, status: TestItem['status']) {
 }
 
 function completeCurrent(status: TestItem['status']) {
-  disarmWatchdog()
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = status
   if (status === 'success') summary.completed++
   // 快照本次测试的完整数据到内存缓存（测试完成后图表显示；退出应用即销毁）
@@ -864,12 +882,12 @@ function completeCurrent(status: TestItem['status']) {
   if (status === 'success') log('INFO', t('log.taskDone', { label: item ? itemLabel(item.id) : '' }))
   progress.value = Math.round(((queueIndex.value + 1) / queue.value.length) * 100)
   if (status === 'failed') { failCurrent(t('log.processExited')); return }
-  // 仅驱动窗口启动下一项，避免多个窗口重复拉起同一个任务
-  if (driver.value === ownLabel) void runNext()
+  // 桌面端下一项由 Rust 队列自动启动；预览模式仍使用本地模拟队列。
+  if (!isTauri() && driver.value === ownLabel) void runNext()
+  else if (queueIndex.value + 1 >= queue.value.length) finishRun(true)
 }
 
 function failCurrent(message: string, abort = false, persist = true) {
-  disarmWatchdog()
   const item = items.value.find((i) => i.id === queue.value[queueIndex.value]); if (item) item.status = 'failed'
   completedPoints.value = [...points.value]
   snapshotItem(queue.value[queueIndex.value], 'failed')
@@ -882,17 +900,13 @@ function failCurrent(message: string, abort = false, persist = true) {
   // 产生一串无意义失败，由用户修复环境后重新开始测试
   if (abort) {
     finishRun(false)
-  } else {
-    // 单项失败不中止队列：标记 failed 后继续下一项（失败原因保留在弹窗与日志/报告中）。
-    // 曾因 finishRun(false) 中止整个队列——默认队列里 tcp-mptcp 在不支持的平台上必然
-    // 失败，表现为「卡在第 N 项、日志不刷新」（队列已停但 UI 无提示）
-    if (driver.value === ownLabel) void runNext()
-  }
+  } else if (!isTauri() && driver.value === ownLabel) void runNext()
+  else if (queueIndex.value + 1 >= queue.value.length) finishRun(true)
   const lastLog = summary.logPaths.at(-1)
   errorDialog.value = { title: t('err.alert'), message: lastLog ? `${(abort ? `${t('err.queueAborted')}\n\n` : '') + message}\n\n${t('err.logFile', { path: lastLog })}` : message }
 }
-function finishRun(completed: boolean) { disarmWatchdog(); clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100 } log('INFO', t('log.finish')) }
-async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); if (item) snapshotItem(item.id, 'stopped'); try { if (isTauri() && clientSession.value) await invoke('stop_test', { sessionId: clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; finishRun(false) }
+function finishRun(completed: boolean) { clientRunning.value = false; clientSession.value = ''; connected.value = false; if (completed) { progress.value = 100 } log('INFO', t('log.finish')) }
+async function stop() { if (!clientRunning.value) return; completedPoints.value = [...points.value]; const item = current.value; if (item) completedLabel.value = itemLabel(item.id); if (item) snapshotItem(item.id, 'stopped'); try { if (isTauri() && (activeClientQueueSession || clientSession.value)) await invoke('stop_test', { sessionId: activeClientQueueSession || clientSession.value }) } catch (e) { log('WARN', String(e)) }; if (item) item.status = 'stopped'; finishRun(false) }
 
 const reportStamp = () => {
   const n = new Date()
@@ -969,7 +983,12 @@ onMounted(async () => {
       unlistenSync = await listen<SyncState>('side-sync', (e) => applySync(e.payload))
       // 其他窗口请求当前状态（新分离的窗口启动时主动请求）：定向应答完整快照
       // （含历史日志，withLogs=true），不广播给其他窗口以免其日志被副本替换
-      unlistenSyncReq = await listen<{ from: string }>('side-sync-request', (e) => { if (stateReady) void emitTo(e.payload.from, 'side-sync', syncBundle(true)) })
+      unlistenSyncReq = await listen<{ from: string }>('side-sync-request', (e) => {
+        // 测试运行中由当前驱动、空闲时由主窗口提供唯一初始化快照；否则多个窗口
+        // 同时应答，新窗口可能先采纳陈旧 queueIndex / driver，再参与广播造成回退。
+        const authoritative = clientRunning.value ? driver.value === ownLabel : ownLabel === 'main'
+        if (stateReady && authoritative) void emitTo(e.payload.from, 'side-sync', syncBundle(true))
+      })
       if (side.value === 'hub') {
         unlistenDock = await listen<DockEvent>('side-dock', (e) => dockTab(e.payload.side))
         // 主窗口关闭（✕）= 弹退出确认框：确认后调用 exit_app 退出整个应用，取消则保持打开

@@ -118,6 +118,7 @@ pub fn run() {
             get_app_info,
             open_url,
             runner::start_test,
+            runner::start_test_queue,
             runner::stop_test,
             runner::append_client_log,
             runner::set_locale,
