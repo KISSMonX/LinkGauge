@@ -10,7 +10,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 const DETACH_THRESHOLD = 100
 
 export function useTabDrag(
-  t: (...args: any[]) => string,
+  t: (key: import('../i18n').MessageKey, vars?: Record<string, string | number>) => string,
   tabs: ('client' | 'server')[] | undefined,
   onDetach: (side: 'client' | 'server') => void,
 ) {

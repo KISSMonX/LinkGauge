@@ -16,7 +16,7 @@ export function useSshConsole(
   log: (level: LogEntry['level'], message: string, module?: string) => void,
   errorDialog: Ref<{ title: string; message: string } | null>,
   infoDialog: Ref<{ title: string; message: string } | null>,
-  t: (...args: any[]) => string,
+  t: (key: import('../i18n').MessageKey, vars?: Record<string, string | number>) => string,
   sshConfig: Ref<SshConfig>,
   serverView: Ref<string>,
 ) {
