@@ -194,21 +194,22 @@ pub(crate) async fn run_engine_client<R: tauri::Runtime>(
     };
     // 界面语言运行时可变：日志输出点实时读取，切换语言后立即生效
     let locale = current_locale(&locale_handle);
+    let params = client_params_for(&request);
     let header = crate::tr_format!(
         &locale,
         "引擎: riperf3 {}（纯 Rust 内置，无需安装 iperf3）\n参数: {}, 端口 {}, 时长 {}s, 并发 {}, 带宽 {}, 报文长度 {}, 输出周期 {}s\n",
         "Engine: riperf3 {} (pure Rust, built-in, no iperf3 needed)\nParams: {}, port {}, duration {}s, streams {}, bandwidth {}, packet length {}, interval {}s\n",
         riperf3::VERSION,
-        if client_params_for(&request).protocol == TransportProtocol::Udp { "UDP" } else { "TCP" },
+        if params.protocol == TransportProtocol::Udp { "UDP" } else { "TCP" },
         request.port,
         request.duration,
-        client_params_for(&request).num_streams,
+        params.num_streams,
         if request.bandwidth > 0 {
             format!("{}M", request.bandwidth)
         } else {
             tr(&locale, "不限制", "unlimited").into()
         },
-        if client_params_for(&request).protocol == TransportProtocol::Udp {
+        if params.protocol == TransportProtocol::Udp {
             request.udp_packet_length
         } else {
             request.packet_length as u64
@@ -225,8 +226,6 @@ pub(crate) async fn run_engine_client<R: tauri::Runtime>(
     );
     append_log(&log, &format!("[INFO] {exec_line}"));
     emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
-
-    let params = client_params_for(&request);
     let builder = engine_client_builder(EngineClientContext {
         app: &app,
         session_id: &session_id,
