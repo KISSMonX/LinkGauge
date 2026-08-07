@@ -20,10 +20,23 @@ fn settings_path(app: &AppHandle) -> PathBuf {
 }
 
 fn load_settings(app: &AppHandle) -> AppSettings {
-    fs::read_to_string(settings_path(app))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    let path = settings_path(app);
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return AppSettings::default(),
+    };
+    match serde_json::from_str(&text) {
+        Ok(settings) => settings,
+        Err(error) => {
+            // 损坏的设置文件会静默回退到默认值。开发构建中打印警告帮助诊断；
+            // 正式构建中仅写入标准错误，不影响应用启动。
+            eprintln!(
+                "[linkgauge] 无法解析设置文件 {}，已恢复默认值：{error}",
+                path.display()
+            );
+            AppSettings::default()
+        }
+    }
 }
 
 fn save_settings(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
