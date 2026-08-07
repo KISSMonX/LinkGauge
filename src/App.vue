@@ -14,7 +14,7 @@ import SshConsole from './components/SshConsole.vue'
 import StatusPanel from './components/StatusPanel.vue'
 import ReportSummary from './components/ReportSummary.vue'
 import Icon from './components/Icon.vue'
-import { itemLabel, useI18n, type Locale } from './i18n'
+import { dateLocale, itemLabel, useI18n, type Locale } from './i18n'
 import { theme, setTheme, type Theme } from './theme'
 import { clearTerminal } from './terminal'
 import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, NetworkSnapshot, ServerConfig, SshConfig, SshEvent, SyncState, TestConfig, TestItem, TestSummary } from './types'
@@ -182,7 +182,7 @@ let unlistenExit: UnlistenFn | undefined
 const showServerView = computed(() => side.value === 'server' || (side.value === 'hub' && activeTab.value === 'server'))
 const current = computed(() => items.value.find((i) => i.status === 'running'))
 const summary = reactive<TestSummary>({ startedAt: '', completed: 0, total: 0, averageBandwidth: 0, maxBandwidth: 0, minBandwidth: 0, totalTransferMb: 0, pingAverage: 0, lossPercent: 0, jitterMs: 0, logPaths: [] })
-const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false })
+const now = () => new Date().toLocaleTimeString(dateLocale(), { hour12: false })
 const log = (level: LogEntry['level'], message: string, module = 'UI') => logs.value.push({ time: now(), level, module, message })
 // ---- Composables: extracted state + operations (must be after isTauri/log declarations) ----
 const {
@@ -594,7 +594,7 @@ async function start() {
   items.value.forEach((i) => { if (i.enabled) i.status = 'waiting' })
   points.value = []; progress.value = 0; connected.value = false; startedAt.value = Math.max(Date.now(), startedAt.value + 1)
   selectedHistoryId.value = '' // 新一轮测试开始：图表回到实时模式
-  summary.startedAt = new Date().toLocaleString('zh-CN', { hour12: false }); summary.completed = 0; summary.total = selected.length; summary.logPaths = []
+  summary.startedAt = new Date().toLocaleString(dateLocale(), { hour12: false }); summary.completed = 0; summary.total = selected.length; summary.logPaths = []
   queue.value = selected.map((i) => i.id); queueIndex.value = -1; clientRunning.value = true
   // 本窗口成为多窗口状态同步的权威来源；实际测试队列由 Rust 后端串行驱动。
   driverRevision.value = 1

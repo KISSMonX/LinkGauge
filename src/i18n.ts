@@ -839,6 +839,11 @@ export function itemLabel(id: string): string {
   return t(('cfg.item.' + id) as MessageKey)
 }
 
+/** BCP 47 locale string for date/time formatting. */
+export function dateLocale(): string {
+  return locale.value === 'zh' ? 'zh-CN' : 'en-US'
+}
+
 export function useI18n() {
   return { locale, t, setLocale }
 }
