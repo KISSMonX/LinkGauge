@@ -125,7 +125,6 @@ export function useSshConsole(
     sshSession,
     sshStatus,
     sshTerminal,
-    sshPrimed,
     pickPrivateKey,
     sshConnect,
     sshDisconnect,

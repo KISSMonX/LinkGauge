@@ -192,7 +192,7 @@ const {
   refreshServerState, startServer, stopServer,
 } = useServer(isTauri, log, errorDialog, t, locale, serverConfig, local)
 const {
-  sshSession, sshStatus, sshTerminal, sshPrimed,
+  sshSession, sshStatus, sshTerminal,
   pickPrivateKey, sshConnect, sshDisconnect, sshSend, sshResize,
   primeConsole, handleSshEvent,
 } = useSshConsole(isTauri, log, errorDialog, infoDialog, t, sshConfig, serverView)
