@@ -227,15 +227,15 @@ pub(crate) async fn run_engine_client<R: tauri::Runtime>(
     emit_log(&app, &session_id, &request.task_id, "INFO", exec_line);
 
     let params = client_params_for(&request);
-    let builder = engine_client_builder(
-        &app,
-        &session_id,
-        &request,
-        &params,
-        &log,
-        &locale_handle,
+    let builder = engine_client_builder(EngineClientContext {
+        app: &app,
+        session_id: &session_id,
+        request: &request,
+        params: &params,
+        log: &log,
+        locale_handle: &locale_handle,
         rx,
-    );
+    });
     let client = match builder.build() {
         Ok(client) => client,
         Err(error) => {
@@ -290,23 +290,27 @@ pub(crate) async fn run_engine_client<R: tauri::Runtime>(
     .await
 }
 
+/// 构造一次 riperf3 客户端 builder 的上下文。
+pub(crate) struct EngineClientContext<'a, R: tauri::Runtime> {
+    pub app: &'a AppHandle<R>,
+    pub session_id: &'a str,
+    pub request: &'a TestRequest,
+    pub params: &'a ClientParams,
+    pub log: &'a SessionLog,
+    pub locale_handle: &'a Arc<RwLock<String>>,
+    pub rx: watch::Receiver<Option<String>>,
+}
+
 /// 构造一次 riperf3 客户端 builder。
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn engine_client_builder<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    session_id: &str,
-    request: &TestRequest,
-    params: &ClientParams,
-    log: &SessionLog,
-    locale_handle: &Arc<RwLock<String>>,
-    rx: watch::Receiver<Option<String>>,
+    ctx: EngineClientContext<'_, R>,
 ) -> ClientBuilder {
     // 实时指标回调：每输出周期触发一次，发出 metric 事件并写入日志
-    let hook_app = app.clone();
-    let hook_session = session_id.to_string();
-    let hook_task = request.task_id.clone();
-    let hook_log = log.clone();
-    let hook_locale = locale_handle.clone();
+    let hook_app = ctx.app.clone();
+    let hook_session = ctx.session_id.to_string();
+    let hook_task = ctx.request.task_id.clone();
+    let hook_log = ctx.log.clone();
+    let hook_locale = ctx.locale_handle.clone();
     let on_interval = move |interval: &riperf3::json_report::Interval| {
         if interval.sum.omitted {
             return;
@@ -331,21 +335,21 @@ pub(crate) fn engine_client_builder<R: tauri::Runtime>(
         emit_log(&hook_app, &hook_session, &hook_task, "INFO", message);
     };
 
-    let mut builder = ClientBuilder::new(&request.server_ip)
-        .port(Some(request.port))
-        .protocol(params.protocol)
-        .duration(params.duration)
-        .num_streams(params.num_streams)
-        .interval(params.interval)
+    let mut builder = ClientBuilder::new(&ctx.request.server_ip)
+        .port(Some(ctx.request.port))
+        .protocol(ctx.params.protocol)
+        .duration(ctx.params.duration)
+        .num_streams(ctx.params.num_streams)
+        .interval(ctx.params.interval)
         .json_output(true)
         .emit_output(false)
-        .interrupt(rx)
+        .interrupt(ctx.rx)
         .on_interval(on_interval)
         .on_connect({
             // 控制连接建立即广播本地端口（客户端"连接状态"展示本次连接的本地端口）
-            let app = app.clone();
-            let session_id = session_id.to_string();
-            let task_id = request.task_id.clone();
+            let app = ctx.app.clone();
+            let session_id = ctx.session_id.to_string();
+            let task_id = ctx.request.task_id.clone();
             move |addr| {
                 let payload = format!(r#"{{"localPort":{}}}"#, addr.port());
                 let _ = app.emit(
@@ -364,78 +368,78 @@ pub(crate) fn engine_client_builder<R: tauri::Runtime>(
                 );
             }
         });
-    if let Some(size) = params.blksize {
+    if let Some(size) = ctx.params.blksize {
         builder = builder.blksize(size);
     }
-    if params.reverse {
+    if ctx.params.reverse {
         builder = builder.reverse(true);
     }
-    if params.bidir {
+    if ctx.params.bidir {
         builder = builder.bidir(true);
     }
     // 无条件下发（0 = 不限制）：省略调用会让 UDP 落到引擎的 1 Mibit/s 默认值
-    builder = builder.bandwidth(params.bandwidth_bps);
-    if let Some(addr) = &params.bind_address {
+    builder = builder.bandwidth(ctx.params.bandwidth_bps);
+    if let Some(addr) = &ctx.params.bind_address {
         builder = builder.bind_address(addr);
     }
     // 预热：跳过前 N 秒的统计（排除 TCP 慢启动）；on_interval 回调已跳过
     // omitted 区间，实时图表/日志与最终报告口径一致
-    if params.omit_secs > 0 {
-        builder = builder.omit(params.omit_secs);
+    if ctx.params.omit_secs > 0 {
+        builder = builder.omit(ctx.params.omit_secs);
     }
     // 套接字缓冲区（KB → 字节）：0 = 引擎默认（等价 iperf3 的 -w 0 = 自动）。
     // 用 u64 换算防溢出：UI 上限 16384 KB，但请求来自 IPC 边界，不可信
-    if params.window_kb > 0 {
-        builder = builder.window((params.window_kb as u64 * 1024).min(i32::MAX as u64) as i32);
+    if ctx.params.window_kb > 0 {
+        builder = builder.window((ctx.params.window_kb as u64 * 1024).min(i32::MAX as u64) as i32);
     }
     // 数据流源端口（--cport）：0 = 不设置，走临时端口
-    if params.cport > 0 {
-        builder = builder.cport(params.cport);
+    if ctx.params.cport > 0 {
+        builder = builder.cport(ctx.params.cport);
     }
     // IP 协议族：0 = 自动，仅显式 4 / 6 时下发给引擎（validate 已保证取值合法）
-    if params.ip_version == 4 || params.ip_version == 6 {
-        builder = builder.ip_version(params.ip_version);
+    if ctx.params.ip_version == 4 || ctx.params.ip_version == 6 {
+        builder = builder.ip_version(ctx.params.ip_version);
     }
     // 拉取服务端视角输出（--get-server-output）：服务端为文本模式时随结果返回
-    if params.get_server_output {
+    if ctx.params.get_server_output {
         builder = builder.get_server_output(true);
     }
     // 按量测试（-n / -k）：优先于时长；二者互斥由 transfer_mode 单选保证
-    if let Some(bytes) = params.bytes_to_send {
+    if let Some(bytes) = ctx.params.bytes_to_send {
         builder = builder.bytes(bytes);
     }
-    if let Some(blocks) = params.blocks_to_send {
+    if let Some(blocks) = ctx.params.blocks_to_send {
         builder = builder.blocks(blocks);
     }
     // DSCP 标记（--dscp）：0 = 不设置；数值字符串由引擎解析并左移 2 位进 TOS 字节
-    if params.dscp > 0 {
-        builder = builder.dscp(&params.dscp.to_string());
+    if ctx.params.dscp > 0 {
+        builder = builder.dscp(&ctx.params.dscp.to_string());
     }
     // 拥塞控制算法（-C）：仅 Linux/FreeBSD 生效，其余平台引擎静默忽略
-    if let Some(algo) = &params.congestion_algo {
+    if let Some(algo) = &ctx.params.congestion_algo {
         builder = builder.congestion(algo);
     }
     // UDP 禁止分片（--dont-fragment）：仅 IPv4，Unix 平台生效
-    if params.udp_dont_fragment {
+    if ctx.params.udp_dont_fragment {
         builder = builder.dont_fragment(true);
     }
     // MPTCP 多路径（-m/--multipath）：需两端内核支持，不支持时连接阶段报错
-    if params.mptcp {
+    if ctx.params.mptcp {
         builder = builder.mptcp(true);
     }
     // iperf3 认证：服务端以 --rsa-private-key-path + --authorized-users-path 启动时，
     // 客户端须用服务端公钥加密"用户名+密码"。未启用时前端已把三项清空，这里自然跳过。
-    if !request.auth_username.trim().is_empty() {
-        builder = builder.username(request.auth_username.trim());
+    if !ctx.request.auth_username.trim().is_empty() {
+        builder = builder.username(ctx.request.auth_username.trim());
     }
-    if !request.auth_password.is_empty() {
-        builder = builder.password(&request.auth_password);
+    if !ctx.request.auth_password.is_empty() {
+        builder = builder.password(&ctx.request.auth_password);
     }
-    if !request.auth_public_key_path.trim().is_empty() {
-        builder = builder.rsa_public_key_path(request.auth_public_key_path.trim());
+    if !ctx.request.auth_public_key_path.trim().is_empty() {
+        builder = builder.rsa_public_key_path(ctx.request.auth_public_key_path.trim());
     }
     // iperf3 3.17 起默认 OAEP 填充，更早的服务端只认 PKCS#1 v1.5
-    if request.auth_pkcs1_padding {
+    if ctx.request.auth_pkcs1_padding {
         builder = builder.use_pkcs1_padding(true);
     }
     builder
