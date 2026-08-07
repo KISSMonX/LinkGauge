@@ -48,7 +48,7 @@ async fn create_side_window(app: tauri::AppHandle, side: String) -> Result<(), S
     // 客户端/服务端窗口同尺寸（含测试概览与实时曲线的三栏布局）
     let mut builder = tauri::WebviewWindowBuilder::new(
         &app,
-        side.clone(),
+        side,
         tauri::WebviewUrl::App("index.html".into()),
     )
     .title(title)

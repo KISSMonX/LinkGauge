@@ -218,7 +218,7 @@ async fn read_lines<R: tokio::io::AsyncRead + Unpin>(
 /// 每次调用不再重新编译正则：ping 输出解析在热点路径上（ping 的 stdout 每行都调），
 /// 用 LazyLock 确保只编译一次。
 static PING_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"(?i)(?:time|时间)[=<＝]\s*(\d+(?:\.\d+)?)\s*ms").unwrap()
+    Regex::new(r"(?i)(?:time|时间)[=<＝]\s*(\d+(?:\.\d+)?)\s*ms").expect("ping time regex is statically valid")
 });
 
 pub(crate) fn parse_ping_metric(line: &str, second: i64) -> Option<MetricPoint> {
