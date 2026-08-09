@@ -89,9 +89,15 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 应用内更新的 minisign 私钥：没有它 tauri 不会产出 .sig，latest.json 也就无法校验。
+          # 公钥在 tauri.conf.json 的 plugins.updater.pubkey，两者必须成对。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: LinkGauge ${{ github.ref_name }}
           releaseDraft: true
           prerelease: false
+          # 各平台产物汇总进同一个 latest.json（updater 的清单）；后跑完的 job 会合并进已有文件
+          includeUpdaterJson: true
           args: --target ${{ matrix.target }} ${{ matrix.args }}

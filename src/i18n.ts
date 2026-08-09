@@ -49,6 +49,26 @@ const zh = {
   'about.feedback': '提交反馈',
   'about.engine': 'Rust + Tauri + Vue 3 · riperf3（MIT OR Apache-2.0）',
 
+  // 应用内更新
+  'update.check': '检查更新',
+  'update.checking': '正在检查更新…',
+  'update.latest': '已是最新版本',
+  'update.found': '发现新版本 v{version}',
+  'update.downloading': '正在下载 v{version}…',
+  'update.readyTitle': '更新已就绪',
+  'update.readyMessage': 'LinkGauge v{version} 已下载完成，重启应用即可完成更新。',
+  'update.readyRunningNote': '测试正在运行，重启将中断测试。',
+  'update.restart': '立即重启',
+  'update.later': '稍后',
+  'update.failedTitle': '更新失败',
+  'update.checkFailed': '检查更新失败：{reason}',
+  'update.downloadFailed': '下载更新失败：{reason}',
+  'update.installFailed': '安装更新失败：{reason}',
+  'update.log.checking': '正在检查应用更新…',
+  'update.log.latest': '当前已是最新版本 v{version}',
+  'update.log.found': '发现新版本 v{version}（当前 v{current}），开始下载',
+  'update.log.downloaded': '新版本 v{version} 下载完成，等待重启安装',
+
   // 窗口 / 标签页
   'tab.dragHint': '拖拽标签可分离为独立窗口',
   'tab.detachRelease': '⇱ 释放以分离',
@@ -114,6 +134,7 @@ const zh = {
   'preview.export': '桌面应用中将弹出保存对话框导出配置。',
   'preview.pickKey': '桌面应用中将弹出文件选择对话框，用于选取 RSA 公钥。',
   'preview.ssh': '桌面应用中将通过 SSH 连接远端主机并打开控制台。',
+  'preview.update': '桌面应用中将检查 GitHub Releases 上的新版本并自动下载。',
 
   // UI 日志
   'log.reset': '参数已恢复默认值',
@@ -463,6 +484,26 @@ const en: Record<MessageKey, string> = {
   'about.feedback': 'Submit Feedback',
   'about.engine': 'Rust + Tauri + Vue 3 · riperf3 (MIT OR Apache-2.0)',
 
+  // Updater
+  'update.check': 'Check for Updates',
+  'update.checking': 'Checking for updates…',
+  'update.latest': 'You are up to date',
+  'update.found': 'Version v{version} available',
+  'update.downloading': 'Downloading v{version}…',
+  'update.readyTitle': 'Update Ready',
+  'update.readyMessage': 'LinkGauge v{version} has been downloaded. Restart the app to finish updating.',
+  'update.readyRunningNote': 'A test is running; restarting will interrupt it.',
+  'update.restart': 'Restart Now',
+  'update.later': 'Later',
+  'update.failedTitle': 'Update Failed',
+  'update.checkFailed': 'Could not check for updates: {reason}',
+  'update.downloadFailed': 'Could not download the update: {reason}',
+  'update.installFailed': 'Could not install the update: {reason}',
+  'update.log.checking': 'Checking for application updates…',
+  'update.log.latest': 'Already on the latest version v{version}',
+  'update.log.found': 'Version v{version} available (current v{current}), downloading',
+  'update.log.downloaded': 'Version v{version} downloaded, waiting for restart to install',
+
   'tab.dragHint': 'Drag the tab to detach it into its own window',
   'tab.detachRelease': '⇱ Release to detach',
   'tab.detachedTitle': 'Tabs detached',
@@ -525,6 +566,7 @@ const en: Record<MessageKey, string> = {
   'preview.export': 'A save dialog will open in the desktop app to export the config.',
   'preview.pickKey': 'A file picker will open in the desktop app to choose the RSA public key.',
   'preview.ssh': 'The desktop app will connect to the remote host over SSH and open the console.',
+  'preview.update': 'The desktop app will check GitHub Releases for a new version and download it automatically.',
 
   'log.reset': 'Parameters reset to defaults',
   'log.authKeyPicked': 'RSA public key selected: {path}',

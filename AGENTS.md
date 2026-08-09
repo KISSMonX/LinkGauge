@@ -185,6 +185,31 @@ a version bump commit in a normal PR is a merge-conflict mine for the automation
 must be cut immediately (no `feat:`/`fix:` commits), use `workflow_dispatch` on `release.yml`
 with an existing tag or a `release-as` in a release PR instead.
 
+### Updater signing (release builds depend on it)
+
+`bundle.createUpdaterArtifacts` is on, so every release build also emits the update package
+and a detached minisign `.sig`, and `tauri-action` merges them into a `latest.json` on the
+Release. The app verifies that signature against `plugins.updater.pubkey` in
+`tauri.conf.json`.
+
+**The bundler fails the build when a pubkey is configured but no private key is available**,
+so `release.yml` needs two repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` | full contents of the minisign private key file |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | that key's password (empty string if it has none) |
+
+The keypair is generated once with `npm run tauri signer generate -- -w <path outside the
+repo>`. The private key never enters the repository, and it must not be rotated casually:
+clients that already trust the old public key will reject packages signed by a new one, so a
+rotation requires shipping a build with the new pubkey *before* any release is signed with it.
+
+`latest.json` is fetched from `releases/latest/download/`, which only resolves for a
+**published** release — the draft that `release.yml` produces has to be published before
+clients see the update. Note also that `deb` and `rpm` packages are not self-updating; on
+Linux only the AppImage is.
+
 ## Housekeeping
 
 - Both READMEs are maintained in parallel — a feature that changes behavior updates the

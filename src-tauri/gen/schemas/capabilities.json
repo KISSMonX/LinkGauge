@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default desktop capability","local":true,"windows":["main","client","server","report-print"],"permissions":["core:default","core:webview:allow-print","core:window:allow-destroy","dialog:default"]}}
+{"default":{"identifier":"default","description":"Default desktop capability","local":true,"windows":["main","client","server","report-print"],"permissions":["core:default","core:webview:allow-print","core:window:allow-destroy","dialog:default","updater:default","process:allow-restart"]}}

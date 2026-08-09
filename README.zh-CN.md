@@ -57,6 +57,7 @@
 - HTML 测试报告，以及通过系统原生打印窗口输出的 PDF（两者共用相同图表和表格）
 - 纯 Rust riperf3 引擎：与标准 iperf3 服务端互通，无运行时外部依赖
 - iperf3 双向认证支持——客户端提供用户名 / 密码 / RSA 公钥（兼容 3.17 前的 PKCS#1 填充）；服务端模式可用自己的 RSA 私钥 + 授权用户文件要求客户端凭据；密码不落盘
+- 应用内更新：「关于」页的**检查更新**按钮（启动后也会静默检查一次）查询 GitHub Releases，后台下载已签名的安装包，重启即完成更新；下载包经签名校验，支持 Windows NSIS、macOS `.app`、Linux AppImage
 - CI 自动检查与打标签发布：Windows x64、macOS x64 / arm64、Linux x64 / arm64
 
 ## 软件架构

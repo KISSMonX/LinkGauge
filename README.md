@@ -57,6 +57,7 @@ A desktop network performance testing application built with Rust, Tauri 2, Vue 
 - HTML reports and PDF output through the native system print dialog, both using the same charts and tables
 - Pure-Rust riperf3 engine: interoperable with standard iperf3 servers, no runtime dependencies
 - iperf3 authentication in both directions — the client supplies username / password / RSA public key (with PKCS#1 padding for pre-3.17 peers), and the server can require credentials via its own RSA private key and an authorized-users file; passwords are never persisted
+- In-app updates: **About → Check for Updates** (also checked silently once at startup) queries GitHub Releases, downloads the signed package in the background, and applies it on restart — signature-verified, Windows NSIS / macOS `.app` / Linux AppImage
 - Automated CI checks and tagged release builds for Windows x64, macOS x64 / arm64, and Linux x64 / arm64
 
 ## Architecture
