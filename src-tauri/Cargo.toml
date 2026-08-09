@@ -1,6 +1,6 @@
 [package]
 name = "linkgauge"
-version = "0.2.1"
+version = "0.3.0"
 description = "Cross-platform network performance desktop GUI (riperf3 engine)"
 authors = ["LinkGauge contributors"]
 edition = "2021"
