@@ -463,7 +463,7 @@ macOS 与 Linux 上必须显式传 `--bundles`，因为 `tauri.conf.json` 的 `b
 - [x] SSH 支持（通过 SSH 操作远程主机上的对端 iperf3 服务端）
 - [ ] 对正式安装包进行代码签名，消除 Windows SmartScreen 告警
 - [ ] 在受支持的最旧基础发行版上验证 Linux AppImage / DEB 的构建与运行
-- [ ] 补充项目级 LICENSE 文件及包元数据
+- [x] 补充项目级 LICENSE 文件及包元数据
 - [x] 建立 CI/CD（GitHub Actions）自动检查与发布构建
 - [ ] 测试结果历史记录与多轮对比功能
 - [ ] 前端关键逻辑单元测试
@@ -485,7 +485,7 @@ macOS 与 Linux 上必须显式传 `--bundles`，因为 `tauri.conf.json` 的 `b
 
 ## 许可证
 
-当前仓库根目录尚无项目级 `LICENSE` 文件。正式作为开源项目发布前，版权持有人需要选择并添加许可证，同时更新本节和包元数据。在没有明确项目许可证的情况下，应用原创源代码仍受默认版权限制。
+LinkGauge 基于 [MIT 许可证](LICENSE) 发布。
 
 第三方组件继续遵循其各自许可证：
 

@@ -4,6 +4,9 @@ version = "0.3.0"
 description = "Cross-platform network performance desktop GUI (riperf3 engine)"
 authors = ["LinkGauge contributors"]
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/KISSMonX/LinkGauge"
+homepage = "https://github.com/KISSMonX/LinkGauge"
 
 [lib]
 name = "linkgauge_lib"

@@ -1,7 +1,31 @@
 {
   "name": "linkgauge",
   "private": true,
-  "version": "0.3.0",
+"version": "0.3.0",
+  "description": "Cross-platform network performance desktop GUI — Ping, TCP, and UDP testing with a pure-Rust iperf3-compatible engine",
+  "license": "MIT",
+  "author": "houming",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KISSMonX/LinkGauge.git"
+  },
+  "homepage": "https://github.com/KISSMonX/LinkGauge#readme",
+  "bugs": {
+    "url": "https://github.com/KISSMonX/LinkGauge/issues"
+  },
+  "keywords": [
+    "linkgauge",
+    "network",
+    "performance",
+    "iperf3",
+    "riperf3",
+    "tcp",
+    "udp",
+    "ping",
+    "bandwidth",
+    "tauri",
+    "desktop"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",

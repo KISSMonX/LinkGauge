@@ -466,7 +466,7 @@ Against servers older than 3.7 the `bidirectional` parameter is silently ignored
 - [x] SSH support (operate the peer iperf3 server on a remote host over SSH)
 - [ ] Code-sign release installers to remove the Windows SmartScreen warning
 - [ ] Verify Linux AppImage / DEB builds and runtime on the oldest supported base distribution
-- [ ] Add a project-level LICENSE file and package metadata
+- [x] Add a project-level LICENSE file and package metadata
 - [x] Set up CI/CD (GitHub Actions) for automated checks and release builds
 - [ ] Test result history and multi-run comparison
 - [ ] Unit tests for key frontend logic
@@ -488,7 +488,7 @@ Issues and pull requests are welcome after the repository is published.
 
 ## License
 
-This repository does not currently contain a project-wide root `LICENSE` file. Before publishing it as open source, the copyright holder must select and add a license, then update this section and the package metadata. Without an explicit project license, normal copyright restrictions apply to the application's original source code.
+LinkGauge is licensed under the [MIT License](LICENSE).
 
 Third-party components retain their own licenses:
 
