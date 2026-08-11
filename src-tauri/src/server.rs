@@ -250,6 +250,9 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
             );
         }
     });
+    // riperf3 的中断接收器在部分平台的 accept 等待中不能及时唤醒；保留一份副本，
+    // 由外层监听循环直接响应停止请求，保证 stop_test 的完成语义跨平台一致。
+    let mut cancel_rx = rx.clone();
     let server = match server_builder
         .port(Some(request.port))
         .one_off(true)
@@ -355,7 +358,17 @@ pub(crate) async fn run_engine_server<R: tauri::Runtime>(
     loop {
         // 每次迭代实时读取界面语言（切换语言后服务端日志立即跟随）
         let locale = current_locale(&locale_handle);
-        match bound.run_once().await {
+        let outcome = tokio::select! {
+            biased;
+            changed = cancel_rx.changed() => {
+                if changed.is_err() || cancel_rx.borrow().is_some() {
+                    return;
+                }
+                continue;
+            }
+            outcome = bound.run_once() => outcome,
+        };
+        match outcome {
             Ok(outcome) => {
                 let ctx = ServerListenCtx {
                     app: &app,
