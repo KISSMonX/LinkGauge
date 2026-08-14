@@ -2,7 +2,6 @@
   "packages": {
     ".": {
       "release-type": "rust",
-      "draft": true,
       "extra-files": [
         { "type": "json", "path": "package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "package-lock.json", "jsonpath": "$.version" },
