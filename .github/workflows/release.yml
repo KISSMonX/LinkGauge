@@ -1,8 +1,13 @@
 name: Release
 
-# 打 v* 标签时构建各平台安装包，汇总到同一个 GitHub Release 草稿。
+# 打 v* 标签时构建各平台安装包，汇总到同一个 GitHub Release。
 # 标签由 release-please 自动创建（见 release-please.yml），不要手动打标签；
-# 合并 release PR 时它已生成草稿 Release，tauri-action 会找到它并上传产物。
+# 合并 release PR 时它已建好 tag 和 Release，tauri-action 会找到它并上传产物。
+#
+# Release 是「先公开、后补产物」：合并 release PR 的瞬间它就可见，安装包要等这里
+# 的矩阵构建跑完（约十几分钟）才挂上去。不要为了盖住这个空窗期把 Release 改成
+# 草稿——草稿 Release 不会创建 git tag，本工作流根本不会被触发，release-please
+# 也会因为看不见自己发过的版本而反复开出错误版本号的 release PR。详见 AGENTS.md。
 on:
   push:
     tags: ['v*']
@@ -94,9 +99,14 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          # release-please 合并 release PR 时已经建好了同名 tag 和 Release，
+          # tauri-action 按 tagName 找到它并把安装包传上去。下面的 releaseName /
+          # releaseDraft 只在 Release 不存在时才生效（例如对旧 tag 手动
+          # workflow_dispatch），取值要和 release-please 的命名一致，
+          # 否则会多出一个名字不同、看起来像重复发布的 Release。
           tagName: ${{ github.ref_name }}
-          releaseName: LinkGauge ${{ github.ref_name }}
-          releaseDraft: true
+          releaseName: ${{ github.ref_name }}
+          releaseDraft: false
           prerelease: false
           # 各平台产物汇总进同一个 latest.json（updater 的清单）；后跑完的 job 会合并进已有文件
           includeUpdaterJson: true

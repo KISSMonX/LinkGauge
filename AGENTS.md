@@ -179,11 +179,34 @@ and update the engine version notes in both READMEs.
 a merge to `master` it opens a release PR when there are `feat:`/`fix:`/breaking commits; on
 merge of that PR it bumps the version in `Cargo.toml`, `Cargo.lock`, `package.json`,
 `package-lock.json` and `tauri.conf.json`, rewrites `CHANGELOG.md`, and creates the `v*` tag
-plus a draft GitHub Release that `release.yml` then populates with installers. **Never push a
+plus the GitHub Release that `release.yml` then populates with installers. **Never push a
 `v*` tag or bump versions by hand** — a manual tag will conflict with the next release PR, and
 a version bump commit in a normal PR is a merge-conflict mine for the automation. If a release
 must be cut immediately (no `feat:`/`fix:` commits), use `workflow_dispatch` on `release.yml`
 with an existing tag or a `release-as` in a release PR instead.
+
+### Never make the Release a draft
+
+`release-please-config.json` must not set `"draft": true`, and `release.yml` must not set
+`releaseDraft: true`. It reads like a safety measure — don't publish until the installers are
+attached — but it breaks the pipeline in two ways at once:
+
+1. **A draft Release has no git tag.** GitHub only creates the `v*` ref when the release is
+   published, so `release.yml` (`on: push: tags`) never fires. Installers only ever got built
+   because someone published the draft by hand.
+2. **release-please cannot see its own draft releases.** Its "what did I release last?" lookup
+   skips drafts, so every subsequent run finds no previous release, walks the entire history
+   from the first commit, and opens a release PR with a version derived from scratch.
+
+The repository ran this way for a week and the symptom was unmistakable: merging one feature
+branch produced a chain of release PRs proposing 0.2.1, then 0.3.0, then 0.4.0, each merge
+rewriting `CHANGELOG.md` with the whole history again. The run logs show it directly —
+`Expected 1 releases, only found 0` followed by `Considering: 452 commits` while the release
+was a draft, versus `Considering: 6 commits` on the next run once it had been published.
+
+The accepted trade-off is that a Release is public from the moment its release PR merges and
+stays empty until the matrix build finishes (roughly fifteen minutes). If that window ever
+needs closing, close it by gating the *tag*, never by drafting the Release.
 
 ### Updater signing (release builds depend on it)
 
