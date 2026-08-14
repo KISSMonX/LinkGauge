@@ -54,6 +54,10 @@ const zh = {
   'update.checking': '正在检查更新…',
   'update.latest': '已是最新版本',
   'update.found': '发现新版本 v{version}',
+  'update.download': '下载更新',
+  'update.openReleases': '前往下载',
+  'update.manualOnly': '当前安装方式（deb / rpm）不支持自动更新，请手动下载',
+  'update.manualOnlyMessage': '当前安装方式（deb / rpm）不支持应用内更新。请点击「关于」页版本行的「前往下载」，到 Releases 页面获取新版安装包。',
   'update.downloading': '正在下载 v{version}…',
   'update.readyTitle': '更新已就绪',
   'update.readyMessage': 'LinkGauge v{version} 已下载完成，重启应用即可完成更新。',
@@ -66,7 +70,8 @@ const zh = {
   'update.installFailed': '安装更新失败：{reason}',
   'update.log.checking': '正在检查应用更新…',
   'update.log.latest': '当前已是最新版本 v{version}',
-  'update.log.found': '发现新版本 v{version}（当前 v{current}），开始下载',
+  'update.log.found': '发现新版本 v{version}（当前 v{current}）',
+  'update.log.downloading': '开始下载新版本 v{version}',
   'update.log.downloaded': '新版本 v{version} 下载完成，等待重启安装',
 
   // 窗口 / 标签页
@@ -134,7 +139,7 @@ const zh = {
   'preview.export': '桌面应用中将弹出保存对话框导出配置。',
   'preview.pickKey': '桌面应用中将弹出文件选择对话框，用于选取 RSA 公钥。',
   'preview.ssh': '桌面应用中将通过 SSH 连接远端主机并打开控制台。',
-  'preview.update': '桌面应用中将检查 GitHub Releases 上的新版本并自动下载。',
+  'preview.update': '桌面应用中将检查 GitHub Releases 上是否有新版本。',
 
   // UI 日志
   'log.reset': '参数已恢复默认值',
@@ -489,6 +494,10 @@ const en: Record<MessageKey, string> = {
   'update.checking': 'Checking for updates…',
   'update.latest': 'You are up to date',
   'update.found': 'Version v{version} available',
+  'update.download': 'Download Update',
+  'update.openReleases': 'Open Downloads',
+  'update.manualOnly': 'this install (deb / rpm) cannot self-update, download it manually',
+  'update.manualOnlyMessage': 'This install (deb / rpm) cannot update itself. Use "Open Downloads" on the version row of the About dialog to get the new package from the Releases page.',
   'update.downloading': 'Downloading v{version}…',
   'update.readyTitle': 'Update Ready',
   'update.readyMessage': 'LinkGauge v{version} has been downloaded. Restart the app to finish updating.',
@@ -501,7 +510,8 @@ const en: Record<MessageKey, string> = {
   'update.installFailed': 'Could not install the update: {reason}',
   'update.log.checking': 'Checking for application updates…',
   'update.log.latest': 'Already on the latest version v{version}',
-  'update.log.found': 'Version v{version} available (current v{current}), downloading',
+  'update.log.found': 'Version v{version} available (current v{current})',
+  'update.log.downloading': 'Downloading version v{version}',
   'update.log.downloaded': 'Version v{version} downloaded, waiting for restart to install',
 
   'tab.dragHint': 'Drag the tab to detach it into its own window',
@@ -566,7 +576,7 @@ const en: Record<MessageKey, string> = {
   'preview.export': 'A save dialog will open in the desktop app to export the config.',
   'preview.pickKey': 'A file picker will open in the desktop app to choose the RSA public key.',
   'preview.ssh': 'The desktop app will connect to the remote host over SSH and open the console.',
-  'preview.update': 'The desktop app will check GitHub Releases for a new version and download it automatically.',
+  'preview.update': 'The desktop app will check GitHub Releases for a new version.',
 
   'log.reset': 'Parameters reset to defaults',
   'log.authKeyPicked': 'RSA public key selected: {path}',

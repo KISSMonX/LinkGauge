@@ -88,6 +88,24 @@ fn open_url(url: String) -> Result<(), String> {
     crate::system::open_url_in_browser(&url)
 }
 
+/// 本次安装形态能否被 updater 就地替换。
+///
+/// Windows（NSIS）和 macOS（.app）恒可；Linux 上只有 AppImage 能自替换——它把自身
+/// 路径放在 `APPIMAGE` 环境变量里，updater 靠这个变量定位要覆盖的文件。deb / rpm
+/// 装出来的进程没有这个变量，`install()` 只会在下载完几十 MB 之后失败，所以前端据此
+/// 提前改走「到 Releases 页面手动下载」的提示。
+#[tauri::command]
+fn updater_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("APPIMAGE").is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -109,6 +127,7 @@ pub fn run() {
             create_side_window,
             get_app_info,
             open_url,
+            updater_supported,
             runner::start_test,
             runner::start_test_queue,
             runner::stop_test,

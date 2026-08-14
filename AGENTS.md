@@ -207,8 +207,40 @@ rotation requires shipping a build with the new pubkey *before* any release is s
 
 `latest.json` is fetched from `releases/latest/download/`, which only resolves for a
 **published** release — the draft that `release.yml` produces has to be published before
-clients see the update. Note also that `deb` and `rpm` packages are not self-updating; on
-Linux only the AppImage is.
+clients see the update.
+
+**This also breaks local packaging.** `npm run tauri build` on a developer machine hits the
+same "public key but no private key" failure, because the signing key is a CI secret. To
+produce a local installer, either point the bundler at your own throwaway key —
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat /path/to/throwaway.key)"   # PowerShell: $env:TAURI_SIGNING_PRIVATE_KEY = ...
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+npm run tauri build
+```
+
+— or, when you only need the compiled binary and not an installer, skip bundling entirely with
+`npm run tauri build -- --no-bundle`, which never reaches the signing step. Do not commit a
+change to `createUpdaterArtifacts` or `pubkey` to work around a local build; releases depend on
+both.
+
+### Updater behavior on the client side
+
+`src/composables/useUpdater.ts` owns the flow, and it is deliberately split into three
+user-visible steps — **check → download → install** — rather than one:
+
+- The startup check (5 s after mount, `main` window only) **only checks**. Finding a version
+  lights a red dot on the About button; it never downloads tens of megabytes on its own, and
+  it never throws a modal at a user who just launched the app.
+- Downloading is an explicit click in the About dialog; installing is a second click in the
+  "restart now" modal. `beforeInstall` stops a running client queue and server first, because
+  the installer terminates the process.
+- `updater_supported` (in `lib.rs`) reports whether *this* install can replace itself: on
+  Linux that means the `APPIMAGE` env var is present, so `deb` / `rpm` users are pointed at
+  the Releases page instead of downloading a package that `install()` would reject.
+- Every window listens to the `update-state` broadcast (stage + version, never progress —
+  progress changes per chunk, see the sync-bundle rule above), so a check or download in one
+  window suppresses a duplicate in another.
 
 ## Housekeeping
 

@@ -20,7 +20,7 @@ import { clearTerminal } from './terminal'
 import type { BackendEvent, DockEvent, InterfaceInfo, ItemHistory, LogEntry, MetricPoint, NetworkInfo, NetworkSnapshot, ServerConfig, SshConfig, SshEvent, SyncState, TestConfig, TestItem, TestSummary } from './types'
 import { useServer } from './composables/useServer'
 import { useSshConsole } from './composables/useSshConsole'
-import { useUpdater } from './composables/useUpdater'
+import { useUpdater, type UpdateStateEvent } from './composables/useUpdater'
 
 const { t, locale, setLocale } = useI18n()
 
@@ -132,6 +132,8 @@ const appInfo = ref<{ version: string; commit: string }>({ version: pkg.version,
 /** 关于页外部链接 */
 const APP_PROJECT_URL = 'https://github.com/KISSMonX/LinkGauge'
 const APP_ISSUES_URL = 'https://github.com/KISSMonX/LinkGauge/issues'
+/** 无法自更新的安装形态（Linux deb / rpm）引导用户手动下载新版安装包 */
+const APP_RELEASES_URL = 'https://github.com/KISSMonX/LinkGauge/releases/latest'
 /** 停止确认弹窗：客户端停止测试 / 服务端停止服务 / 主窗口退出（中英文跟随界面语言） */
 const confirmDialog = ref<{ title: string; message: string; action: 'stop' | 'stop-server' | 'exit' } | null>(null)
 const interfaces = ref<InterfaceInfo[]>([])
@@ -153,6 +155,7 @@ let unlistenSsh: UnlistenFn | undefined
 let ticker: number | undefined
 /** 启动后静默检查更新的延时器（仅主窗口） */
 let updateCheckTimer: ReturnType<typeof setTimeout> | undefined
+let unlistenUpdate: UnlistenFn | undefined
 let unlisten: UnlistenFn | undefined
 
 // —— 多窗口支持：窗口角色（主窗口 hub / 分离的 client / server）+ 标签停靠状态 ——
@@ -199,11 +202,17 @@ const {
   primeConsole, handleSshEvent,
 } = useSshConsole(isTauri, log, errorDialog, infoDialog, t, sshConfig, serverView)
 const {
-  updateStage, updateVersion, updateProgress, updateReadyDialog, updateUpToDate,
-  checkForUpdate, restartToUpdate,
-} = useUpdater(isTauri, log, errorDialog, infoDialog, t, () => appInfo.value.version)
-/** 检查 / 下载期间禁用「检查更新」按钮，避免并发触发第二次下载 */
-const updateBusy = computed(() => updateStage.value === 'checking' || updateStage.value === 'downloading')
+  updateStage, updateVersion, updateProgress, updateReadyDialog, updateUpToDate, updateSelfUpdatable, updateBusy,
+  primeUpdater, handleUpdateState, checkForUpdate, downloadUpdate, restartToUpdate,
+} = useUpdater(isTauri, log, errorDialog, infoDialog, t, () => appInfo.value.version, stopBeforeInstall)
+/** 已发现但尚未装上的新版本：工具栏「关于」按钮上亮小红点提示 */
+const updateAvailable = computed(() => updateStage.value === 'available' || updateStage.value === 'ready')
+/** 「关于」页版本行的按钮文案；四个阶段对应四种动作，见 onUpdateAction */
+const updateActionLabel = computed(() => {
+  if (updateStage.value === 'ready') return t('update.restart')
+  if (updateStage.value !== 'available') return t('update.check')
+  return updateSelfUpdatable.value ? t('update.download') : t('update.openReleases')
+})
 /** 「关于」页更新状态行；空字符串表示不显示该行 */
 const updateStatusText = computed(() => {
   if (updateStage.value === 'checking') return t('update.checking')
@@ -212,9 +221,31 @@ const updateStatusText = computed(() => {
     // 服务端未返回 Content-Length 时进度恒为 0，此时只显示文案不显示百分比
     return updateProgress.value > 0 ? `${text} ${updateProgress.value}%` : text
   }
+  if (updateStage.value === 'available') {
+    const text = t('update.found', { version: updateVersion.value })
+    // deb / rpm 装不了自更新包，状态行直接说明只能手动下载，别让用户等一个不会发生的进度条
+    return updateSelfUpdatable.value ? text : `${text} · ${t('update.manualOnly')}`
+  }
   if (updateStage.value === 'ready') return t('update.found', { version: updateVersion.value })
   return updateUpToDate.value ? t('update.latest') : ''
 })
+/** 「关于」页版本行按钮：按当前阶段分派到检查 / 下载 / 手动下载 / 重启 */
+function onUpdateAction() {
+  if (updateStage.value === 'ready') { updateReadyDialog.value = true; return }
+  if (updateStage.value === 'available') {
+    if (updateSelfUpdatable.value) void downloadUpdate()
+    else openLink(APP_RELEASES_URL)
+    return
+  }
+  void checkForUpdate()
+}
+// 「已是最新版本」是一次性反馈：关掉「关于」页就清掉，下次打开不该看到上次的检查结果
+watch(aboutDialog, (open) => { if (!open) updateUpToDate.value = false })
+/** 安装更新前的收尾：安装器会终止本进程，先让后端把队列和服务端正常停掉 */
+async function stopBeforeInstall() {
+  if (clientRunning.value) await stop()
+  if (serverRunning.value) await stopServer()
+}
 
 /** 选择服务端认证用的 RSA 私钥文件（对应 --rsa-private-key-path） */
 async function pickServerAuthKey() {
@@ -970,8 +1001,12 @@ onMounted(async () => {
       unlisten = await listen<BackendEvent>('test-event', (e) => handleEvent(e.payload))
       unlistenSsh = await listen<SshEvent>('ssh-event', (e) => handleSshEvent(e.payload))
       await refreshServerState(true)
+      // 每个窗口都监听：跨窗口互斥靠它，谁在查询 / 下载别的窗口就不再重复发起
+      unlistenUpdate = await listen<UpdateStateEvent>('update-state', (e) => handleUpdateState(e.payload))
+      await primeUpdater()
       // 启动后静默检查一次更新：只在主窗口发起（分离出去的子窗口会重复请求），
-      // 延迟到界面初始化完成之后，不与启动阶段的网卡 / 状态拉取抢网络
+      // 延迟到界面初始化完成之后，不与启动阶段的网卡 / 状态拉取抢网络。
+      // 只查不下载——下载由用户在「关于」页点击触发，见 useUpdater.checkForUpdate
       if (ownLabel === 'main') updateCheckTimer = setTimeout(() => void checkForUpdate(true), 5000)
     } catch (e) { log('WARN', t('log.sysInfoFailed', { e: String(e) })) }
   } else {
@@ -981,7 +1016,7 @@ onMounted(async () => {
   }
   log('INFO', t('log.ready'))
 })
-onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyncReq?.(); unlistenDock?.(); unlistenClose?.(); unlistenExit?.(); if (ticker) clearInterval(ticker); if (updateCheckTimer) clearTimeout(updateCheckTimer) })
+onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyncReq?.(); unlistenDock?.(); unlistenClose?.(); unlistenExit?.(); unlistenUpdate?.(); if (ticker) clearInterval(ticker); if (updateCheckTimer) clearTimeout(updateCheckTimer) })
 </script>
 
 <template>
@@ -989,7 +1024,7 @@ onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyn
     <div class="titlebar">
       <img class="brand-icon" :src="appIcon" alt="LinkGauge" />
       <h1>LinkGauge<template v-if="side !== 'hub'"> · {{ side === 'client' ? t('common.client') : t('common.server') }}</template></h1>
-      <nav v-if="side === 'hub'" class="toolbar-actions"><button @click="importConfig"><Icon name="download" />{{ t('tb.importConfig') }}</button><button @click="exportConfig"><Icon name="upload" />{{ t('tb.exportConfig') }}</button><button @click="settingsDialog = true"><Icon name="settings" />{{ t('tb.settings') }}</button><button @click="aboutDialog = true"><Icon name="info" />{{ t('tb.about') }}</button></nav>
+      <nav v-if="side === 'hub'" class="toolbar-actions"><button @click="importConfig"><Icon name="download" />{{ t('tb.importConfig') }}</button><button @click="exportConfig"><Icon name="upload" />{{ t('tb.exportConfig') }}</button><button @click="settingsDialog = true"><Icon name="settings" />{{ t('tb.settings') }}</button><button :class="{ 'has-update': updateAvailable }" :title="updateAvailable ? t('update.found', { version: updateVersion }) : ''" @click="aboutDialog = true"><Icon name="info" />{{ t('tb.about') }}</button></nav>
       <nav v-else class="toolbar-actions"><button :title="t('tb.dockBack')" @click="dockBack"><Icon name="monitor" />⇱ {{ t('tb.dockBack') }}</button></nav>
     </div>
     <div class="workspace">
@@ -1038,6 +1073,6 @@ onUnmounted(() => { unlisten?.(); unlistenSsh?.(); unlistenSync?.(); unlistenSyn
     <div v-if="updateReadyDialog" class="modal-backdrop" @click.self="updateReadyDialog = false"><div class="modal"><button class="modal-close" @click="updateReadyDialog = false">×</button><h2>{{ t('update.readyTitle') }}</h2><div class="modal-body"><span class="modal-symbol info">i</span><p>{{ t('update.readyMessage', { version: updateVersion }) + (clientRunning || serverRunning ? '\n' + t('update.readyRunningNote') : '') }}</p></div><div class="modal-actions"><button @click="updateReadyDialog = false">{{ t('update.later') }}</button><button class="primary" @click="restartToUpdate">{{ t('update.restart') }}</button></div></div></div>
     <div v-if="settingsDialog" class="modal-backdrop" @click.self="settingsDialog = false"><div class="modal"><button class="modal-close" @click="settingsDialog = false">×</button><h2>{{ t('settings.title') }}</h2><div class="settings-form"><label><span>{{ t('settings.language') }}</span><select :value="locale" @change="onLocaleChange($event)"><option value="en">English</option><option value="zh">中文</option></select></label><label><span>{{ t('settings.theme') }}</span><select :value="theme" @change="onThemeChange($event)"><option value="light">{{ t('settings.light') }}</option><option value="dark">{{ t('settings.dark') }}</option></select></label></div><p class="settings-note">{{ t('settings.engineNote') }}</p><div class="modal-actions"><button class="primary" @click="settingsDialog = false">{{ t('common.confirm') }}</button></div></div></div>
     <div v-if="nicDialog" class="modal-backdrop"><div class="modal nic-modal"><h2>{{ t('nic.title') }}</h2><p class="nic-hint">{{ t('nic.hint') }}</p><div class="nic-list"><label v-for="(nic, index) in interfaces" :key="nic.ip" class="nic-option"><input type="radio" :value="index" v-model="nicSelected" /><span class="nic-name">{{ nic.interfaceName }}</span><span class="nic-ip">{{ nic.ip }}</span><span class="nic-speed">{{ nic.speedMbps ? nic.speedMbps + ' Mbps' : t('nic.speedUnknown') }}</span></label></div><div class="modal-actions"><button class="primary" @click="nicDialog = false; applyNic(nicSelected, true)">{{ t('nic.confirm') }}</button><button @click="nicDialog = false">{{ t('nic.cancel') }}</button></div></div></div>
-    <div v-if="aboutDialog" class="modal-backdrop" @click.self="aboutDialog = false"><div class="modal about-modal"><button class="modal-close" @click="aboutDialog = false">×</button><div class="about-header"><img class="about-logo" :src="appIcon" alt="LinkGauge" /><div><h2>LinkGauge</h2><p class="about-intro">{{ t('about.intro') }}</p></div></div><dl class="about-rows"><div class="about-row"><dt>{{ t('about.version') }}</dt><dd class="about-version"><span>v{{ appInfo.version }}</span><button class="about-link" :disabled="updateBusy" @click="checkForUpdate()">{{ updateStage === 'ready' ? t('update.restart') : t('update.check') }}</button></dd></div><div class="about-row"><dt>{{ t('about.commit') }}</dt><dd><code>{{ appInfo.commit }}</code></dd></div><div class="about-row"><dt>{{ t('about.author') }}</dt><dd>KISSMonX</dd></div><div class="about-row"><dt>{{ t('about.project') }}</dt><dd><button class="about-link" :title="APP_PROJECT_URL" @click="openLink(APP_PROJECT_URL)">github</button></dd></div></dl><div v-if="updateStatusText" class="about-update"><span>{{ updateStatusText }}</span><div v-if="updateStage === 'downloading' && updateProgress > 0" class="about-update-bar"><i :style="{ width: updateProgress + '%' }"></i></div></div><div class="about-actions"><button class="primary" @click="openLink(APP_ISSUES_URL)">{{ t('about.feedback') }}</button></div><p class="about-engine">{{ t('about.engine') }}</p></div></div>
+    <div v-if="aboutDialog" class="modal-backdrop" @click.self="aboutDialog = false"><div class="modal about-modal"><button class="modal-close" @click="aboutDialog = false">×</button><div class="about-header"><img class="about-logo" :src="appIcon" alt="LinkGauge" /><div><h2>LinkGauge</h2><p class="about-intro">{{ t('about.intro') }}</p></div></div><dl class="about-rows"><div class="about-row"><dt>{{ t('about.version') }}</dt><dd class="about-version"><span>v{{ appInfo.version }}</span><button class="about-link" :disabled="updateBusy" @click="onUpdateAction">{{ updateActionLabel }}</button></dd></div><div class="about-row"><dt>{{ t('about.commit') }}</dt><dd><code>{{ appInfo.commit }}</code></dd></div><div class="about-row"><dt>{{ t('about.author') }}</dt><dd>KISSMonX</dd></div><div class="about-row"><dt>{{ t('about.project') }}</dt><dd><button class="about-link" :title="APP_PROJECT_URL" @click="openLink(APP_PROJECT_URL)">github</button></dd></div></dl><div v-if="updateStatusText" class="about-update"><span>{{ updateStatusText }}</span><div v-if="updateStage === 'downloading' && updateProgress > 0" class="about-update-bar"><i :style="{ width: updateProgress + '%' }"></i></div></div><div class="about-actions"><button class="primary" @click="openLink(APP_ISSUES_URL)">{{ t('about.feedback') }}</button></div><p class="about-engine">{{ t('about.engine') }}</p></div></div>
   </div>
 </template>
