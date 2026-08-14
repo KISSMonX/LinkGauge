@@ -1,7 +1,7 @@
 {
   "name": "linkgauge",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cross-platform network performance desktop GUI — Ping, TCP, and UDP testing with a pure-Rust iperf3-compatible engine",
   "license": "MIT",
   "author": "houming",

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/KISSMonX/LinkGauge/compare/v0.3.0...v0.4.0) (2026-08-14)
+
+
+### Features
+
+* add MIT LICENSE and package metadata ([cb06227](https://github.com/KISSMonX/LinkGauge/commit/cb06227223443c497d47e22e7da067b1ff434b70))
+* 关于页新增检查更新，下载后重启即完成升级 ([f65cd14](https://github.com/KISSMonX/LinkGauge/commit/f65cd14d4680cefe689a73b453261ce1ae1ce3ad))
+* 关于页新增检查更新，下载后重启即完成升级 ([65e2482](https://github.com/KISSMonX/LinkGauge/commit/65e24821b56c0c24cbc9bd395395d004f3543a31))
+* 更新改为发现即提示，下载与安装交由用户确认 ([ce8320b](https://github.com/KISSMonX/LinkGauge/commit/ce8320b43ba1abc5dc5f29877052ba849be46b29))
+
+
+### Bug Fixes
+
+* stop server promptly on Linux ([3b6b52c](https://github.com/KISSMonX/LinkGauge/commit/3b6b52c80581c87dbfe87d6b04dac80eb55761ad))
+* stop server promptly on Linux ([d6d0dd8](https://github.com/KISSMonX/LinkGauge/commit/d6d0dd84d5ea65cad87128f9e4a43c7f2f6b211e))
+
 ## [0.3.0](https://github.com/KISSMonX/LinkGauge/compare/v0.2.1...v0.3.0) (2026-08-14)
 
 
