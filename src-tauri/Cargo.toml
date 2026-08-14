@@ -19,6 +19,11 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
+# 应用内更新：向 GitHub Releases 的 latest.json 查询新版本，下载并校验 minisign 签名。
+# 公钥在 tauri.conf.json 的 plugins.updater.pubkey，私钥只存在于 CI secret 中。
+tauri-plugin-updater = "2"
+# 安装完更新后重启进程（updater 自身不提供 relaunch）
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "fs", "sync", "time", "macros"] }

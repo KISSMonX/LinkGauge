@@ -35,6 +35,8 @@
   "dependencies": {
     "@tauri-apps/api": "^2.7.0",
     "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "chart.js": "^4.5.0",
     "vue": "^3.5.18",
     "vue-chartjs": "^5.3.2"

@@ -35,3 +35,18 @@ It is built with `default-features = false` plus the `ring`, `flate2` and `rsa`
 features, so the cryptography backend is [ring](https://github.com/briansmith/ring)
 (ISC-style license) rather than aws-lc-rs. See the Cargo.lock for exact versions
 of these and their transitive dependencies.
+
+## tauri-plugin-updater / tauri-plugin-process
+
+The in-app updater ("Check for Updates" in the About dialog) uses the official
+Tauri plugins [`tauri-plugin-updater`](https://github.com/tauri-apps/plugins-workspace)
+and `tauri-plugin-process`, together with their JavaScript bindings
+`@tauri-apps/plugin-updater` and `@tauri-apps/plugin-process`.
+
+- Copyright: Tauri Programme within The Commons Conservancy
+- License: MIT OR Apache-2.0
+
+Update packages are verified with
+[minisign-verify](https://github.com/jedisct1/rust-minisign-verify) (MIT) against
+the public key embedded in `src-tauri/tauri.conf.json`; an unsigned or
+mismatched package is rejected before installation.
