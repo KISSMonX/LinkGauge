@@ -29,20 +29,33 @@ jobs:
 
       # Cargo.lock 包含多个同名 version 字段，release-please 的 TOML updater 无法只命中
       # 根包；让 Cargo 在机器人生成的 release 分支上按 Cargo.toml 自行同步，再提交回该 PR。
+      - name: Resolve open release PR branch
+        id: release-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --base "$GITHUB_REF_NAME" --json headRefName --jq '[.[] | select(.headRefName | startswith("release-please--branches--"))] | first | .headRefName // ""')"
+          if [ -z "$branch" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
       - name: Checkout release PR branch
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        if: ${{ steps.release-pr.outputs.found == 'true' }}
         uses: actions/checkout@v4
         with:
-          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          ref: ${{ steps.release-pr.outputs.branch }}
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        if: ${{ steps.release-pr.outputs.found == 'true' }}
 
       - name: Sync Cargo.lock release version
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        if: ${{ steps.release-pr.outputs.found == 'true' }}
         env:
-          RELEASE_PR_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          RELEASE_PR_BRANCH: ${{ steps.release-pr.outputs.branch }}
         run: |
           cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 > /dev/null
           if git diff --quiet -- src-tauri/Cargo.lock; then
