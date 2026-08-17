@@ -242,12 +242,12 @@ clippy 以及 Rust 测试。测试只使用回环 socket，runner 无需外网�
 `.github/workflows/release-please.yml` 在自上个标签以来的提交包含 `feat:`、`fix:` 或破坏性
 变更时自动开 release PR——PR 会同步升级 `Cargo.toml`、`Cargo.lock`、`package.json`、
 `package-lock.json` 与 `tauri.conf.json` 中的版本号，并重写 `CHANGELOG.md`。合并该 PR 即自动
-创建 `v*` 标签和以 changelog 为正文的 **草稿** Release。版本语义遵循 Conventional Commits：
+创建 `v*` 标签和以 changelog 为正文的**已发布** Release。版本语义遵循 Conventional Commits：
 `fix:` → patch、`feat:` → minor、破坏性变更（`!`）→ major。请勿手动推送 `v*` 标签或手改
 版本号文件——版本与标签均由 release-please 托管。
 
 `.github/workflows/release.yml` 在该标签（或手动触发）时构建各平台安装包，全部产物汇总到
-同一个 **草稿** Release：
+同一个已发布 Release：
 
 | 任务 | Runner | Rust target | 产物 |
 | --- | --- | --- | --- |
@@ -258,9 +258,12 @@ clippy 以及 Rust 测试。测试只使用回环 socket，runner 无需外网�
 | Linux arm64 | `ubuntu-22.04-arm` | `aarch64-unknown-linux-gnu` | AppImage、DEB |
 
 每个任务都显式传 `--bundles`，因为 `tauri.conf.json` 的 `bundle.targets` 固定为 `nsis`
-（面向本地 Windows 构建）。`fail-fast` 已关闭，单个平台失败不影响其余平台出包。不需要配置
-任何 secret——自动注入的 `GITHUB_TOKEN` 即可——但产物未做代码签名，[安装](#安装)一节的
-SmartScreen / Gatekeeper 说明依然适用。构建完成后在 Releases 页面手动发布该草稿即可。
+（面向本地 Windows 构建）。`fail-fast` 已关闭，单个平台失败不影响其余平台出包。自动注入的
+`GITHUB_TOKEN` 负责上传产物；updater 包还必须配置仓库 Secret
+`TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，供 Tauri 生成分离签名
+和 `latest.json`。updater 签名不等同于操作系统代码签名，因此[安装](#安装)一节的
+SmartScreen / Gatekeeper 说明依然适用。Release 在 release PR 合并时立即公开，随后保持短暂
+空白，直到矩阵构建完成并上传安装包。
 
 > Linux arm64 任务使用 GitHub 托管的 `ubuntu-22.04-arm` runner，**仅公开仓库免费**。私有
 > 仓库需要包含 ARM runner 的付费方案，或自建 arm64 self-hosted runner；都没有的话请删掉该

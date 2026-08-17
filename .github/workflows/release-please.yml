@@ -3,8 +3,8 @@ name: Release Please
 # 合并到 master 后自动评估是否发版（release-please-action@v4，manifest 模式）：
 # - 自上个标签以来有 feat/fix/breaking 提交时，自动开 release PR
 #   （按 Conventional Commits 升版本号 + 生成/更新 CHANGELOG.md）
-# - 合并该 PR 时自动打 v* 标签并创建草稿 Release（正文即 changelog）
-# - 标签随后触发 release.yml 构建各平台安装包并上传到该草稿
+# - 合并该 PR 时自动打 v* 标签并创建已发布 Release（正文即 changelog）
+# - 标签随后触发 release.yml 构建各平台安装包并上传到该 Release
 # 版本语义：fix→patch、feat→minor、breaking!→major（见 release-please-config.json）
 on:
   push:

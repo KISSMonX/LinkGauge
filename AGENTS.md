@@ -229,8 +229,8 @@ clients that already trust the old public key will reject packages signed by a n
 rotation requires shipping a build with the new pubkey *before* any release is signed with it.
 
 `latest.json` is fetched from `releases/latest/download/`, which only resolves for a
-**published** release — the draft that `release.yml` produces has to be published before
-clients see the update.
+**published** release. release-please publishes the Release when its release PR merges, so
+the endpoint resolves while `release.yml` builds and uploads the updater artifacts.
 
 **This also breaks local packaging.** `npm run tauri build` on a developer machine hits the
 same "public key but no private key" failure, because the signing key is a CI secret. To
