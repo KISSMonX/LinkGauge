@@ -228,6 +228,12 @@ repo>`. The private key never enters the repository, and it must not be rotated 
 clients that already trust the old public key will reject packages signed by a new one, so a
 rotation requires shipping a build with the new pubkey *before* any release is signed with it.
 
+`Cargo.lock` contains an array of packages with many `version` fields, so release-please's
+generic TOML updater cannot reliably target only LinkGauge's root package. After
+release-please creates or updates its PR, `release-please.yml` checks out that generated
+branch, runs `cargo metadata` to synchronize the lockfile from `Cargo.toml`, and commits the
+result back to the same PR. Keep this post-processing step when changing release automation.
+
 `latest.json` is fetched from `releases/latest/download/`, which only resolves for a
 **published** release. release-please publishes the Release when its release PR merges, so
 the endpoint resolves while `release.yml` builds and uploads the updater artifacts.
