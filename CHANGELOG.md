@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.1](https://github.com/KISSMonX/LinkGauge/compare/v0.4.0...v0.4.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* rotate updater signing key ([032315f](https://github.com/KISSMonX/LinkGauge/commit/032315f7d0963c5e496cb217792efb77363168a4))
+* rotate updater signing key ([09eb880](https://github.com/KISSMonX/LinkGauge/commit/09eb880b2f670952a253e9e5713a908b4109c15f))
+* sync Cargo.lock package version ([2bfb29d](https://github.com/KISSMonX/LinkGauge/commit/2bfb29d47113151b3fbdf3d42213df3181d533bc))
+* sync Cargo.lock package version ([b2cddbc](https://github.com/KISSMonX/LinkGauge/commit/b2cddbc41a1a1f7d786f910e0012c7802ea09a68))
+
 ## [0.4.0](https://github.com/KISSMonX/LinkGauge/compare/v0.3.0...v0.4.0) (2026-08-14)
 
 
