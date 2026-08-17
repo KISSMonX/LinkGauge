@@ -1,17 +1,31 @@
 name: Release
 
-# 打 v* 标签时构建各平台安装包，汇总到同一个 GitHub Release。
-# 标签由 release-please 自动创建（见 release-please.yml），不要手动打标签；
-# 合并 release PR 时它已建好 tag 和 Release，tauri-action 会找到它并上传产物。
+# release-please 创建 v* 标签和已发布 Release 后，显式调用本工作流构建各平台安装包；
+# 也可通过 workflow_dispatch + tag_name 对已有标签手动重跑。不要手动创建标签。
+# tauri-action 按 tag_name 找到 release-please 已创建的 Release 并上传产物。
 #
 # Release 是「先公开、后补产物」：合并 release PR 的瞬间它就可见，安装包要等这里
 # 的矩阵构建跑完（约十几分钟）才挂上去。不要为了盖住这个空窗期把 Release 改成
-# 草稿——草稿 Release 不会创建 git tag，本工作流根本不会被触发，release-please
+# 草稿——草稿 Release 不会创建 git tag，release_created 也不会成立，构建 job 不会运行；release-please
 # 也会因为看不见自己发过的版本而反复开出错误版本号的 release PR。详见 AGENTS.md。
 on:
-  push:
-    tags: ['v*']
+  workflow_call:
+    inputs:
+      tag_name:
+        description: Existing v* tag created by release-please
+        required: true
+        type: string
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing v* tag to build
+        required: true
+        type: string
 
 jobs:
   bundle:
@@ -60,6 +74,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name }}
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -101,11 +117,10 @@ jobs:
         with:
           # release-please 合并 release PR 时已经建好了同名 tag 和 Release，
           # tauri-action 按 tagName 找到它并把安装包传上去。下面的 releaseName /
-          # releaseDraft 只在 Release 不存在时才生效（例如对旧 tag 手动
-          # workflow_dispatch），取值要和 release-please 的命名一致，
+          # releaseDraft 只在 Release 不存在时才生效，取值要和 release-please 的命名一致，
           # 否则会多出一个名字不同、看起来像重复发布的 Release。
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ github.ref_name }}
+          tagName: ${{ inputs.tag_name }}
+          releaseName: ${{ inputs.tag_name }}
           releaseDraft: false
           prerelease: false
           # 各平台产物汇总进同一个 latest.json（updater 的清单）；后跑完的 job 会合并进已有文件

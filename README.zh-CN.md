@@ -246,8 +246,10 @@ clippy 以及 Rust 测试。测试只使用回环 socket，runner 无需外网�
 `fix:` → patch、`feat:` → minor、破坏性变更（`!`）→ major。请勿手动推送 `v*` 标签或手改
 版本号文件——版本与标签均由 release-please 托管。
 
-`.github/workflows/release.yml` 在该标签（或手动触发）时构建各平台安装包，全部产物汇总到
-同一个已发布 Release：
+release-please 创建标签和 Release 后，`.github/workflows/release-please.yml` 会显式调用可复用的
+`.github/workflows/release.yml`，构建各平台安装包并汇总到同一个已发布 Release。必须显式调用，
+因为工作流 `GITHUB_TOKEN` 创建的事件不会再启动第二条工作流。已有标签可通过
+`workflow_dispatch` 的 `tag_name` 参数手动重跑同一构建。
 
 | 任务 | Runner | Rust target | 产物 |
 | --- | --- | --- | --- |
