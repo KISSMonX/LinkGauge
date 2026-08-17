@@ -230,7 +230,7 @@ rotation requires shipping a build with the new pubkey *before* any release is s
 
 `Cargo.lock` contains an array of packages with many `version` fields, so release-please's
 generic TOML updater cannot reliably target only LinkGauge's root package. After
-release-please creates or updates its PR, `release-please.yml` checks out that generated
+release-please runs, `release-please.yml` resolves any open bot release PR, checks out its
 branch, runs `cargo metadata` to synchronize the lockfile from `Cargo.toml`, and commits the
 result back to the same PR. Keep this post-processing step when changing release automation.
 
