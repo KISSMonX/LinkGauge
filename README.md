@@ -243,13 +243,13 @@ Versions and tags are managed by [release-please](https://github.com/googleapis/
 `.github/workflows/release-please.yml` opens a release PR whenever commits since the last tag
 contain `feat:`, `fix:` or breaking changes — the PR bumps the version in `Cargo.toml`,
 `Cargo.lock`, `package.json`, `package-lock.json` and `tauri.conf.json`, and rewrites
-`CHANGELOG.md`. Merging that PR creates the `v*` tag and a **draft** GitHub Release whose body
-is the changelog. Versioning follows Conventional Commits: `fix:` → patch, `feat:` → minor,
+`CHANGELOG.md`. Merging that PR creates the `v*` tag and a **published** GitHub Release whose
+body is the changelog. Versioning follows Conventional Commits: `fix:` → patch, `feat:` → minor,
 breaking changes (`!`) → major. Never push a `v*` tag or hand-edit the version files —
 release-please owns both.
 
 `.github/workflows/release.yml` builds on that tag (or manual dispatch) and uploads every
-artifact into the same **draft** Release:
+artifact into the same published Release:
 
 | Job | Runner | Rust target | Artifacts |
 | --- | --- | --- | --- |
@@ -261,9 +261,12 @@ artifact into the same **draft** Release:
 
 Each job passes `--bundles` explicitly because `bundle.targets` in `tauri.conf.json` is pinned
 to `nsis` for local Windows builds. `fail-fast` is off, so one platform failing still produces
-the others. No secrets are required — the automatic `GITHUB_TOKEN` is enough — but nothing is
-code-signed, so the SmartScreen and Gatekeeper notes under [Installation](#installation)
-apply. When the build finishes, publish the draft from the Releases page.
+the others. The automatic `GITHUB_TOKEN` uploads the artifacts; updater packages additionally
+require the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository
+secrets so Tauri can create their detached signatures and `latest.json`. These updater
+signatures are not operating-system code signing, so the SmartScreen and Gatekeeper notes
+under [Installation](#installation) still apply. The Release is public as soon as its release
+PR merges and remains empty until the matrix build finishes and uploads the packages.
 
 > The Linux arm64 job uses a GitHub-hosted `ubuntu-22.04-arm` runner, which is free for public
 > repositories only. On a private repository it needs a paid plan with ARM runners, or a
