@@ -468,6 +468,69 @@ Against servers older than 3.7 the `bidirectional` parameter is silently ignored
 
 ## TODO
 
+### CLI Mode（终端模式）
+
+支持纯终端模式运行，无需 GUI —— 在服务器上、SSH 远程会话中、或者本地命令行里直接
+启动客户端或服务端测试。Terminal UI 参考 GUI 的布局，交互尽量零门槛。
+
+**设计目标：**
+
+- **开箱即用，零记忆成本。** 用户应能直接输入 `linkgauge serve` 或
+  `linkgauge test` 就开始测试，不传参数就使用合理的默认值。
+- **TUI 交互式引导。** 不带参数运行时进入交互式配置向导（类似 `npm init`），
+  一步一步引导用户完成参数配置，无需记忆命令行标志。
+- **TUI 仪表盘。** 运行时在终端中渲染一个与 GUI 布局一致的仪表盘
+  （基于 [ratatui](https://ratatui.rs/) + [crossterm](https://docs.rs/crossterm/)）：
+  - 左侧：当前配置摘要
+  - 中央：实时带宽 / 抖动曲线（ASCII sparkline）
+  - 右侧：任务队列 + 实时日志流
+  - 底部：状态栏（运行时间、统计摘要、快捷键提示）
+- **与服务端 / GUI 互操作。** CLI 客户端可以测试 GUI 启动的服务端，反之亦然 ——
+  引擎是同一个 riperf3，协议不变。
+- **脚本友好。** 支持 `--json` 输出模式，适合集成到 CI / 脚本中。
+
+**命令概览：**
+
+```bash
+# 服务端
+linkgauge serve                     # 交互式引导，或默认端口 5201 在所有适配器上监听
+linkgauge serve --port 8080         # 指定端口
+linkgauge serve --bind 10.0.0.1     # 绑定到特定 IP
+linkgauge serve --json              # JSON 结构化输出（脚本用，无 TUI）
+linkgauge serve --auth              # 启用认证（交互式输入密钥路径）
+
+# 客户端
+linkgauge test                      # 交互式引导：选协议 → 填地址 → 配置参数 → 运行
+linkgauge test --server 10.0.0.1    # 快速 TCP 单流测试（-t 10）
+linkgauge test --quick              # 一键 ping + TCP 单流快速诊断
+linkgauge test --json               # JSON 输出模式
+linkgauge test --config config.json # 从 GUI 导出的配置文件加载参数
+```
+
+**快捷键（TUI 内）：**
+
+| 按键 | 操作 |
+|------|------|
+| `q` / `Esc` | 停止当前测试并退出 |
+| `s` | 停止当前测试（保留 TUI） |
+| `r` | 重新运行上一次测试 |
+| `l` | 切换语言（中文 / English） |
+| `1`–`9` | 切换日志级别过滤 |
+
+**实现计划（分阶段）：**
+
+1. **解析层：** 添加 `clap` 依赖，在 `main.rs` 中判断 `--cli` 或子命令
+   (`serve` / `test`) 来分流 GUI 和 CLI 路径。
+2. **引擎复用：** 将 `runner.rs`、`client.rs`、`server.rs`、`ping.rs` 中的
+   核心逻辑与 Tauri 依赖解耦，提取为纯 `tokio` 任务，GUI 和 CLI 共享同一
+   引擎层。
+3. **TUI 框架：** 搭建 `ratatui` 布局骨架（左右分栏 + 底部状态条），
+   实现日志流、指标曲线、队列状态面板。
+4. **交互式向导：** 使用 `dialoguer` 实现逐步配置引导，
+   覆盖服务端监听参数、客户端测试参数、认证等。
+5. **JSON 输出模式：** 非交互模式下输出结构化 JSON 行，方便 `jq` / 脚本解析。
+6. **CI / 发布：** 在 release workflow 中增加 CLI 二进制文件的构建和发布。
+
 ### Backlog
 
 - [x] SSH support (operate the peer iperf3 server on a remote host over SSH)
