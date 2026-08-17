@@ -4,7 +4,8 @@ name: Release Please
 # - 自上个标签以来有 feat/fix/breaking 提交时，自动开 release PR
 #   （按 Conventional Commits 升版本号 + 生成/更新 CHANGELOG.md）
 # - 合并该 PR 时自动打 v* 标签并创建已发布 Release（正文即 changelog）
-# - 标签随后触发 release.yml 构建各平台安装包并上传到该 Release
+# - release_created=true 时显式调用 release.yml，构建各平台安装包并上传到该 Release
+#   （GITHUB_TOKEN 创建的 tag 不会再触发另一条 push 工作流，不能依赖 tag 二次触发）
 # 版本语义：fix→patch、feat→minor、breaking!→major（见 release-please-config.json）
 on:
   push:
@@ -17,6 +18,9 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -66,3 +70,11 @@ jobs:
           git add src-tauri/Cargo.lock
           git commit -m "chore: sync Cargo.lock release version"
           git push origin "HEAD:${RELEASE_PR_BRANCH}"
+
+  build-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit

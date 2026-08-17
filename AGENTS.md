@@ -183,7 +183,13 @@ plus the GitHub Release that `release.yml` then populates with installers. **Nev
 `v*` tag or bump versions by hand** — a manual tag will conflict with the next release PR, and
 a version bump commit in a normal PR is a merge-conflict mine for the automation. If a release
 must be cut immediately (no `feat:`/`fix:` commits), use `workflow_dispatch` on `release.yml`
-with an existing tag or a `release-as` in a release PR instead.
+with its `tag_name` set to an existing tag, or use a `release-as` in a release PR instead.
+
+`release-please.yml` calls `release.yml` as a reusable workflow when the action reports
+`release_created=true`. Keep that explicit call: tags created with the workflow's
+`GITHUB_TOKEN` do not trigger another workflow run, so an `on: push: tags` handoff silently
+leaves the Release without installers. `workflow_dispatch` remains the recovery path for an
+existing tag.
 
 ### Never make the Release a draft
 
@@ -192,8 +198,9 @@ with an existing tag or a `release-as` in a release PR instead.
 attached — but it breaks the pipeline in two ways at once:
 
 1. **A draft Release has no git tag.** GitHub only creates the `v*` ref when the release is
-   published, so `release.yml` (`on: push: tags`) never fires. Installers only ever got built
-   because someone published the draft by hand.
+   published, so release-please does not report `release_created=true` and the reusable
+   `release.yml` build job never runs. Installers only ever got built because someone
+   published the draft by hand.
 2. **release-please cannot see its own draft releases.** Its "what did I release last?" lookup
    skips drafts, so every subsequent run finds no previous release, walks the entire history
    from the first commit, and opens a release PR with a version derived from scratch.

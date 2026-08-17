@@ -248,8 +248,11 @@ body is the changelog. Versioning follows Conventional Commits: `fix:` → patch
 breaking changes (`!`) → major. Never push a `v*` tag or hand-edit the version files —
 release-please owns both.
 
-`.github/workflows/release.yml` builds on that tag (or manual dispatch) and uploads every
-artifact into the same published Release:
+After release-please creates that tag and Release, `.github/workflows/release-please.yml`
+explicitly invokes the reusable `.github/workflows/release.yml` and uploads every artifact
+into the same published Release. This explicit call is required because events created with
+the workflow's `GITHUB_TOKEN` do not start a second workflow. For an existing tag, the same
+build can be rerun manually with `workflow_dispatch` and its `tag_name` input.
 
 | Job | Runner | Rust target | Artifacts |
 | --- | --- | --- | --- |
