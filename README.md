@@ -1,7 +1,7 @@
 # LinkGauge
 
 [![CI](https://github.com/KISSMonX/LinkGauge/actions/workflows/ci.yml/badge.svg)](https://github.com/KISSMonX/LinkGauge/actions/workflows/ci.yml)
-[![Release](https://github.com/KISSMonX/LinkGauge/actions/workflows/release.yml/badge.svg)](https://github.com/KISSMonX/LinkGauge/actions/workflows/release.yml)
+[![Release](https://github.com/KISSMonX/LinkGauge/actions/workflows/release-please.yml/badge.svg)](https://github.com/KISSMonX/LinkGauge/actions/workflows/release-please.yml)
 [![Latest release](https://img.shields.io/github/v/release/KISSMonX/LinkGauge?display_name=tag&sort=semver)](https://github.com/KISSMonX/LinkGauge/releases)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20x64%20%7C%20macOS%20x64%2Farm64%20%7C%20Linux%20x64%2Farm64-blue)](#installation)
 
