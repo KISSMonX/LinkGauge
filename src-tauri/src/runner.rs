@@ -78,7 +78,7 @@ pub async fn get_server_status(
     session_guard.remove(&stale_id);
     *server_guard = None;
     // 先释放 sessions / server_session 锁,再拿 session_done,
-    // 避免与 spawn 清理（先拿 session_done 再拿 sessions）形成交叉死锁
+    // 与 spawn 清理保持同一取锁顺序（sessions → session_done）,避免交叉死锁
     drop(session_guard);
     drop(server_guard);
     state.session_done.lock().await.remove(&stale_id);
@@ -137,11 +137,13 @@ pub async fn start_test<R: tauri::Runtime>(
                 locale_handle,
             )
             .await;
+            // 顺序不能颠倒：stop_test 被唤醒后会核对 sessions 是否已摘除该会话,
+            // 先通知再摘除会留下一个窗口,让它把已退出的任务误判为「未在 5 秒内退出」。
+            sessions.lock().await.remove(&spawned_id);
+            session_done.lock().await.remove(&spawned_id);
             // 始终通知 stop_test：持有自己的 Arc 克隆，不依赖 map.remove 的返回值
             // （stop_test 可能已经先一步从 map 中取走了 Notify，此时 remove 返回 None）
             done.notify_one();
-            session_done.lock().await.remove(&spawned_id);
-            sessions.lock().await.remove(&spawned_id);
         });
     } else if request.mode == "server" || request.task_id == "server" {
         let (tx, rx) = watch::channel(None);
@@ -196,10 +198,12 @@ pub async fn start_test<R: tauri::Runtime>(
                     *server_guard = None;
                 }
             }
+            // 顺序不能颠倒：stop_test 被唤醒后会核对 sessions 是否已摘除该会话,
+            // 先通知再摘除会留下一个窗口,让它把已退出的任务误判为「未在 5 秒内退出」。
+            sessions.lock().await.remove(&spawned_id);
+            session_done.lock().await.remove(&spawned_id);
             // 始终通知 stop_test（持有自己的 Arc 克隆，不依赖 remove 返回值）
             done.notify_one();
-            session_done.lock().await.remove(&spawned_id);
-            sessions.lock().await.remove(&spawned_id);
         });
     } else {
         let (tx, rx) = watch::channel(None);
@@ -217,10 +221,12 @@ pub async fn start_test<R: tauri::Runtime>(
         let session_done = state.session_done.clone();
         tauri::async_runtime::spawn(async move {
             client::run_engine_client(app, spawned_id.clone(), request, rx, locale_handle).await;
+            // 顺序不能颠倒：stop_test 被唤醒后会核对 sessions 是否已摘除该会话,
+            // 先通知再摘除会留下一个窗口,让它把已退出的任务误判为「未在 5 秒内退出」。
+            sessions.lock().await.remove(&spawned_id);
+            session_done.lock().await.remove(&spawned_id);
             // 始终通知 stop_test（持有自己的 Arc 克隆，不依赖 remove 返回值）
             done.notify_one();
-            session_done.lock().await.remove(&spawned_id);
-            sessions.lock().await.remove(&spawned_id);
         });
     }
     Ok(session_id)
@@ -349,10 +355,12 @@ pub async fn start_test_queue<R: tauri::Runtime>(
                 *queue_guard = None;
             }
         }
+        // 顺序不能颠倒：stop_test 被唤醒后会核对 sessions 是否已摘除该会话,
+        // 先通知再摘除会留下一个窗口,让它把已退出的任务误判为「未在 5 秒内退出」。
+        sessions.lock().await.remove(&spawned_id);
+        session_done.lock().await.remove(&spawned_id);
         // 始终通知 stop_test（持有自己的 Arc 克隆，不依赖 remove 返回值）
         done.notify_one();
-        session_done.lock().await.remove(&spawned_id);
-        sessions.lock().await.remove(&spawned_id);
     });
     Ok(session_id)
 }
@@ -396,11 +404,18 @@ pub async fn stop_test(state: State<'_, AppState>, session_id: String) -> Result
     // stop_test 的完成语义必须是「任务已退出」,不能只是「信号已发送」；否则前端
     // 会先显示已停止并允许重启,而后端单例仍在清理,随即误报"服务端已在运行"。
     // 通过 Notify 事件通知等待,不再轮询 sessions map。
+    // 先取出通知句柄并立即释放 session_done 锁：match 的 scrutinee 临时值会活到
+    // 整个 match 结束,直接在此处 lock 会把锁一路持到下面的 await,任务清理时
+    // 抢不到 session_done,反而永远发不出完成通知。
     let done = state.session_done.lock().await.remove(&session_id);
-    if let Some(done) = done {
-        let _ = tokio::time::timeout(Duration::from_secs(5), done.notified()).await;
-    }
-    if !sessions.lock().await.contains_key(&session_id) {
+    let exited = match done {
+        Some(done) => tokio::time::timeout(Duration::from_secs(5), done.notified())
+            .await
+            .is_ok(),
+        // 通知句柄已被任务自己摘除,说明清理跑完了（sessions 更早一步被摘除）
+        None => !sessions.lock().await.contains_key(&session_id),
+    };
+    if exited {
         return Ok(());
     }
     Err(tr(
