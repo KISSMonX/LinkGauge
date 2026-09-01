@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.2](https://github.com/KISSMonX/LinkGauge/compare/v0.4.1...v0.4.2) (2026-09-01)
+
+
+### Bug Fixes
+
+* 停止测试后按注册表清理完成再通知 ([09f394c](https://github.com/KISSMonX/LinkGauge/commit/09f394c0d371e56e61f1fb7739c9628d2e093603))
+* 停止测试后按注册表清理完成再通知 ([0d64080](https://github.com/KISSMonX/LinkGauge/commit/0d640808fb4637673c6daa16c5e016afc96cdb93))
+
 ## [0.4.1](https://github.com/KISSMonX/LinkGauge/compare/v0.4.0...v0.4.1) (2026-08-17)
 
 
